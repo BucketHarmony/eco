@@ -1,0 +1,12 @@
+column                     min         max        mean
+grazers               293.0000   3477.0000   1283.2705
+hunters                20.0000     62.0000     44.3809
+trees                  12.0000    603.0000    364.4359
+grass_mean              0.1000      0.8837      0.5232
+shrub_mean              0.0177      0.6847      0.4930
+moisture_mean          60.4757    255.0000    229.0696
+fertility_mean        104.5010    215.9972    150.6405
+detritus_total          0.0000 211057.4844 110061.0330
+temperature            -5.2024     26.9143     10.6191
+hunter_immigrants       0.0000      0.0000      0.0000
+first extinction: none

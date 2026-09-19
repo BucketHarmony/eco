@@ -1,5 +1,6 @@
 //! Sweep harness and shared-check tests: a sweep cell must equal `ecosim run --set …` + `ecosim check`.
 
+use ecosim::check::diff_runs;
 use ecosim::check::{check_run, evaluate, parse_series, CheckReport, Series};
 use ecosim::output::run;
 use ecosim::sweep::{baseline, margin_table, sweep, ParamSpec, SweepConfig};
@@ -88,7 +89,10 @@ fn fresh_s42_matches_committed_manifest() {
             got.insert(rel, sha256_hex(&fs::read(&f).unwrap()));
         }
     }
-    assert_eq!(got.len(), 1 + 201 * 7);
+    // 8 files per snapshot since format_version 2 added state.bin. The 1 + 201 × 7 entries that
+    // predate it were left untouched when the manifest was regenerated (DECISIONS.md, shot 7).
+    assert_eq!(got.len(), 1 + 201 * 8);
+    assert_eq!(want.keys().filter(|k| k.ends_with("/state.bin")).count(), 201);
     let differing: Vec<&String> = want.keys().chain(got.keys()).filter(|k| want.get(*k) != got.get(*k)).collect();
     assert!(
         differing.is_empty(),
@@ -220,4 +224,46 @@ fn sweep_reports_extinctions_by_cause() {
     assert!(section.contains("- cells in which a species reaches 0 at any tick: 1 of 2"), "{section}");
     assert!(section.contains("- failing cells with no extinction: 1; extinction cells passing every invariant: 0"));
     assert!(section.contains(&format!("| grazers | `starved` | 1 | grazer.energy_cost=5.0_s=4 @{ext} |")), "{section}");
+}
+
+/// Fork at T with no overrides, run to 20000, is byte-identical from T on to the uninterrupted run,
+/// for T in {100, 5000, 12300, 19900} on seeds 1 and 42. The fork copies the parent's rows and
+/// snapshots before T, so the whole run directory matches except `meta.json`, which gains
+/// `forked_from`. The forks go through the CLI.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length runs; run in `cargo test`, not under llvm-cov")]
+fn fork_matches_the_uninterrupted_run_from_the_fork_tick_on() {
+    let exe = env!("CARGO_BIN_EXE_ecosim");
+    let fork_all = |seed: u64, parent: &Path| {
+        std::thread::scope(|s| {
+            for at in [100u32, 5000, 12300, 19900] {
+                s.spawn(move || {
+                    let out = tmp(&format!("fork_s{seed}_at{at}"));
+                    let st = Command::new(exe)
+                        .arg("fork")
+                        .arg(parent)
+                        .args(["--at", &at.to_string(), "--ticks", &(20_000 - at).to_string(), "--out"])
+                        .arg(&out)
+                        .status()
+                        .unwrap();
+                    assert!(st.success(), "fork of seed {seed} at {at} failed");
+                    let diff = diff_runs(parent, &out).unwrap();
+                    assert_eq!(diff, vec!["differs: meta.json".to_string()], "seed {seed}, fork at {at}");
+                    let meta: serde_json::Value =
+                        serde_json::from_slice(&fs::read(out.join("meta.json")).unwrap()).unwrap();
+                    assert_eq!(meta["forked_from"]["tick"], at);
+                    assert_eq!(meta["overrides"], serde_json::json!([]));
+                    fs::remove_dir_all(&out).unwrap();
+                });
+            }
+        });
+    };
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let s1 = tmp("s1_fork_parent");
+            run(Params::load_default(), 1, 20_000, 100, &[], &s1).unwrap();
+            fork_all(1, &s1);
+        });
+        s.spawn(|| fork_all(42, fresh_s42()));
+    });
 }

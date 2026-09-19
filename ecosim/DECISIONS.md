@@ -137,7 +137,7 @@ This section covers the property tests, the coverage floor, the lints, the CI ga
 - **Grids are compared as sorted cell contents plus per-patch counts**, because cell order is an artifact of swap-removal.
 - **Column light is tested with the `params.toml` absorb value (100) and with an arbitrary `u8`.** The SAD's example value 96 is a named regression.
 - **Suitability-shape properties draw strictly increasing breakpoints.** Ties are a separate regression, which pins that a zero-width ramp returns 0.
-- **Snapshot round trip.** Every field a snapshot records reads back, through a test-side reader, as the sim held it at that tick, at the stored precision.
+- **Snapshot round trip.** Every field a snapshot records reads back, through a test-side reader, as the sim held it at that tick, at the stored precision. (Shot 7 replaced this property with "restore steps identically for 500 ticks"; see "Full-state snapshots and fork".)
 - **`--set` round trip.** Each params leaf is set to a random integer in 0..=255, a range that fits every field type. The test asserts that the leaf changed and that no other leaf did.
 - **`evaluate`.** Synthetic series are built to pass every invariant. The property breaks exactly one of 10 violable invariants and asserts that only that one fails. Runtime and run length aren't in the violable set, because they aren't functions of the series values.
 
@@ -162,7 +162,7 @@ All of these are behaviour-preserving, and the manifest is unchanged.
 **Properties I tried to state and couldn't** (or stated only in a weaker form)
 - **"Suitability is monotone on each ramp for any breakpoints."** Tied breakpoints make a zero-width ramp, and the implementation returns 0 at the tie. Stated for strictly increasing breakpoints, plus a tie regression.
 - **"A sweep range has `(hi-lo)/step + 1` values for arbitrary floats."** The implementation adds 1e-9 slack before flooring, so a quotient just below an integer, like 0.3/0.1, still counts the intended endpoint. No closed formula holds over arbitrary floats. Stated over integer multiples of a decimal step, plus a regression for the near-integer case.
-- **"Snapshot → restore gives an identical `Sim`."** A snapshot doesn't store the RNG state, the next id, cooldowns, `dry_ticks`, `trunk_at`, `canopy_cover` or the spatial grids, and it rounds moisture and fertility to `u8`. The files can't restore a sim that steps identically, and adding a restore path would be a format change. Stated instead as "every recorded field reads back as recorded".
+- **"Snapshot → restore gives an identical `Sim`."** A snapshot doesn't store the RNG state, the next id, cooldowns, `dry_ticks`, `trunk_at`, `canopy_cover` or the spatial grids, and it rounds moisture and fertility to `u8`. The files can't restore a sim that steps identically, and adding a restore path would be a format change. Stated instead as "every recorded field reads back as recorded". Shot 7 made that format change (`state.bin`), and the property is now stated in full.
 - **"Light follows the formula with absorb 96."** 96 is the SAD's example, but the configured value is 100. It's tested as one regression case rather than as the property's parameter.
 - **"Incrementally maintained hunter grid equals a rebuild."** The hunter grid is rebuilt from scratch every tick, so this is trivially true for hunters. It's only meaningful, and only stated, for grazers.
 - **"The `check` verdict is a function of the series alone."** The runtime invariant reads wall time from `timing.json`, so a debug run of a passing seed fails it. Stated for every other invariant; the golden test compares the runtime line by name only.
@@ -327,3 +327,69 @@ The series gained columns, so one commit regenerates the following:
 - `tests/data/s42-check.txt`: only the runtime line changed
 
 With the ten new columns stripped, the regenerated seed-42 `series.csv` is byte-identical to the pre-shot one.
+
+## Full-state snapshots and fork (shot 7)
+
+This shot adds `state.bin` to every snapshot, `Sim::restore`, and `ecosim fork`. No sim rule or `params.toml` default changed, and every file a run wrote before this shot keeps its exact bytes.
+
+**`state.bin`**
+- **What it holds.** The layout is in the `state.rs` module doc. It holds everything a `Sim` needs that the other snapshot files don't hold exactly:
+  - the tick, the next id and the immigrant count
+  - the RNG as seed, stream and word position (`rand_chacha`'s own accessors, so the restored stream continues at the exact word)
+  - this tick's deaths, which the tick's `series.csv` row reports
+  - moisture and fertility as `f32`, since the `.bin` files round them to `u8`
+  - the patch fields as `f32` bits
+  - every tree and animal with all its fields, in `Vec` order, dead ones included
+  - the grazer grid, cell by cell
+- **Patches and entities are stored again, bit for bit.** `patches.json` and `entities.json` hold these values as decimal text. Getting the exact `f32` back would depend on the JSON reader's float parsing (serde_json parses to `f64`, then narrows), and animals' cooldowns aren't in `entities.json` at all. So restore never reads the JSON files.
+- **Dead entities and Vec order are kept.** Between compactions, `trunk_at` and the grids hold indices into the Vecs, and updates run in Vec order. A compacted Vec would renumber them.
+- **The grazer grid is stored, not rebuilt.** Swap-removal leaves each cell in an order that a rebuild in index order doesn't reproduce, and nearest-neighbour scans visit cells in that order.
+- **Recomputed on load, each tested bit-identical by `prop_restore_steps_identically`:**
+  - the terrain fields (`ground`, `class`, `patch_soil`, `patch_dist`), rebuilt from the topmost solid voxel of `material.bin` through `World::from_heights`; the result must reproduce `material.bin` and `height.bin`, or restore fails
+  - `light` read from `light.bin`, which is exact
+  - `trunk_at` from the live trees
+  - `canopy_cover` from `canopy_z`
+  - `grazers_in_patch` from the live grazers
+  - the seek and flee offset lists from the params
+  - the hunter grid, rebuilt. The sim only reads it after `update_animals` rebuilds it, so the test compares it as rebuilt on both sides.
+- **Versioning.** `state.bin` starts with the magic `ECOSTATE` and its own layout version (1), independent of `format_version`. The decoder rejects bad magic, other versions, truncation, trailing bytes, bad flags, off-world positions and grid entries that aren't live grazers.
+- **`format_version` is 2.** `meta.json` gains `forked_from`, which is null for a run started at tick 0. Nothing else in `meta.json` changed.
+- **`ecosim run --snapshot-state false`** writes no `state.bin`. The directory is still format 2, and `fork` refuses it, naming the missing file.
+
+**`ecosim fork`**
+- **Params.** The parent's params are read back from its `meta.json`. They are then written out again, and the result must equal what the parent recorded, which proves no float moved in the JSON round trip. The fork's `--set` overrides are applied to them through the same `apply_override` as `run --set`, and they take effect from the first step after the fork tick.
+- **The terrain is rebuilt with the parent's params,** before the overrides. A fork that overrides a terrain key (`world.height_*`, `soil_depth`, `rock_top_height`, `water_level`, `water_fraction`) keeps the parent's terrain, because terrain is generated once at tick 0.
+- **The fork directory is a complete run directory.** It holds the parent's `series.csv` rows and snapshot directories before the fork tick, copied verbatim. Everything from the fork tick on is simulated from the restored state, including that tick's row and snapshot.
+  - So `check`, `stats` and the renderer see the whole history: `check` needs the tick-10000 snapshot, which a fork at 12300 would otherwise lack.
+  - With no overrides, a fork run to the parent's end differs from the parent only in `meta.json`.
+  - The fork's snapshot at the fork tick is written with the fork's params, so an override of a stage age changes the stages in that tick's `entities.json`. The state itself is the parent's.
+- **`meta.json` of a fork.**
+  - `ticks` is the fork's last tick (`--at` + `--ticks`).
+  - `snapshots` lists the copied snapshots and the new ones.
+  - `overrides` holds only the fork's own `--set` strings. The parent's overrides are already in the params it recorded.
+  - `forked_from` is `{run, tick}`, with the parent path as given, in forward slashes.
+- **Refusals, all before anything is written:**
+  - format_version 1, with a message saying to rerun it
+  - an unsupported format_version
+  - a tick with no snapshot
+  - a missing `state.bin`
+  - a `series.csv` with a different header or fewer rows than the fork tick
+  - params that don't read back exactly
+  - an unknown or ill-typed override
+  - `--out` equal to the parent
+- **Version-1 directories** still work with `check`, `stats` and `diff`, which never read `format_version`. A test runs all three on the committed v1 fixture.
+
+**Tests**
+- `fork_matches_the_uninterrupted_run_from_the_fork_tick_on` (`tests/sweep.rs`) is the acceptance property. It forks seeds 1 and 42 at ticks 100, 5000, 12300 and 19900 through the CLI, runs each to 20000, and requires `ecosim diff` against the uninterrupted run to report only `meta.json`. It reuses the shared seed-42 run, runs the eight forks in parallel, and is skipped under coverage like the other full-length tests.
+- `prop_fork_equals_uninterrupted` states the same thing for random seeds and fork ticks on 400-tick runs. Its sibling pins forks at the first and last snapshot.
+- `prop_restore_steps_identically` replaces shot 4's snapshot round-trip property. A sim is restored from its own snapshot at a random tick. It must equal the original field for field, recomputed fields included, and the two must produce identical stats rows and identical state for 500 more ticks. Its siblings pin tick 50 (the first tree update) and tick 1234 on seed 7 (dead entities not yet compacted).
+- `fork_with_overrides_changes_only_the_future` checks four things: the rows up to the fork tick are unchanged, `meta.json` records the fork, the overrides take effect, and a fork of a fork continues exactly.
+
+**Regenerated artifacts**
+- **`tests/data/s42-manifest.sha256`:** 201 `state.bin` lines were added, and none changed or were removed (`git diff` shows 201 insertions, 0 deletions). The fresh run's other 1 + 201 × 7 hashes were compared before the file was rewritten. The manifest test now expects 8 files per snapshot, 201 of them `state.bin`.
+- **`fixtures/s42-mini` was not regenerated.** It stays a format-1 fixture, and the v1 test uses it.
+- **`fixtures/s42-mini-v2` is new,** made by the same command (`--seed 42 --ticks 100 --snapshot-every 100`). A test asserts that it differs from the v1 fixture only by `meta.json`'s version and `forked_from`, plus the two `state.bin` files. The renderer's v2 shot can use it.
+- `tests/data/s42-check.txt` is unchanged.
+- **`runs/s42` (gitignored) was regenerated as format 2,** so that it can be forked. ecoview's copy in `ecoview/public/` is still the format-1 run. This shot doesn't touch the renderer, and the renderer's shot 8 teaches it format 2.
+
+**Size and speed.** `state.bin` is about 100 KB for seed 42 at tick 10000, so that snapshot grows from 452 KB to 554 KB. A 20000-tick release run of seed 42 takes 6.1 s, and the fork demo takes 2.6 s. Both are well inside the 30 s runtime invariant.

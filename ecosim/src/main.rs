@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use ecosim::check::{check_run, check_run_long, diff_runs, stats_report};
-use ecosim::output::run;
+use ecosim::output::{fork, run_with_state, ForkSpec};
 use ecosim::sweep::{baseline, margin_table, parse_range, parse_values, sweep, ParamSpec, SweepConfig};
 use ecosim::Params;
 use std::path::PathBuf;
@@ -30,6 +30,25 @@ enum Cmd {
         /// Override a params key before the run: `--set section.key=value` (repeatable).
         #[arg(long = "set", value_name = "KEY=VALUE")]
         set: Vec<String>,
+        /// Write `state.bin` into every snapshot, so the run can be forked (`--snapshot-state false` to skip).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        snapshot_state: bool,
+    },
+    /// Continue a run from one of its snapshots into a new run directory, optionally with changed params.
+    Fork {
+        /// The parent run directory (format_version 2).
+        run: PathBuf,
+        /// The snapshot tick to continue from.
+        #[arg(long)]
+        at: u32,
+        /// Override a params key from the fork tick on: `--set section.key=value` (repeatable).
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        /// Ticks to run after the fork tick.
+        #[arg(long)]
+        ticks: u32,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Apply the acceptance invariants to a run directory; exit 1 on any failure.
     Check {
@@ -124,7 +143,7 @@ fn parse_sweep(args: &[String]) -> Result<SweepCmd, String> {
 
 fn main() -> ExitCode {
     match Cli::parse().cmd {
-        Cmd::Run { seed, ticks, out, snapshot_every, params, set } => {
+        Cmd::Run { seed, ticks, out, snapshot_every, params, set, snapshot_state } => {
             if snapshot_every == 0 {
                 eprintln!("--snapshot-every must be > 0");
                 return ExitCode::FAILURE;
@@ -136,7 +155,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match run(p, seed, ticks, snapshot_every, &set, &out) {
+            match run_with_state(p, seed, ticks, snapshot_every, &set, &out, snapshot_state) {
                 Ok(s) => {
                     let last = s.rows.last().unwrap();
                     println!(
@@ -152,6 +171,27 @@ fn main() -> ExitCode {
                 }
                 Err(e) => {
                     eprintln!("run failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Cmd::Fork { run, at, set, ticks, out } => {
+            match fork(&ForkSpec { parent: &run, at, overrides: &set, ticks }, &out) {
+                Ok(s) => {
+                    let last = s.rows.last().unwrap();
+                    println!(
+                        "wrote {} (ticks {at}..={}, {} ms): grazers={} hunters={} trees={}",
+                        out.display(),
+                        last.tick,
+                        s.wall_ms,
+                        last.grazers,
+                        last.hunters,
+                        last.trees
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("fork failed: {e}");
                     ExitCode::FAILURE
                 }
             }

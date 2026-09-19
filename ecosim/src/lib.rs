@@ -8,6 +8,7 @@ pub mod output;
 pub mod params;
 pub mod producers;
 pub mod sim;
+pub mod state;
 pub mod sweep;
 pub mod trees;
 pub mod world;

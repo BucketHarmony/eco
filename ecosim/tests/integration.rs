@@ -111,7 +111,7 @@ fn snapshot_round_trips_through_reader() {
     let dir = tmp("snap_rt");
     fs::create_dir_all(&dir).unwrap();
     write_meta(&sim, 3, 300, 100, &["hunter.kill_prob=0.2".to_string()], &dir).unwrap();
-    write_snapshot(&sim, &dir).unwrap();
+    write_snapshot(&sim, &dir, true).unwrap();
 
     let meta = read_json(&dir.join("meta.json"));
     assert_eq!(meta["format_version"], FORMAT_VERSION);
@@ -220,4 +220,57 @@ fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
         text.lines().find(|l| l.starts_with("extinction: grazers at tick")).unwrap_or_else(|| panic!("{text}"));
     assert!(grazer.contains("dominant cause: starved"), "{grazer}");
     assert!(text.contains("extinction: hunters at tick"), "{text}");
+}
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name)
+}
+
+/// Format version 2 only adds files: the v2 mini fixture (same command as the v1 one) differs from it
+/// in `meta.json` and the two new `state.bin` files, and its `meta.json` only in the version and the
+/// `forked_from` key.
+#[test]
+fn format_2_keeps_every_version_1_file_byte_for_byte() {
+    let (v1, v2) = (fixture("s42-mini"), fixture("s42-mini-v2"));
+    let diff = ecosim::check::diff_runs(&v1, &v2).unwrap();
+    let only_v2 = |f: &str| format!("only in {}: {f}", v2.display());
+    assert_eq!(
+        diff,
+        vec!["differs: meta.json".to_string(), only_v2("snap_000000/state.bin"), only_v2("snap_000100/state.bin")]
+    );
+    let (mut a, mut b) = (read_json(&v1.join("meta.json")), read_json(&v2.join("meta.json")));
+    assert_eq!((a["format_version"].as_u64(), b["format_version"].as_u64()), (Some(1), Some(FORMAT_VERSION as u64)));
+    assert!(b["forked_from"].is_null());
+    for m in [&mut a, &mut b] {
+        let o = m.as_object_mut().unwrap();
+        o.remove("format_version");
+        o.remove("forked_from");
+    }
+    assert_eq!(a, b);
+}
+
+/// Version-1 run directories still work with `check`, `stats` and `diff`; `fork` refuses them with
+/// an error that names the version.
+#[test]
+fn version_1_runs_still_check_stat_and_diff_but_do_not_fork() {
+    let exe = env!("CARGO_BIN_EXE_ecosim");
+    let v1 = fixture("s42-mini");
+    let out = Command::new(exe).arg("check").arg(&v1).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("FAIL run length") && text.contains("PASS"), "{text}");
+    let out = Command::new(exe).arg("stats").arg(&v1).output().unwrap();
+    assert!(out.status.success() && String::from_utf8(out.stdout).unwrap().contains("first extinction: none"));
+    assert!(Command::new(exe).arg("diff").arg(&v1).arg(&v1).status().unwrap().success());
+    let dir = tmp("fork_v1");
+    let out = Command::new(exe)
+        .arg("fork")
+        .arg(&v1)
+        .args(["--at", "100", "--ticks", "10", "--out"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("format_version 1") && err.contains("can't be forked"), "{err}");
+    assert!(!dir.exists());
 }

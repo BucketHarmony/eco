@@ -6,9 +6,9 @@ Coverage is measured with this command (CI step 4, `just coverage`):
 cargo llvm-cov --fail-under-lines 85 --ignore-filename-regex 'main\.rs|cli/'
 ```
 
-It used cargo-llvm-cov 0.9.1 on Rust 1.98.1, and was re-measured on 2026-09-19 after shot 05 (extinction attribution). The floor is 85% of lines, and `main.rs`, the CLI argument handling, is excluded.
+It used cargo-llvm-cov 0.9.1 on Rust 1.98.1, and was re-measured on 2026-09-19 after shot 7 (full-state snapshots and fork). The floor is 85% of lines, and `main.rs`, the CLI argument handling, is excluded.
 
-**Total: 96.39% of lines (3255 of 3377), 93.69% of functions and 95.31% of regions.**
+**Total: 96.36% of lines (3706 of 3846), 93.01% of functions and 94.77% of regions.**
 
 | File | Lines | Missed | Line cover | Function cover |
 |---|---:|---:|---:|---:|
@@ -16,14 +16,15 @@ It used cargo-llvm-cov 0.9.1 on Rust 1.98.1, and was re-measured on 2026-09-19 a
 | animals.rs | 682 | 1 | 99.85% | 100.00% |
 | check.rs | 654 | 22 | 96.64% | 91.67% |
 | lib.rs | 7 | 1 | 85.71% | 100.00% |
-| output.rs | 250 | 10 | 96.00% | 100.00% |
+| output.rs | 393 | 20 | 94.91% | 88.37% |
 | params.rs | 144 | 9 | 93.75% | 84.85% |
 | producers.rs | 171 | 0 | 100.00% | 100.00% |
-| sim.rs | 194 | 2 | 98.97% | 100.00% |
+| sim.rs | 199 | 2 | 98.99% | 100.00% |
+| state.rs | 321 | 8 | 97.51% | 94.74% |
 | sweep.rs | 528 | 77 | 85.42% | 80.65% |
 | trees.rs | 314 | 0 | 100.00% | 100.00% |
 | world.rs | 271 | 0 | 100.00% | 100.00% |
-| **Total** | **3377** | **122** | **96.39%** | **93.69%** |
+| **Total** | **3846** | **140** | **96.36%** | **93.01%** |
 
 The shot-05 extinction attribution is covered by `death_causes_sum_to_deaths` and its regressions (`animals.rs`), `extinctions_attribute_the_window_before_each_species_reaches_zero` (`check.rs`) and `sweep_reports_extinctions_by_cause` (`tests/sweep.rs`). The dynamics-fix code is fully covered, apart from the paths listed below:
 - `attack_success`, `immigrate`, the edge-column choice and its no-edge fallback are covered by unit and property tests in `animals.rs`.
@@ -45,7 +46,8 @@ The first measurement, 94.76%, found three `pub fn`s that nothing called: `Param
   - the `timing.json`-missing arm
   - the zero-target edge of the band margins
   - the "no extinction" text
-- **`output.rs`** misses the refusal to overwrite a directory that isn't a run directory.
+- **`output.rs`** misses the refusal to overwrite a directory that isn't a run directory, and four fork refusals: params that parse but don't read back exactly, a `series.csv` with another header, one with too few rows, and a `state.bin` whose tick doesn't match its directory.
+- **`state.rs`** misses the decoder's rejections of a bad flag byte, an implausible count, off-world animals and trees, a grid entry that isn't a live grazer, and a snapshot `.bin` of the wrong length. `decode_rejects_corrupt_files` covers bad magic, version, truncation and trailing bytes.
 - **`params.rs`** misses the `--set` errors for booleans and TOML datetimes, which no params field uses.
 - **`sim.rs` and `animals.rs`** each miss a `None` fallback.
 - **`lib.rs`** misses the non-coverage branch of the test-only `crate::cases`.
@@ -54,6 +56,6 @@ The first measurement, 94.76%, found three `pub fn`s that nothing called: `Param
 
 Instrumentation makes the simulation several times slower. So under `cfg(coverage)`, which cargo-llvm-cov sets:
 - properties run a quarter of their cases
-- the five full-length run tests are skipped; those tests still run in `cargo test` (step 3), and the determinism test also runs in step 8
+- the six full-length run tests (five before shot 7, plus the 20000-tick fork test) are skipped; those tests still run in `cargo test` (step 3), and the determinism test also runs in step 8
 
 On the build machine the instrumented run takes about 160 s wall time, including compilation. The full suite without these trims took about 490 s of test time. See DECISIONS.md, "Test hardening".

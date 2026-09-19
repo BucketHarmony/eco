@@ -3,7 +3,7 @@
 This is a deterministic, headless voxel ecology simulator (SAD 1).
 - The spec is in `../docs/`.
 - Design calls are in `DECISIONS.md` and parameter history is in `TUNING.md`.
-- The sweep results are in `SWEEP_FINDINGS.md` (shot 4), `sweeps/shot5/FINDINGS.md` (the dynamics fixes) and `sweeps/shot05/FINDINGS.md` (extinctions by cause). The measured coverage is in `COVERAGE.md`.
+- The sweep results are in `SWEEP_FINDINGS.md` (shot 4), `sweeps/shot5/FINDINGS.md` (the dynamics fixes), `sweeps/shot05/FINDINGS.md` (extinctions by cause) and `sweeps/fork-demo/FINDINGS.md` (a fork with seasonal rain off). The measured coverage is in `COVERAGE.md`.
 - `series.csv` records each tick's animal deaths by species and cause (`starved`, `eaten`, `old_age`, `crowded`, `burnt`). `ecosim stats` attributes every extinction to the dominant cause over the 500 ticks before it.
 
 ## Commands
@@ -17,6 +17,7 @@ ecosim check runs/s1                         # invariants; exit 1 on any failure
 ecosim check --long runs/l1                  # long-run invariants for runs of >= 60000 ticks
 ecosim stats runs/s1                         # column ranges; each extinction with its death causes
 ecosim diff runs/a runs/b                    # byte-compare two run directories
+ecosim fork runs/s1 --at 10000 --ticks 10000 --out runs/f1 [--set key=value ...]   # continue from a snapshot
 ecosim sweep --baseline --seeds 1,2,3        # margin table; see `ecosim sweep --help`
 ```
 
@@ -50,6 +51,10 @@ just coverage    # any single step works by name
 ```
 
 Both CI and `just` set `PROPTEST_RNG_SEED`, so the property tests explore the same cases on every run. A plain `cargo test` uses a fresh random seed each time. If one of those random runs finds a failure, fix it, then add the shrunk case as a named regression test next to the property. `proptest-regressions/` is gitignored.
+
+## Snapshots and forks
+
+Each snapshot directory holds `state.bin` beside the renderer's files (`format_version` 2). `state.bin` is the exact sim state: RNG position, full-precision fields and every entity. `ecosim fork` restores it and continues the run into a new directory, optionally with `--set` overrides from that tick on. The new directory is a complete run directory: rows and snapshots before the fork tick are copied from the parent, and `meta.json` records `forked_from`. With no overrides, a fork is byte-identical to the uninterrupted run from the fork tick on. `ecosim run --snapshot-state false` skips `state.bin`. Format-1 directories still work with `check`, `stats` and `diff`, but can't be forked. `sweeps/fork-demo/` has an example; the layout and the design calls are in `DECISIONS.md`.
 
 ## Behaviour guard
 

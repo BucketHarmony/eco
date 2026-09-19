@@ -56,7 +56,7 @@ pub struct StatsRow {
 /// Marks a column with no trunk in `Sim::trunk_at`.
 pub const NO_TREE: u32 = u32::MAX;
 
-fn rebuild_grid(grid: &mut [Vec<u32>], animals: &[Animal]) {
+pub(crate) fn rebuild_grid(grid: &mut [Vec<u32>], animals: &[Animal]) {
     grid.iter_mut().for_each(Vec::clear);
     for (i, a) in animals.iter().enumerate().filter(|(_, a)| a.alive) {
         grid[Sim::animal_col(a)].push(i as u32);
@@ -190,6 +190,13 @@ impl Sim {
         p.grazer.immigration_floor = 0;
         let world = World::from_heights(heights, &p);
         Sim::with_world(p, ChaCha8Rng::seed_from_u64(3), world)
+    }
+
+    /// Replace the params from the next step on (`ecosim fork --set`), recomputing what is derived from them.
+    pub fn set_params(&mut self, params: Params) {
+        self.seek_offsets = offsets_within(params.hunter.seek_radius);
+        self.flee_offsets = offsets_within(params.grazer.flee_radius);
+        self.params = params;
     }
 
     /// Hand out the next entity id.

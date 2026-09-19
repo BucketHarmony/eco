@@ -1,0 +1,9 @@
+# Shot 7 fork demo, from ecosim/ with the release binary (2026-09-19).
+ecosim run --seed 42 --ticks 20000 --snapshot-every 100 --out runs/s42                          # 6.1 s
+ecosim fork runs/s42 --at 10000 --set climate.rain_amp=0 --ticks 10000 --out sweeps/fork-demo/run   # 2.6 s
+ecosim stats runs/s42 > sweeps/fork-demo/stats-s42.txt
+ecosim stats sweeps/fork-demo/run > sweeps/fork-demo/stats-fork.txt
+ecosim check runs/s42 > sweeps/fork-demo/check-s42.txt            # exit 0
+ecosim check sweeps/fork-demo/run > sweeps/fork-demo/check-fork.txt   # exit 0
+python sweeps/fork-demo/window.py > sweeps/fork-demo/window.txt   # death causes and ranges over ticks 10001-20000
+# sweeps/fork-demo/run/ (65 MB of snapshots) is gitignored; meta.json is copied beside this file.

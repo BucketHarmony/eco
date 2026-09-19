@@ -6,3 +6,4 @@ proptest-regressions/
 ci-runs/
 lcov.info
 sweeps/shot05/*/cells/
+sweeps/fork-demo/run/

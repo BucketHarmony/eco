@@ -1,0 +1,24 @@
+[package]
+name = "ecosim"
+version = "0.1.0"
+edition = "2021"
+description = "POC voxel ecology simulator (SAD 1)"
+
+[lib]
+name = "ecosim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ecosim"
+path = "src/main.rs"
+
+[dependencies]
+rand = "=0.8.8"
+rand_chacha = "=0.3.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+toml = "=0.8.23"
+clap = { version = "=4.6.7", features = ["derive"] }
+
+[profile.release]
+debug = false

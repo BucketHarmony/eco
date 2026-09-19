@@ -1,7 +1,8 @@
 //! `check`, `stats` and `diff`: everything that reads a finished run directory. The invariants
 //! themselves live in [`evaluate`], which `check` and `sweep` share.
 
-use crate::output::{snapshot_dir_name, SERIES_HEADER};
+use crate::animals::{Cause, CAUSES};
+use crate::output::{snapshot_dir_name, SERIES_FIELDS, SERIES_HEADER};
 use crate::sim::StatsRow;
 use std::collections::BTreeSet;
 use std::fs;
@@ -37,8 +38,8 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
         .enumerate()
         .map(|(i, line)| {
             let f: Vec<&str> = line.split(',').collect();
-            if f.len() != 11 {
-                return Err(format!("series.csv line {}: expected 11 fields", i + 2));
+            if f.len() != SERIES_FIELDS {
+                return Err(format!("series.csv line {}: expected {SERIES_FIELDS} fields", i + 2));
             }
             let u = |k: usize| f[k].parse::<u32>().map_err(|e| format!("line {}: {e}", i + 2));
             let x = |k: usize| f[k].parse::<f32>().map_err(|e| format!("line {}: {e}", i + 2));
@@ -54,6 +55,7 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                 detritus_total: x(8)?,
                 temperature: x(9)?,
                 hunter_immigrants: u(10)?,
+                deaths: [[u(11)?, u(12)?, u(13)?, u(14)?, u(15)?], [u(16)?, u(17)?, u(18)?, u(19)?, u(20)?]],
             })
         })
         .collect()
@@ -469,6 +471,95 @@ pub fn first_extinction(rows: &[StatsRow]) -> Option<&StatsRow> {
     rows.iter().find(|r| r.grazers == 0 || r.hunters == 0 || r.trees == 0)
 }
 
+/// Ticks of death counts attributed to an extinction: the extinction tick and the 499 before it.
+pub const CAUSE_WINDOW: u32 = 500;
+
+/// One species reaching 0, with what killed it off.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Extinction {
+    /// `grazers`, `hunters` or `trees`.
+    pub species: &'static str,
+    /// First tick at which its count is 0.
+    pub tick: u32,
+    /// Deaths by cause over the `CAUSE_WINDOW` ticks ending at `tick`; `None` for trees, whose
+    /// death causes are not recorded.
+    pub causes: Option<[u32; CAUSES]>,
+    /// The food supply over the same window: (label, mean). Mean grazer count for hunters, mean
+    /// `grass_mean` for grazers; `None` for trees.
+    pub food: Option<(&'static str, f64)>,
+}
+
+impl Extinction {
+    /// The cause with the most deaths in the window, ties to the first in `Cause` order; `None`
+    /// when no death was recorded there (or for trees).
+    pub fn dominant(&self) -> Option<Cause> {
+        let c = self.causes?;
+        let best = Cause::ALL.iter().copied().max_by_key(|&k| (c[k as usize], std::cmp::Reverse(k as usize)))?;
+        (c[best as usize] > 0).then_some(best)
+    }
+
+    /// The dominant cause's name, `none` without recorded deaths, `unrecorded` for trees.
+    pub fn dominant_name(&self) -> &'static str {
+        match (self.causes, self.dominant()) {
+            (None, _) => "unrecorded",
+            (Some(_), None) => "none",
+            (Some(_), Some(c)) => c.name(),
+        }
+    }
+}
+
+/// Every species that reaches 0 at some tick (whole run, burn-in included), in tick order; species
+/// reaching 0 on the same tick keep the order grazers, hunters, trees.
+pub fn extinctions(rows: &[StatsRow]) -> Vec<Extinction> {
+    let species: [(&'static str, Column<u32>); 3] =
+        [("grazers", |r| r.grazers), ("hunters", |r| r.hunters), ("trees", |r| r.trees)];
+    let mut out: Vec<Extinction> = species
+        .iter()
+        .enumerate()
+        .filter_map(|(k, (name, count))| {
+            let at = rows.iter().position(|r| count(r) == 0)?;
+            let win = &rows[at.saturating_sub(CAUSE_WINDOW as usize - 1)..=at];
+            let mean = |f: Column<f64>| win.iter().map(f).sum::<f64>() / win.len() as f64;
+            let (causes, food) = match k {
+                0 | 1 => {
+                    let mut c = [0; CAUSES];
+                    for r in win {
+                        c.iter_mut().zip(r.deaths[k]).for_each(|(a, b)| *a += b);
+                    }
+                    let food = if k == 0 {
+                        ("grass_mean", mean(|r| r.grass_mean as f64))
+                    } else {
+                        ("grazers", mean(|r| r.grazers as f64))
+                    };
+                    (Some(c), Some(food))
+                }
+                _ => (None, None),
+            };
+            Some(Extinction { species: name, tick: rows[at].tick, causes, food })
+        })
+        .collect();
+    out.sort_by_key(|e| e.tick);
+    out
+}
+
+/// One printable line per extinction, for `ecosim stats`.
+pub fn extinction_line(e: &Extinction) -> String {
+    let Some(c) = e.causes else {
+        return format!("extinction: {} at tick {} (tree death causes are not recorded)", e.species, e.tick);
+    };
+    let from = e.tick.saturating_sub(CAUSE_WINDOW - 1);
+    let counts: Vec<String> = Cause::ALL.iter().map(|&k| format!("{}={}", k.name(), c[k as usize])).collect();
+    let (label, mean) = e.food.unwrap_or(("", f64::NAN));
+    format!(
+        "extinction: {} at tick {}; deaths in ticks {from}-{}: {}; dominant cause: {}; mean {label} {mean:.4}",
+        e.species,
+        e.tick,
+        e.tick,
+        counts.join(" "),
+        e.dominant_name()
+    )
+}
+
 /// min/max/mean per series column plus first extinction tick, as printable lines.
 pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
     let rows = read_series(run_dir)?;
@@ -501,6 +592,7 @@ pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
         }
         None => "first extinction: none".into(),
     });
+    out.extend(extinctions(&rows).iter().map(extinction_line));
     Ok(out)
 }
 
@@ -560,6 +652,7 @@ mod tests {
                 detritus_total: 10.0,
                 temperature: 12.0,
                 hunter_immigrants: 0,
+                deaths: Default::default(),
             })
             .collect()
     }
@@ -660,6 +753,7 @@ mod tests {
                 detritus_total: 10.0,
                 temperature: 12.0,
                 hunter_immigrants: 0,
+                deaths: Default::default(),
             })
             .collect();
         Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms) }
@@ -798,17 +892,54 @@ mod tests {
     }
 
     #[test]
+    fn extinctions_attribute_the_window_before_each_species_reaches_zero() {
+        let mut rows = rows_from(|t| if t >= 1200 { 0 } else { 100 }, 2001);
+        // Grazer deaths: one outside the window (tick 700), then a starved/eaten tie inside it.
+        rows[700].deaths[0] = [0, 0, 9, 0, 0];
+        rows[701].deaths[0] = [4, 0, 0, 0, 0];
+        rows[1200].deaths[0] = [0, 4, 0, 0, 0];
+        // Hunters reach 0 at 1500 with only old-age deaths; trees at 1500 too.
+        rows[1500].hunters = 0;
+        rows[1500].trees = 0;
+        rows[1499].deaths[1] = [0, 0, 1, 0, 0];
+        let e = extinctions(&rows);
+        assert_eq!(
+            e.iter().map(|x| (x.species, x.tick)).collect::<Vec<_>>(),
+            [("grazers", 1200), ("hunters", 1500), ("trees", 1500)]
+        );
+        assert_eq!(e[0].causes, Some([4, 4, 0, 0, 0]), "window is ticks 701..=1200");
+        assert_eq!(e[0].dominant(), Some(Cause::Starved), "ties go to the first cause");
+        assert_eq!(e[0].food, Some(("grass_mean", 0.5)));
+        assert_eq!(e[1].dominant_name(), "old_age");
+        let (label, mean) = e[1].food.unwrap();
+        assert!(label == "grazers" && (mean - 39.8).abs() < 1e-9, "100 grazers on 199 of the 500 ticks: {mean}");
+        assert_eq!((e[2].causes, e[2].dominant_name()), (None, "unrecorded"));
+        assert_eq!(extinction_line(&e[2]), "extinction: trees at tick 1500 (tree death causes are not recorded)");
+        // A species at 0 from the start has no deaths to attribute.
+        let e = extinctions(&rows_from(|_| 0, 10));
+        assert_eq!((e[0].tick, e[0].dominant_name()), (0, "none"));
+        assert!(extinctions(&rows_from(|_| 5, 10)).is_empty());
+    }
+
+    #[test]
     fn stats_and_diff_on_small_run_dirs() {
         let root = std::env::temp_dir().join(format!("ecosim-check-{}", std::process::id()));
         let (a, b) = (root.join("a"), root.join("b"));
-        let rows = rows_from(|t| if t == 3 { 0 } else { 10 + t as u32 }, 5);
+        let mut rows = rows_from(|t| if t == 3 { 0 } else { 10 + t as u32 }, 5);
+        rows[2].deaths[0] = [2, 1, 0, 0, 0];
+        rows[3].deaths[0] = [1, 0, 0, 0, 0];
         for d in [&a, &b] {
             fs::create_dir_all(d.join("snap_000000")).unwrap();
             fs::write(d.join("series.csv"), crate::output::series_csv(&rows)).unwrap();
             fs::write(d.join("snap_000000").join("height.bin"), [1u8, 2]).unwrap();
         }
         let lines = stats_report(&a).unwrap();
-        assert_eq!(lines.len(), 12, "{lines:?}");
+        assert_eq!(lines.len(), 13, "{lines:?}");
+        assert_eq!(
+            lines[12],
+            "extinction: grazers at tick 3; deaths in ticks 0-3: starved=3 eaten=1 old_age=0 crowded=0 burnt=0; \
+             dominant cause: starved; mean grass_mean 0.5000"
+        );
         assert!(lines[1].starts_with("grazers") && lines[1].contains("14.0000"), "{}", lines[1]);
         assert_eq!(lines[11], "first extinction: tick 3 (grazers=0 hunters=5 trees=20)");
         assert_eq!(diff_runs(&a, &b).unwrap(), Vec::<String>::new());

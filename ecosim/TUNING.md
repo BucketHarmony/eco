@@ -249,3 +249,22 @@ hext: 6 of 129 (4.7%).
 - Defaults were not moved again: every default is inside its band, and 3 of 5 sit at the band middle.
   - `refugium_k` 2.0 is 0.25 from the middle, 1.75. Moving it would put the default off the grid.
   - `mature_age` 1000 is below the middle, 1500. Round 2 showed that 1500 shrinks this band.
+
+## Extinction attribution (shot 05)
+
+### Values changed in this shot
+
+| param | before | after | effect |
+|---|---|---|---|
+| hunter.immigration_floor | 8 | 0 | None at the defaults. On seeds 1, 2, 3 and 42 the series and snapshots are byte-identical; only `meta.json` differs, because the floor never fired (0 immigrants). At the band edge it matters: `refugium_k` 3.0 now fails on seeds 2 and 3, and the band shrank from [0.5, 3.0] to [0.5, 2.5] (`sweeps/shot05/FINDINGS.md`). |
+
+Nothing else was tuned. Seeds 1, 2, 3 and 42 pass `ecosim check` at 20000 ticks, and `runs/long42` passes `check --long` (margin +0.415).
+
+### The four anchor values
+
+`grazer.start_count` 300, `hunter.fail_cost` 0.25, `hunter.cooldown` 5000 and `grazer.max_grazers_per_patch` 5 are the regression anchor. They are the values at which seeds 1, 2, 3 and 42 persist at the defaults, and they are not a claim about the model.
+- Each was changed in "Dynamics fixes (shot 5)" above, with its round of evidence: r1/r3, r2/r4–r6, r6 and L1–L3.
+- `DECISIONS.md` ("Extinction attribution") repeats them with the failure each one prevents.
+- Later shots leave them alone. If a new mechanism breaks the anchor, the sim-shot rules pick the smallest default for that mechanism, not a retune of these four.
+
+The death causes show that `hunter.cooldown` 5000 together with `max_age` 8000 is what sets the hunter count at the defaults: about 97% of hunter deaths are old age.

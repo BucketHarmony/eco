@@ -243,3 +243,87 @@ These are the calls made in the shot-5 "dynamics fixes" brief. Tuning is in `TUN
   - `tests/data/s42-manifest.sha256`
   - `tests/data/s42-check.txt`
 - **ecoview's fixture is stale.** `ecoview/public/` still holds the pre-shot s42 run and mini fixture. They remain valid format-1 data, just older behaviour, and their tree records have no `lifespan`. This shot doesn't touch the renderer; refresh the copy with `bash scripts/sync-data.sh` in a renderer session.
+
+## Extinction attribution (shot 05)
+
+This shot records why every animal dies and reports what drove each extinction. No rule that moves an animal, or that decides whether one lives or dies, changed. The sweep results are in `sweeps/shot05/FINDINGS.md`.
+
+**Death causes**
+- **The five causes.** `animals::Cause` has `starved`, `eaten`, `old_age`, `crowded` and `burnt`.
+  - `crowded` is reserved for shot 10 and `burnt` for shot 9. No rule records them yet, so their columns are always 0.
+  - A property test asserts that.
+- **Precedence.** An animal whose energy reaches 0 on the tick it also reaches `max_age` is counted once, as `starved`. The check was already `energy <= 0 || age >= max_age`, so this only names the cause and changes no outcome. A named regression pins it.
+- **Where each cause is recorded.**
+  - `eaten` is recorded by the successful-attack branch of `attack`, through `kill_grazer(i, Cause::Eaten)`.
+  - `starved` and `old_age` are recorded at the end of each animal's update.
+  - Hunters have no predator, so their `eaten` column is always 0.
+- **Counting.** `Sim::deaths` holds the counts for the current tick. `step` clears it first thing, and `stats()` copies it into the row. The counts are per tick, not cumulative, so a window sum is a plain sum. Tick 0 is all zeros.
+
+**Series format**
+- **Ten columns are appended to `series.csv`**: `grazer_starved`, `grazer_eaten`, `grazer_old_age`, `grazer_crowded` and `grazer_burnt`, then the same five for `hunter_`.
+- **Header check.** `parse_series` requires the 21-column header, so run directories written before this shot no longer pass `ecosim check`. That includes ecoview's copies: refresh them with `bash scripts/sync-data.sh` in a renderer session.
+- **No format-version bump.** `format_version` stays 1: the columns are added, and ecoview finds `series.csv` columns by header name.
+
+**The property: counts sum to deaths**
+- **How deaths are counted independently.** The property compares the recorded causes with an independent death count. It sets `world.compact_every = u32::MAX`, so dead animals stay in their Vec; the deaths of a tick are then the growth of each species' dead count.
+- **Why not compare live-id sets before and after a tick.** A grazer born on a tick can be eaten by a hunter on the same tick (grazers update before hunters). That grazer is missing from the "alive before" set, so an id-set comparison would undercount its death.
+- **How the property drives all three causes.** It draws energy costs, max ages and `kill_prob` so that starvation, predation and old age all occur within a few hundred ticks. Its named sibling `death_causes_regression_every_cause_in_one_run` asserts that all three occur.
+
+**`ecosim stats`**
+- **One line per species that reaches 0**, over the whole run including the burn-in, in tick order. This is the same rule as `first_extinction`.
+- **The window.** For grazers and hunters the line gives the deaths by cause over ticks `[t − 499, t]`, which is 500 ticks including the extinction tick itself. That tick's row holds the deaths that emptied the population.
+- **The dominant cause** is the cause with the most deaths in the window. Ties go to the first cause in `Cause` order. With no deaths in the window it is `none`, for example when a species starts at 0.
+- **The food supply.** The line also gives the mean food over the same window:
+  - for hunters, the mean grazer count, since there is no per-patch prey density to report
+  - for grazers, the mean `grass_mean`
+- **Trees** reach 0 with a plain line: their death causes aren't recorded, and the shot doesn't ask for them.
+
+**`ecosim sweep`**
+- **New CSV columns.** `sweep.csv` gains `first_extinction_species` and `first_extinction_dominant_cause`, right after `first_extinction_tick`.
+  - Species that reach 0 on the same tick are joined with `+`, in the order grazers, hunters, trees.
+  - The cause is that of the first species listed; for trees it is `unrecorded`.
+  - `cycle_ratio.py` skips both columns.
+- **New `sweep.md` section.** It ends with "Extinctions by cause", which counts cells three ways:
+  - cells failing an invariant
+  - cells with any extinction
+  - the two cross-counts: failing cells without an extinction, and extinction cells that pass
+
+  It then lists the extinction cells grouped by (first species, dominant cause).
+- **Extinction and failure stay separate on purpose.** An extinction in the burn-in, or one that immigration reverses, need not fail `no_extinction`. A failing cell need not have an extinction: at amplitude 0 every failure is `fertility_band`.
+- **`no_extinction` in `ecosim check` is unchanged.**
+
+**Limitation: the window cause is the last animals' cause**
+- Near an extinction only the last 1–4 hunters are left, so the 500-tick window names what killed them.
+- In `hunter.refugium_k = 3.0` on seed 2 the last hunter died of old age. The window cause is therefore `old_age`, although over that run starvation killed 45 hunters and old age 20.
+- The report states the window rule. FINDINGS gives the run totals beside it rather than changing the rule.
+
+**What the causes show about hunter regulation**
+- The "Hunter regulation" finding above left open whether old age or starvation binds hunters at the defaults. **It is old age.**
+- On seeds 1, 2, 3 and 42, 75–88 of each seed's 75–91 hunter deaths are `old_age`, and 0–3 are `starved`.
+- The sweep shows starvation taking over only as `refugium_k` approaches the collapse edge. The details are in `sweeps/shot05/FINDINGS.md`.
+
+**`hunter.immigration_floor` 8 → 0**
+- Confirmed before any code change. With the pre-shot binary, seeds 1, 2, 3 and 42 were run for 20000 ticks at floor 8 and at floor 0, and `ecosim diff` reported only `meta.json` for each seed.
+- Every series and every snapshot was byte-identical, with 0 immigrants in each run.
+- The floor code and its tests stay. `Sim::bare` and the hunters-disabled test already set the floor to 0.
+
+**The four anchor values**
+
+These values are the regression anchor for seeds 1, 2, 3 and 42. They were chosen so that those seeds persist at the defaults, and they are not a claim about the model. The evidence for each is in `TUNING.md` ("Dynamics fixes (shot 5)"). This shot doesn't touch them, and later shots shouldn't retune them to make a new mechanism pass.
+
+| param | value | what it holds up |
+|---|---|---|
+| `grazer.start_count` | 300 | With 20 hunters and no shrub yet, 60 grazers are hunted out by tick 1100–2500 on every seed (r1, r3). |
+| `hunter.fail_cost` | 0.25 | Attack success at the typical shrub is about 0.02–0.06, so a 2-energy miss starved hunters (r2, r4–r6). |
+| `hunter.cooldown` | 5000 | At fail cost 0.25, cooldown 3000 lets hunters overshoot and crash (r6). This value is also what makes old age the binding hunter death. |
+| `grazer.max_grazers_per_patch` | 5 | At 8, the 60k-tick grazer swings failed `check --long` on seed 1 (L1–L3). |
+
+**Regenerated artifacts**
+
+The series gained columns, so one commit regenerates the following:
+- `runs/s42` and `runs/long42`, both gitignored
+- `fixtures/s42-mini`, whose `series.csv` has the new columns and whose `meta.json` has the floor at 0 and the `overrides` key
+- `tests/data/s42-manifest.sha256`: only the `series.csv` line changed, and all 1407 snapshot hashes are unchanged
+- `tests/data/s42-check.txt`: only the runtime line changed
+
+With the ten new columns stripped, the regenerated seed-42 `series.csv` is byte-identical to the pre-shot one.

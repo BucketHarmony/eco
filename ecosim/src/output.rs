@@ -15,9 +15,12 @@ use std::time::Instant;
 /// `meta.json` format version; readers reject any other value.
 pub const FORMAT_VERSION: u32 = 1;
 
-/// The first line of `series.csv`.
-pub const SERIES_HEADER: &str =
-    "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants";
+/// The first line of `series.csv`. The last ten columns are that tick's deaths by species and cause,
+/// grazers then hunters, causes in `Cause` order.
+pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt";
+
+/// Number of fields in a `series.csv` line.
+pub const SERIES_FIELDS: usize = 21;
 
 #[derive(Serialize)]
 struct Dims {
@@ -101,7 +104,7 @@ pub fn snapshot_dir_name(tick: u32) -> String {
 
 /// One `series.csv` data line (no newline).
 pub fn format_row(r: &StatsRow) -> String {
-    format!(
+    let mut line = format!(
         "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
         r.tick,
         r.grazers,
@@ -114,7 +117,11 @@ pub fn format_row(r: &StatsRow) -> String {
         r.detritus_total,
         r.temperature,
         r.hunter_immigrants
-    )
+    );
+    for n in r.deaths.iter().flatten() {
+        let _ = write!(line, ",{n}");
+    }
+    line
 }
 
 fn surface_u8(field: &[f32], sim: &Sim) -> Vec<u8> {

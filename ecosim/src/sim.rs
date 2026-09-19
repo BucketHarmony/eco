@@ -1,6 +1,6 @@
 //! Simulation state and the fixed tick order.
 
-use crate::animals::{Animal, Kind};
+use crate::animals::{Animal, Kind, CAUSES};
 use crate::params::Params;
 use crate::trees::Tree;
 use crate::world::{patch_of, ColClass, World, COLS, PATCHES, WX};
@@ -20,6 +20,9 @@ pub struct Patch {
     /// Temperature, °C.
     pub temperature: f32,
 }
+
+/// Deaths during one tick, indexed `[Kind as usize][Cause as usize]` (grazers, then hunters).
+pub type Deaths = [[u32; CAUSES]; 2];
 
 /// One `series.csv` row.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +49,8 @@ pub struct StatsRow {
     pub temperature: f32,
     /// Hunters that have immigrated so far (cumulative).
     pub hunter_immigrants: u32,
+    /// Deaths during this tick by species and cause.
+    pub deaths: Deaths,
 }
 
 /// Marks a column with no trunk in `Sim::trunk_at`.
@@ -109,6 +114,8 @@ pub struct Sim {
     pub next_id: u32,
     /// Hunters that have immigrated so far.
     pub hunter_immigrants: u32,
+    /// Deaths during the current tick by species and cause; cleared at the start of each step.
+    pub deaths: Deaths,
 }
 
 impl Sim {
@@ -161,6 +168,7 @@ impl Sim {
             tick: 0,
             next_id: 0,
             hunter_immigrants: 0,
+            deaths: Deaths::default(),
         };
         sim.seek_offsets = offsets_within(sim.params.hunter.seek_radius);
         sim.flee_offsets = offsets_within(sim.params.grazer.flee_radius);
@@ -242,6 +250,7 @@ impl Sim {
     /// Snapshots and stats rows are taken by the caller after this returns.
     pub fn step(&mut self) {
         self.tick += 1;
+        self.deaths = Deaths::default();
         let t = self.tick;
         self.update_animals();
         self.immigrate(t);
@@ -316,6 +325,7 @@ impl Sim {
             detritus_total: self.patches.iter().map(|p| p.detritus as f64).sum::<f64>() as f32,
             temperature: (self.patches.iter().map(|p| p.temperature as f64).sum::<f64>() / PATCHES as f64) as f32,
             hunter_immigrants: self.hunter_immigrants,
+            deaths: self.deaths,
         }
     }
 }

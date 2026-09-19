@@ -171,3 +171,53 @@ fn full_run_writes_series_header_and_one_row_per_tick() {
     }
     assert!(!dir.join("snap_000250").exists());
 }
+
+/// Forced extinction: `grazer.energy_cost=0.5` starves the grazers out on seed 1 (tick 8461), and
+/// the hunters follow. The run still completes 20000 ticks: every snapshot `meta.json` lists exists
+/// with full-size fields and finite patch and entity values, the series has no NaN, and
+/// `ecosim stats` names `starved` as the dominant cause of the grazer extinction.
+#[test]
+fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
+    let dir = tmp("forced_extinction");
+    let set = ["grazer.energy_cost=0.5".to_string()];
+    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let s = run(params, 1, 20_000, 1000, &set, &dir).unwrap();
+    assert_eq!(s.rows.len(), 20_001);
+    let last = s.rows.last().unwrap();
+    assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species extinct by the end");
+    assert!(last.trees > 0);
+    let csv = fs::read_to_string(dir.join("series.csv")).unwrap();
+    assert!(!csv.to_lowercase().contains("nan") && !csv.contains("inf"), "non-finite value in series.csv");
+
+    let meta = read_json(&dir.join("meta.json"));
+    let snaps = meta["snapshots"].as_array().unwrap();
+    assert_eq!(snaps.len(), 21);
+    for t in snaps {
+        let snap = dir.join(format!("snap_{:06}", t.as_u64().unwrap()));
+        for (f, len) in [("material.bin", WX * WY * WZ), ("light.bin", WX * WY * WZ), ("height.bin", COLS)] {
+            assert_eq!(fs::read(snap.join(f)).unwrap().len(), len, "{}/{f}", snap.display());
+        }
+        for f in ["moisture.bin", "fertility.bin"] {
+            assert_eq!(fs::read(snap.join(f)).unwrap().len(), COLS);
+        }
+        let finite = |v: &Value| v.as_f64().is_some_and(f64::is_finite);
+        let patches = read_json(&snap.join("patches.json"));
+        for p in patches.as_array().unwrap() {
+            for k in ["grass", "shrub", "detritus", "temperature"] {
+                assert!(finite(&p[k]), "{}: patch {k} = {}", snap.display(), p[k]);
+            }
+        }
+        for e in read_json(&snap.join("entities.json")).as_array().unwrap() {
+            assert!(finite(&e["x"]) && finite(&e["y"]), "{}: {e}", snap.display());
+            assert!(e["kind"] == "tree" || finite(&e["energy"]), "{}: {e}", snap.display());
+        }
+    }
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ecosim")).arg("stats").arg(&dir).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let grazer =
+        text.lines().find(|l| l.starts_with("extinction: grazers at tick")).unwrap_or_else(|| panic!("{text}"));
+    assert!(grazer.contains("dominant cause: starved"), "{grazer}");
+    assert!(text.contains("extinction: hunters at tick"), "{text}");
+}

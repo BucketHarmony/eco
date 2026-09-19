@@ -69,7 +69,8 @@ def main():
     frm = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
     rows = list(csv.DictReader(open(os.path.join(d, 'sweep.csv'))))
     params = [k for k in rows[0] if k != 'seed' and not k.endswith(('_pass', '_value', '_margin'))
-              and k not in ('first_extinction_tick', 'grazer_peaks', 'hunter_extinction_tick', 'hunter_immigrants')]
+              and k not in ('first_extinction_tick', 'first_extinction_species', 'first_extinction_dominant_cause',
+                            'grazer_peaks', 'hunter_extinction_tick', 'hunter_immigrants')]
     print(f"{' '.join(params)} seed | peaks>{frm} qualifying(>=1.5) | ratio min/median/max | answer | hunters@peaks")
     for r in rows:
         cid = '_'.join(f'{p}={r[p]}' for p in params) + f"_s={r['seed']}"

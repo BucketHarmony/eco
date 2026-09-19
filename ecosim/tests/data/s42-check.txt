@@ -4,6 +4,6 @@ PASS grazer cycle (2 maxima >= 1500 ticks apart): 11 maxima at [4419, 5460, 7300
 PASS fertility_mean in [40, 220]: [104.50, 202.91]
 PASS grass_mean in [0.05, 0.95]: [0.3453, 0.8691]
 PASS trees at end >= 1.5x trees at tick 0: 286 vs 12 (need 18.0)
-PASS run time < 30 s: 6527 ms
+PASS run time < 30 s: 9497 ms
 PASS mature trees at tick 10000 >= 35: 100
 PASS at tick 10000 grazers >= 10 and hunters >= 2: grazers=1566 hunters=44

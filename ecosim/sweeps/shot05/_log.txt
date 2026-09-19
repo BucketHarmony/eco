@@ -1,0 +1,6 @@
+# shot 05 sweeps, release binary, 24-core build machine
+ecosim sweep --param hunter.refugium_k --range 0.5:4.0:0.5 --seeds 1,2,3 --jobs 22 --out sweeps/shot05/hunter_refugium_k
+hunter_refugium_k rc=0 wall=47s cells=24 pass=16
+ecosim sweep --param season.amplitude --values 0,15 --seeds 1,2,3 --jobs 22 --out sweeps/shot05/season_amplitude
+season_amplitude rc=0 wall=12s cells=6 pass=3
+python sweeps/cycle_ratio.py sweeps/shot05/season_amplitude

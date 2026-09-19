@@ -116,7 +116,10 @@ fn sweep_cells_equal_standalone_runs() {
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines.len(), 3, "{csv}");
     assert!(lines[0].starts_with("hunter.kill_prob,seed,run_length_pass,run_length_value,run_length_margin,"));
-    assert!(lines[0].ends_with(",first_extinction_tick,grazer_peaks,hunter_extinction_tick,hunter_immigrants"));
+    assert!(lines[0].ends_with(
+        ",first_extinction_tick,first_extinction_species,first_extinction_dominant_cause,grazer_peaks,\
+         hunter_extinction_tick,hunter_immigrants"
+    ));
     assert!(!lines[0].contains("runtime"));
     assert!(lines[1].starts_with("0.2,3,false,500,"));
     assert_eq!(fs::read_dir(out.join("cells")).unwrap().count(), 2);
@@ -187,4 +190,34 @@ fn run_rejects_bad_overrides_before_running() {
         assert!(String::from_utf8_lossy(&o.stderr).contains(needle));
         assert!(!out.exists(), "run directory created despite a bad override");
     }
+}
+
+/// A cell whose grazers starve out carries the species and cause in `sweep.csv`, and `sweep.md`
+/// lists it under "Extinctions by cause", counted apart from the invariant failures.
+#[test]
+fn sweep_reports_extinctions_by_cause() {
+    let out = tmp("sweep_extinction");
+    let cfg = SweepConfig {
+        params_path: params_path(),
+        fixed: vec![],
+        specs: vec![ParamSpec { key: "grazer.energy_cost".into(), values: vec!["0.1".into(), "5.0".into()] }],
+        seeds: vec![4],
+        ticks: 200,
+        jobs: 2,
+    };
+    let results = sweep(&cfg, &out).unwrap();
+    assert_eq!(results[0].first_extinction, None);
+    let starved = &results[1];
+    assert_eq!(starved.first_extinction_species.as_deref(), Some("grazers"));
+    assert_eq!(starved.first_extinction_cause, Some("starved"));
+    let csv = fs::read_to_string(out.join("sweep.csv")).unwrap();
+    let ext = starved.first_extinction.unwrap();
+    assert!(csv.lines().nth(2).unwrap().contains(&format!(",{ext},grazers,starved,")), "{csv}");
+    assert!(csv.lines().nth(1).unwrap().contains(",,,,"), "no extinction leaves the three columns empty: {csv}");
+    let md = fs::read_to_string(out.join("sweep.md")).unwrap();
+    let section = md.split("## Extinctions by cause").nth(1).expect("extinctions section");
+    assert!(section.contains("- cells failing an invariant: 2 of 2"), "{section}");
+    assert!(section.contains("- cells in which a species reaches 0 at any tick: 1 of 2"), "{section}");
+    assert!(section.contains("- failing cells with no extinction: 1; extinction cells passing every invariant: 0"));
+    assert!(section.contains(&format!("| grazers | `starved` | 1 | grazer.energy_cost=5.0_s=4 @{ext} |")), "{section}");
 }

@@ -5,3 +5,4 @@ __pycache__/
 proptest-regressions/
 ci-runs/
 lcov.info
+sweeps/shot05/*/cells/

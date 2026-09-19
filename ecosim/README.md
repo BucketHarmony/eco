@@ -3,7 +3,8 @@
 This is a deterministic, headless voxel ecology simulator (SAD 1).
 - The spec is in `../docs/`.
 - Design calls are in `DECISIONS.md` and parameter history is in `TUNING.md`.
-- The sweep results are in `SWEEP_FINDINGS.md` (shot 4) and `sweeps/shot5/FINDINGS.md` (the dynamics fixes). The measured coverage is in `COVERAGE.md`.
+- The sweep results are in `SWEEP_FINDINGS.md` (shot 4), `sweeps/shot5/FINDINGS.md` (the dynamics fixes) and `sweeps/shot05/FINDINGS.md` (extinctions by cause). The measured coverage is in `COVERAGE.md`.
+- `series.csv` records each tick's animal deaths by species and cause (`starved`, `eaten`, `old_age`, `crowded`, `burnt`). `ecosim stats` attributes every extinction to the dominant cause over the 500 ticks before it.
 
 ## Commands
 
@@ -14,7 +15,7 @@ cargo test --release
 ecosim run --seed 1 --ticks 20000 --out runs/s1 --snapshot-every 100 [--set key=value ...]
 ecosim check runs/s1                         # invariants; exit 1 on any failure
 ecosim check --long runs/l1                  # long-run invariants for runs of >= 60000 ticks
-ecosim stats runs/s1
+ecosim stats runs/s1                         # column ranges; each extinction with its death causes
 ecosim diff runs/a runs/b                    # byte-compare two run directories
 ecosim sweep --baseline --seeds 1,2,3        # margin table; see `ecosim sweep --help`
 ```

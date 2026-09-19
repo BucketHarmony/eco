@@ -6,7 +6,7 @@
 //! the worker threads finish in.
 
 use crate::check::{
-    evaluate, first_extinction, grazer_maxima, parse_series, CheckReport, Series, Timing, INVARIANT_KEYS, WINDOW_START,
+    evaluate, extinctions, grazer_maxima, parse_series, CheckReport, Series, Timing, INVARIANT_KEYS, WINDOW_START,
 };
 use crate::output::{series_csv, simulate};
 use crate::params::Params;
@@ -129,6 +129,11 @@ pub struct CellResult {
     pub report: CheckReport,
     /// First tick at which any species count is 0, over the whole run.
     pub first_extinction: Option<u32>,
+    /// The species at 0 on that tick, joined with `+` when several reach 0 together.
+    pub first_extinction_species: Option<String>,
+    /// Dominant death cause of the first of them over the preceding `CAUSE_WINDOW` ticks
+    /// (`Extinction::dominant_name`).
+    pub first_extinction_cause: Option<&'static str>,
     /// Grazer maxima from tick 2000, as the cycle invariant counts them.
     pub grazer_peaks: usize,
     /// First tick at which hunters are 0, over the whole run (immigration may bring them back).
@@ -154,11 +159,24 @@ pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) 
     let rows = parse_series(&csv)?;
     let last = rows.len() - 1;
     let grazer_peaks = grazer_maxima(&rows, (WINDOW_START as usize).min(last), last).len();
-    let first_extinction = first_extinction(&rows).map(|r| r.tick);
+    let ext = extinctions(&rows);
+    let first_extinction = ext.first().map(|e| e.tick);
+    let first_extinction_species =
+        first_extinction.map(|t| ext.iter().filter(|e| e.tick == t).map(|e| e.species).collect::<Vec<_>>().join("+"));
+    let first_extinction_cause = ext.first().map(|e| e.dominant_name());
     let hunter_extinction = rows.iter().find(|r| r.hunters == 0).map(|r| r.tick);
     let hunter_immigrants = rows[last].hunter_immigrants;
     let report = evaluate(&Series { rows, mature_at_10000: mature.map(Ok), timing: Timing::Excluded })?;
-    Ok(CellResult { csv, report, first_extinction, grazer_peaks, hunter_extinction, hunter_immigrants })
+    Ok(CellResult {
+        csv,
+        report,
+        first_extinction,
+        first_extinction_species,
+        first_extinction_cause,
+        grazer_peaks,
+        hunter_extinction,
+        hunter_immigrants,
+    })
 }
 
 /// Run labelled cells on `jobs` threads; results come back in input order.
@@ -298,7 +316,8 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
     for k in &keys {
         let _ = write!(csv, ",{k}_pass,{k}_value,{k}_margin");
     }
-    csv.push_str(",first_extinction_tick,grazer_peaks,hunter_extinction_tick,hunter_immigrants\n");
+    csv.push_str(",first_extinction_tick,first_extinction_species,first_extinction_dominant_cause");
+    csv.push_str(",grazer_peaks,hunter_extinction_tick,hunter_immigrants\n");
     for ((cell, (id, _, _)), r) in cells.iter().zip(&jobs).zip(&results) {
         for (p, &i) in cfg.specs.iter().zip(&cell.idx) {
             let _ = write!(csv, "{},", p.values[i]);
@@ -313,8 +332,10 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
             }
         }
         let ext = r.first_extinction.map_or(String::new(), |t| t.to_string());
+        let species = r.first_extinction_species.as_deref().unwrap_or("");
+        let cause = r.first_extinction_cause.unwrap_or("");
         let hext = r.hunter_extinction.map_or(String::new(), |t| t.to_string());
-        let _ = writeln!(csv, ",{ext},{},{hext},{}", r.grazer_peaks, r.hunter_immigrants);
+        let _ = writeln!(csv, ",{ext},{species},{cause},{},{hext},{}", r.grazer_peaks, r.hunter_immigrants);
         fs::write(out.join("cells").join(format!("{id}.csv")), &r.csv).map_err(|e| e.to_string())?;
     }
     fs::write(out.join("sweep.csv"), csv).map_err(|e| e.to_string())?;
@@ -522,6 +543,49 @@ fn report_md(
                 .collect();
             let _ = writeln!(md, "| {av} | {} |", row.join(" | "));
         }
+        md.push('\n');
+    }
+    md.push_str(&extinctions_md(cfg, &pairs));
+    md
+}
+
+/// The `sweep.md` extinctions section: extinction cells counted apart from invariant failures,
+/// then grouped by the first species to reach 0 and its dominant death cause.
+fn extinctions_md(cfg: &SweepConfig, pairs: &[(&Cell, &CellResult)]) -> String {
+    let n = pairs.len();
+    let failing = pairs.iter().filter(|(_, r)| !r.report.pass()).count();
+    let extinct: Vec<_> = pairs.iter().filter(|(_, r)| r.first_extinction.is_some()).collect();
+    let failing_alive = pairs.iter().filter(|(_, r)| !r.report.pass() && r.first_extinction.is_none()).count();
+    let passing_extinct = extinct.iter().filter(|(_, r)| r.report.pass()).count();
+    let mut md = String::from("## Extinctions by cause\n\n");
+    let _ = writeln!(md, "- cells failing an invariant: {failing} of {n}");
+    let _ = writeln!(md, "- cells in which a species reaches 0 at any tick: {} of {n}", extinct.len());
+    let _ = writeln!(
+        md,
+        "- failing cells with no extinction: {failing_alive}; extinction cells passing every invariant: \
+         {passing_extinct}\n"
+    );
+    if extinct.is_empty() {
+        return md;
+    }
+    let _ = writeln!(
+        md,
+        "Grouped by the first species to reach 0 and its dominant death cause over the {} ticks ending there.\n",
+        crate::check::CAUSE_WINDOW
+    );
+    let mut groups: Vec<((&str, &str), Vec<String>)> = Vec::new();
+    for (c, r) in &extinct {
+        let key = (r.first_extinction_species.as_deref().unwrap_or(""), r.first_extinction_cause.unwrap_or(""));
+        let label = format!("{} @{}", cell_id(&cfg.specs, c), r.first_extinction.unwrap_or(0));
+        match groups.iter_mut().find(|g| g.0 == key) {
+            Some(g) => g.1.push(label),
+            None => groups.push((key, vec![label])),
+        }
+    }
+    groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+    let _ = writeln!(md, "| first extinct | dominant cause | cells | cell @ tick |\n|---|---|---|---|");
+    for ((species, cause), cells) in &groups {
+        let _ = writeln!(md, "| {species} | `{cause}` | {} | {} |", cells.len(), cells.join(", "));
     }
     md
 }

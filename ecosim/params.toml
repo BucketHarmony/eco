@@ -119,5 +119,5 @@ fail_cost = 0.25
 displace_steps = 3
 refugium_k = 2.0
 seek_radius = 16.0
-immigration_floor = 8
+immigration_floor = 0
 immigration_interval = 500

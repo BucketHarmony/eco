@@ -33,6 +33,34 @@ pub enum State {
     Hunt,
 }
 
+/// Why an animal died. The discriminant indexes the per-tick death counts (`Sim::deaths`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// Energy reached 0. Takes precedence when old age falls on the same tick.
+    Starved = 0,
+    /// Killed by a hunter's attack.
+    Eaten = 1,
+    /// Reached the species' `max_age`.
+    OldAge = 2,
+    /// Density-dependent mortality (reserved; no rule records it yet).
+    Crowded = 3,
+    /// Killed by fire (reserved; no rule records it yet).
+    Burnt = 4,
+}
+
+/// Number of death causes.
+pub const CAUSES: usize = 5;
+
+impl Cause {
+    /// Every cause, in discriminant order.
+    pub const ALL: [Cause; CAUSES] = [Cause::Starved, Cause::Eaten, Cause::OldAge, Cause::Crowded, Cause::Burnt];
+
+    /// The name used in `series.csv` columns and reports.
+    pub fn name(self) -> &'static str {
+        ["starved", "eaten", "old_age", "crowded", "burnt"][self as usize]
+    }
+}
+
 /// One grazer or hunter.
 #[derive(Debug, Clone)]
 pub struct Animal {
@@ -193,7 +221,8 @@ impl Sim {
         }
     }
 
-    fn kill_grazer(&mut self, i: usize) {
+    fn kill_grazer(&mut self, i: usize, cause: Cause) {
+        self.deaths[Kind::Grazer as usize][cause as usize] += 1;
         let g = &mut self.grazers[i];
         g.alive = false;
         let (p, c) = (g.patch(), Sim::animal_col(g));
@@ -295,7 +324,7 @@ impl Sim {
         }
         let g = &self.grazers[i];
         if g.energy <= 0.0 || g.age >= gp.max_age {
-            self.kill_grazer(i);
+            self.kill_grazer(i, if g.energy <= 0.0 { Cause::Starved } else { Cause::OldAge });
             return;
         }
         let p = g.patch();
@@ -368,7 +397,7 @@ impl Sim {
         let hp = self.params.hunter.clone();
         let p = attack_success(hp.kill_prob, self.patches[self.grazers[j].patch()].shrub, hp.refugium_k);
         if self.rng.gen_bool(p) {
-            self.kill_grazer(j);
+            self.kill_grazer(j, Cause::Eaten);
             let e = &mut self.hunters[h].energy;
             *e = (*e + hp.kill_energy).min(100.0);
         } else {
@@ -432,7 +461,9 @@ impl Sim {
         h.energy -= cost;
         if h.energy <= 0.0 || h.age >= hp.max_age {
             h.alive = false;
+            let cause = if h.energy <= 0.0 { Cause::Starved } else { Cause::OldAge };
             let p = h.patch();
+            self.deaths[Kind::Hunter as usize][cause as usize] += 1;
             self.patches[p].detritus += hp.corpse_detritus;
             return;
         }
@@ -648,7 +679,7 @@ mod tests {
                     let (x, y) = sim.grazers[live[i % live.len()]].col();
                     sim.spawn_grazer(x as usize, y as usize);
                 }
-                Op::Death(i) => sim.kill_grazer(live[i % live.len()]),
+                Op::Death(i) => sim.kill_grazer(live[i % live.len()], Cause::Eaten),
             }
             let kept = (sorted_cells(&sim.grazer_grid), sim.grazers_in_patch.clone());
             let mut counts = vec![0u32; crate::world::PATCHES];
@@ -886,5 +917,94 @@ mod tests {
         // Indices 2 and 1 are both at distance 1 (inserted in that order); 0 is filtered out.
         let animals = [(5, 5), (6, 5), (4, 5)];
         nearest_matches_brute_force(&animals, &[2, 0, 1], &[false, true, true], (5, 5), 3.0).unwrap();
+    }
+
+    /// Knobs that make every recorded cause happen within a few hundred ticks.
+    #[derive(Debug, Clone)]
+    struct Mortality {
+        grazer_cost: f32,
+        grazer_max_age: u32,
+        hunter_cost: f32,
+        hunter_max_age: u32,
+        kill_prob: f64,
+    }
+
+    /// With compaction off, dead animals stay in their Vec, so the deaths of a tick are the growth
+    /// of each species' dead count, newborns eaten on their first tick included. The recorded causes
+    /// must sum to exactly that, per species and tick, and the stats row must carry them. The
+    /// reserved causes (`crowded`, `burnt`) are never recorded.
+    fn death_causes_sum_to_deaths(seed: u64, ticks: u32, m: &Mortality) -> Result<crate::sim::Deaths, TestCaseError> {
+        let mut p = Params::load_default();
+        p.world.compact_every = u32::MAX;
+        p.grazer.energy_cost = m.grazer_cost;
+        p.grazer.max_age = m.grazer_max_age;
+        p.hunter.energy_cost = m.hunter_cost;
+        p.hunter.max_age = m.hunter_max_age;
+        p.hunter.kill_prob = m.kill_prob;
+        let mut sim = Sim::new(p, seed);
+        let dead = |s: &Sim| [&s.grazers, &s.hunters].map(|v| v.iter().filter(|a| !a.alive).count() as u32);
+        prop_assert_eq!(sim.stats().deaths, crate::sim::Deaths::default());
+        let mut total = crate::sim::Deaths::default();
+        for _ in 0..ticks {
+            let before = dead(&sim);
+            sim.step();
+            let after = dead(&sim);
+            for k in 0..2 {
+                let recorded: u32 = sim.deaths[k].iter().sum();
+                prop_assert_eq!(recorded, after[k] - before[k], "species {} at tick {}", k, sim.tick);
+                prop_assert_eq!(sim.deaths[k][Cause::Crowded as usize] + sim.deaths[k][Cause::Burnt as usize], 0);
+            }
+            prop_assert_eq!(sim.deaths[Kind::Hunter as usize][Cause::Eaten as usize], 0, "hunters have no predator");
+            prop_assert_eq!(sim.stats().deaths, sim.deaths);
+            total.iter_mut().flatten().zip(sim.deaths.iter().flatten()).for_each(|(t, d)| *t += d);
+        }
+        Ok(total)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(32)))]
+
+        #[test]
+        fn prop_death_causes_sum_to_deaths(
+            seed in any::<u64>(),
+            ticks in 1u32..250,
+            grazer_cost in 0.05f32..1.5,
+            grazer_max_age in 20u32..3000,
+            hunter_cost in 0.02f32..1.5,
+            hunter_max_age in 20u32..3000,
+            kill_prob in 0.0f64..=1.0,
+        ) {
+            let m = Mortality { grazer_cost, grazer_max_age, hunter_cost, hunter_max_age, kill_prob };
+            death_causes_sum_to_deaths(seed, ticks, &m)?;
+        }
+    }
+
+    #[test]
+    fn death_causes_regression_every_cause_in_one_run() {
+        let m =
+            Mortality { grazer_cost: 0.6, grazer_max_age: 1100, hunter_cost: 1.2, hunter_max_age: 900, kill_prob: 0.3 };
+        let [g, h] = death_causes_sum_to_deaths(1, 200, &m).unwrap();
+        assert!(g[..3].iter().all(|&n| n > 0), "grazer starved/eaten/old_age {g:?}");
+        assert!(h[0] > 0 && h[2] > 0, "hunter starved/old_age {h:?}");
+    }
+
+    /// An animal out of energy on the tick it reaches `max_age` is counted once, as starved.
+    #[test]
+    fn death_cause_regression_starvation_beats_old_age() {
+        let mut sim = Sim::bare(&vec![14u8; COLS]);
+        let (gmax, hmax) = (sim.params.grazer.max_age, sim.params.hunter.max_age);
+        sim.grazers.push(Animal::new(0, Kind::Grazer, 10, 10, 0.01, gmax - 1, 100));
+        sim.grazers.push(Animal::new(1, Kind::Grazer, 40, 40, 50.0, gmax - 1, 100));
+        sim.grazers_in_patch[patch_of(10, 10)] += 1;
+        sim.grazers_in_patch[patch_of(40, 40)] += 1;
+        sim.patches[patch_of(10, 10)].grass = 0.0;
+        sim.hunters.push(Animal::new(2, Kind::Hunter, 20, 50, 0.01, hmax - 1, 100));
+        sim.hunters.push(Animal::new(3, Kind::Hunter, 50, 20, 50.0, hmax - 1, 100));
+        sim.rebuild_grazer_grid();
+        sim.step();
+        assert_eq!(sim.deaths, [[1, 0, 1, 0, 0], [1, 0, 1, 0, 0]]);
+        assert_eq!(sim.stats().deaths, sim.deaths);
+        sim.step();
+        assert_eq!(sim.deaths, [[0; CAUSES]; 2], "counts are per tick");
     }
 }

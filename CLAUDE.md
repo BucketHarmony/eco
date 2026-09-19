@@ -29,7 +29,7 @@ The build runs natively on Windows (not the Linux container the SAD assumes). Th
 
 ## Hard constraints (from the SAD, apply to both)
 
-- Keep each project to about 3,000–6,000 lines, tests included.
+- There is no cap on total project size. Each shot (one session's unit of work) may add at most 1,500 net lines to its component, measured with `git diff --stat <shot's starting commit>` over the component directory. Committed sweep output (`sweeps/**`), regenerated runs, fixtures and manifests don't count.
 - Every verification step is a single command that exits non-zero on failure.
 - Everything must run headless: no GPU, display server, external service, or account.
 - Features the SAD defers are left out entirely. Don't add `TODO` hooks, stubs, or plugin interfaces for them.

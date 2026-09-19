@@ -6,26 +6,26 @@ Coverage is measured with this command (CI step 4, `just coverage`):
 cargo llvm-cov --fail-under-lines 85 --ignore-filename-regex 'main\.rs|cli/'
 ```
 
-It used cargo-llvm-cov 0.9.1 on Rust 1.98.1, and was re-measured on 2026-09-19 after the dynamics fixes. The floor is 85% of lines, and `main.rs`, the CLI argument handling, is excluded.
+It used cargo-llvm-cov 0.9.1 on Rust 1.98.1, and was re-measured on 2026-09-19 after shot 05 (extinction attribution). The floor is 85% of lines, and `main.rs`, the CLI argument handling, is excluded.
 
-**Total: 96.15% of lines (3045 of 3167), 93.23% of functions and 95.21% of regions.**
+**Total: 96.39% of lines (3255 of 3377), 93.69% of functions and 95.31% of regions.**
 
 | File | Lines | Missed | Line cover | Function cover |
 |---|---:|---:|---:|---:|
 | abiotic.rs | 162 | 0 | 100.00% | 100.00% |
-| animals.rs | 622 | 1 | 99.84% | 100.00% |
-| check.rs | 568 | 23 | 95.95% | 90.32% |
+| animals.rs | 682 | 1 | 99.85% | 100.00% |
+| check.rs | 654 | 22 | 96.64% | 91.67% |
 | lib.rs | 7 | 1 | 85.71% | 100.00% |
-| output.rs | 246 | 10 | 95.93% | 100.00% |
+| output.rs | 250 | 10 | 96.00% | 100.00% |
 | params.rs | 144 | 9 | 93.75% | 84.85% |
 | producers.rs | 171 | 0 | 100.00% | 100.00% |
-| sim.rs | 191 | 2 | 98.95% | 100.00% |
-| sweep.rs | 471 | 76 | 83.86% | 78.31% |
+| sim.rs | 194 | 2 | 98.97% | 100.00% |
+| sweep.rs | 528 | 77 | 85.42% | 80.65% |
 | trees.rs | 314 | 0 | 100.00% | 100.00% |
 | world.rs | 271 | 0 | 100.00% | 100.00% |
-| **Total** | **3167** | **122** | **96.15%** | **93.23%** |
+| **Total** | **3377** | **122** | **96.39%** | **93.69%** |
 
-The dynamics-fix code is fully covered, apart from the paths listed below:
+The shot-05 extinction attribution is covered by `death_causes_sum_to_deaths` and its regressions (`animals.rs`), `extinctions_attribute_the_window_before_each_species_reaches_zero` (`check.rs`) and `sweep_reports_extinctions_by_cause` (`tests/sweep.rs`). The dynamics-fix code is fully covered, apart from the paths listed below:
 - `attack_success`, `immigrate`, the edge-column choice and its no-edge fallback are covered by unit and property tests in `animals.rs`.
 - `crowding` and self-thinning are covered in `trees.rs`.
 - `evaluate_long` has tests for a healthy run, each violation, a short run, no rows and a tick gap.

@@ -53,9 +53,26 @@ export const DEATH_CAUSES = ['starved', 'eaten', 'old_age', 'crowded', 'burnt'] 
 export type DeathCause = (typeof DEATH_CAUSES)[number];
 export const DEATH_SPECIES = ['grazer', 'hunter'] as const;
 
+/**
+ * Columns later sim versions append (fire in ecosim shot 9, trait means and SDs in shot 11). Each is read
+ * when present and left undefined when not, so older runs still load.
+ */
+export const OPTIONAL_COLUMNS = [
+  'patches_burning', 'total_burnt',
+  'grazer_energy_cost_mult_mean', 'grazer_energy_cost_mult_sd',
+  'grazer_flee_distance_mean', 'grazer_flee_distance_sd',
+  'grazer_repro_threshold_mean', 'grazer_repro_threshold_sd',
+  'hunter_energy_cost_mult_mean', 'hunter_energy_cost_mult_sd',
+  'hunter_flee_distance_mean', 'hunter_flee_distance_sd',
+  'hunter_repro_threshold_mean', 'hunter_repro_threshold_sd',
+] as const;
+export type OptionalColumn = (typeof OPTIONAL_COLUMNS)[number];
+
 export type Series = Record<SeriesColumn, Float64Array> & {
   /** Deaths per tick by cause, summed over the species that have the column. Absent causes are omitted. */
   deaths: Partial<Record<DeathCause, Float64Array>>;
+  /** Optional columns present in the file. */
+  extra: Partial<Record<OptionalColumn, Float64Array>>;
 };
 
 export interface Patch {
@@ -63,6 +80,8 @@ export interface Patch {
   shrub: number;
   detritus: number;
   temperature: number;
+  /** Fire (sim shot 9): ticks until the patch burns out, 0 when not burning. Absent in older runs. */
+  burning_ticks_left?: number;
 }
 
 export type Stage = 'sapling' | 'young' | 'mature';
@@ -87,6 +106,10 @@ export interface AnimalEntity {
   energy: number;
   age: number;
   state: string;
+  /** Heritable traits (sim shot 11). Absent in older runs, where every animal has the species defaults. */
+  energy_cost_mult?: number;
+  flee_distance?: number;
+  repro_threshold?: number;
 }
 
 export type Entity = TreeEntity | AnimalEntity;
@@ -155,7 +178,7 @@ export function parseSeries(text: string): Series {
     return i;
   });
   const n = lines.length - 1;
-  const out = { deaths: {} } as Series;
+  const out = { deaths: {}, extra: {} } as Series;
   for (const c of SERIES_COLUMNS) out[c] = new Float64Array(n);
   const deathCols: [Float64Array, number][] = [];
   for (const cause of DEATH_CAUSES) {
@@ -166,12 +189,18 @@ export function parseSeries(text: string): Series {
       deathCols.push([col, i]);
     }
   }
+  const extraCols: [Float64Array, number][] = [];
+  for (const c of OPTIONAL_COLUMNS) {
+    const i = header.indexOf(c);
+    if (i >= 0) extraCols.push([(out.extra[c] = new Float64Array(n)), i]);
+  }
   for (let r = 0; r < n; r++) {
     const cells = lines[r + 1].split(',');
     for (let k = 0; k < SERIES_COLUMNS.length; k++) {
       out[SERIES_COLUMNS[k]][r] = Number(cells[idx[k]]);
     }
     for (const [col, i] of deathCols) col[r] += Number(cells[i]);
+    for (const [col, i] of extraCols) col[r] = Number(cells[i]);
   }
   return out;
 }

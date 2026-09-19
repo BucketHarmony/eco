@@ -1,4 +1,4 @@
-// Serves dist/ with Vite's preview() API and writes the 8 reference screenshots to shots/.
+// Serves dist/ with Vite's preview() API and writes the reference screenshots to shots/.
 // Assumes `npm run build` has already run.
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';

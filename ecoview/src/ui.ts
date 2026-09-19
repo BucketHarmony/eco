@@ -48,6 +48,8 @@ export const CAUSE_COLORS: Record<DeathCause, string> = {
   burnt: '#222222',
 };
 export const DEATH_BIN = 100;
+export const BURNING_COLOR = '#f07818';
+export const TRAIT_LINE_COLOR = '#1f5bff';
 
 const PAD = { l: 8, r: 8, t: 4, b: 16 };
 const LEGEND_H = 15;
@@ -167,6 +169,64 @@ function deathPanel(ctx: CanvasRenderingContext2D, r: Rect, ax: Axis, ticks: Flo
   ctx.textAlign = 'left';
 }
 
+/**
+ * Fire and traits: patches burning as bars (the max of each pixel's bucket, since fires last a few ticks and a
+ * mean would erase them) on a 0..max axis, and the mean grazer `energy_cost_mult` as a line on its own min..max
+ * range, since it moves a few percent around 1. A run without the columns draws an empty panel.
+ */
+function fireTraitPanel(ctx: CanvasRenderingContext2D, r: Rect, ax: Axis, ticks: Float64Array, extra: Series['extra']): void {
+  const n = ticks.length;
+  const buckets = Math.min(n, Math.max(1, Math.floor(r.w)));
+  const range = (i: number): [number, number] => {
+    const i0 = Math.floor((i * n) / buckets);
+    return [i0, Math.max(i0 + 1, Math.floor(((i + 1) * n) / buckets))];
+  };
+  const items: [string, string][] = [];
+  const burning = extra.patches_burning;
+  if (burning) {
+    let max = 0;
+    for (const v of burning) if (v > max) max = v;
+    ctx.fillStyle = BURNING_COLOR;
+    for (let b = 0; b < buckets && max > 0; b++) {
+      const [i0, i1] = range(b);
+      let m = 0;
+      for (let i = i0; i < i1; i++) if (burning[i] > m) m = burning[i];
+      const hgt = (m / max) * (r.h - 2);
+      if (hgt > 0) ctx.fillRect(Math.floor(ax.xOf(ticks[i0])), r.y + r.h - 1 - hgt, 1, hgt);
+    }
+    items.push([`burning ≤${max}`, BURNING_COLOR]);
+  }
+  const mult = extra.grazer_energy_cost_mult_mean;
+  if (mult) {
+    // A species with no live animals writes 0; leave those rows out of the range and the line.
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const v of mult) if (v > 0) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    if (hi >= lo) {
+      const span = hi > lo ? hi - lo : 1;
+      ctx.strokeStyle = TRAIT_LINE_COLOR;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      let pen = false;
+      for (let b = 0; b < buckets; b++) {
+        const [i0, i1] = range(b);
+        let sum = 0;
+        let k = 0;
+        for (let i = i0; i < i1; i++) if (mult[i] > 0) { sum += mult[i]; k++; }
+        if (k === 0) { pen = false; continue; }
+        const x = ax.xOf(ticks[Math.floor((i0 + i1 - 1) / 2)]);
+        const y = r.y + r.h - ((sum / k - lo) / span) * (r.h - 2) - 1;
+        if (pen) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+        pen = true;
+      }
+      ctx.stroke();
+      items.push([`grazer cost × ${lo.toFixed(2)}–${hi.toFixed(2)}`, TRAIT_LINE_COLOR]);
+    }
+  }
+  legend(ctx, r, items.length ? items : [['no fire or trait data', '#cccccc']]);
+}
+
 export interface ChartColors {
   grazer: string;
   hunter: string;
@@ -174,8 +234,8 @@ export interface ChartColors {
 }
 
 /**
- * Three stacked panels over one tick axis: grazers and hunters, trees, and deaths by cause.
- * A dashed marker at `tick` crosses all three. The marker tick and x and the plot rectangles are
+ * Four stacked panels over one tick axis: grazers and hunters, trees, deaths by cause, and fire and traits.
+ * A dashed marker at `tick` crosses all four. The marker tick and x and the plot rectangles are
  * mirrored into data attributes so tests can find them.
  */
 export function drawChart(canvas: HTMLCanvasElement, series: Series, colors: ChartColors, tick: number): void {
@@ -186,7 +246,7 @@ export function drawChart(canvas: HTMLCanvasElement, series: Series, colors: Cha
   const ticks = series.tick;
   const n = ticks.length;
   if (n === 0) return;
-  const panels = chartLayout(w, h, 3);
+  const panels = chartLayout(w, h, 4);
   const t0 = ticks[0];
   const t1 = Math.max(ticks[n - 1], t0 + 1);
   const ax: Axis = { t0, t1, xOf: (t) => panels[0].x + ((t - t0) / (t1 - t0)) * panels[0].w };
@@ -201,6 +261,7 @@ export function drawChart(canvas: HTMLCanvasElement, series: Series, colors: Cha
   ]);
   linePanel(ctx, panels[1], ax, ticks, [{ label: 'trees', values: series.trees, color: colors.tree }]);
   deathPanel(ctx, panels[2], ax, ticks, series.deaths);
+  fireTraitPanel(ctx, panels[3], ax, ticks, series.extra);
 
   const mt = Math.min(Math.max(tick, t0), t1);
   const mx = Math.round(ax.xOf(mt)) + 0.5;
@@ -209,7 +270,7 @@ export function drawChart(canvas: HTMLCanvasElement, series: Series, colors: Cha
   ctx.setLineDash([3, 2]);
   ctx.beginPath();
   ctx.moveTo(mx, panels[0].y);
-  ctx.lineTo(mx, panels[2].y + panels[2].h);
+  ctx.lineTo(mx, panels[3].y + panels[3].h);
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.fillStyle = '#555';

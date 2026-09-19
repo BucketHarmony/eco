@@ -174,6 +174,21 @@ describe('parseSeries', () => {
     expect([...s.deaths.eaten!]).toEqual([0, 0]);
   });
 
+  it('reads the fire and trait columns when present and leaves them undefined when not', () => {
+    const s = parseSeries(`${CORE},patches_burning,total_burnt,grazer_energy_cost_mult_mean,hunter_repro_threshold_sd
+0,5,2,1,0,0,0,0,0,0,0,0,1.0000,0.0000
+1,5,2,1,0,0,0,0,0,0,3,1,0.9812,2.5000
+`);
+    expect([...s.extra.patches_burning!]).toEqual([0, 3]);
+    expect([...s.extra.total_burnt!]).toEqual([0, 1]);
+    expect([...s.extra.grazer_energy_cost_mult_mean!]).toEqual([1, 0.9812]);
+    expect([...s.extra.hunter_repro_threshold_sd!]).toEqual([0, 2.5]);
+    expect(s.extra.grazer_flee_distance_mean).toBeUndefined();
+    expect(parseSeries(`${CORE}
+0,5,2,1,0,0,0,0,0,0
+`).extra).toEqual({});
+  });
+
   it('bins deaths per 100 ticks', () => {
     const ticks = Float64Array.from({ length: 250 }, (_, i) => i);
     const ones = new Float64Array(250).fill(1);

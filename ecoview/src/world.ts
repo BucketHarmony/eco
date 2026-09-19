@@ -1,11 +1,13 @@
 // Surface voxels: one InstancedMesh with one top voxel per column, colored by the active overlay.
 import * as THREE from 'three';
 import {
-  COLUMNS, DIM_X, DIM_Y, SOIL, WATER, columnIndex, patchOf, voxelIndex,
-  type Snapshot,
+  COLUMNS, DIM_X, DIM_Y, PATCHES, SOIL, WATER, columnIndex, patchOf, voxelIndex,
+  type Patch, type Snapshot,
 } from './loader';
 
-export const OVERLAYS = ['material', 'light', 'moisture', 'fertility', 'temperature'] as const;
+export const OVERLAYS = [
+  'material', 'light', 'moisture', 'fertility', 'temperature', 'fire', 'crowding', 'traits',
+] as const;
 export type Overlay = (typeof OVERLAYS)[number];
 
 export type RGB = [number, number, number];
@@ -22,7 +24,24 @@ export const COLORS = {
   fertilityHi: '#4a2c12',
   tempLo: '#2040ff',
   tempHi: '#ff3020',
+  fireLo: '#b3300a',
+  fireHi: '#ffb020',
+  burnt: '#2b2b2b',
+  crowdLo: '#ffffff',
+  crowdHi: '#d81b9c',
+  traitLo: '#1f5bff',
+  traitMid: '#ffffff',
+  traitHi: '#ff1f1f',
 } as const;
+
+/** Fire overlay: a burning patch is brightest at this many ticks left (the sim's `fire.duration` default). */
+export const FIRE_TICKS_FULL = 3;
+/** Fire overlay: a non-burning patch with grass + shrub below this is drawn as burnt ground. */
+export const BURNT_COVER = 0.05;
+/** Crowding overlay: grazers per patch at full magenta (twice the sim's grazer disease threshold of 16). */
+export const CROWDING_FULL = 32;
+/** Traits overlay: `energy_cost_mult` this far from the default 1 is fully blue (below) or red (above). */
+export const TRAIT_SPAN = 0.25;
 
 export function hexToRgb(hex: string): RGB {
   const n = parseInt(hex.replace('#', ''), 16);
@@ -60,6 +79,32 @@ export const temperatureColor = (celsius: number): RGB => lerpRgb(C.tempLo, C.te
 export const soilColor = (grass: number, shrub: number): RGB =>
   lerpRgb(lerpRgb(C.soil, C.grass, grass), C.shrub, shrub * 0.8);
 
+/** Fire overlay color of a burning patch: dark orange with 1 tick left to bright orange at FIRE_TICKS_FULL. */
+export const burningColor = (ticksLeft: number): RGB =>
+  lerpRgb(C.fireLo, C.fireHi, (ticksLeft - 1) / (FIRE_TICKS_FULL - 1));
+/** Fire overlay: a patch that isn't burning but has lost its cover reads as burnt (see DECISIONS.md). */
+export const isBurnt = (p: Patch): boolean => (p.burning_ticks_left ?? 0) === 0 && p.grass + p.shrub < BURNT_COVER;
+/** Crowding overlay: white at 0 grazers to magenta at CROWDING_FULL, clamped. */
+export const crowdingColor = (grazers: number): RGB => lerpRgb(C.crowdLo, C.crowdHi, grazers / CROWDING_FULL);
+/** Traits overlay grazer color: white at the default multiplier 1, blue below, red above, full at ±TRAIT_SPAN. */
+export const traitColor = (energyCostMult = 1): RGB => {
+  const t = (energyCostMult - 1) / TRAIT_SPAN;
+  return t < 0 ? lerpRgb(C.traitMid, C.traitLo, -t) : lerpRgb(C.traitMid, C.traitHi, t);
+};
+
+const crowdCache = new WeakMap<Snapshot, Uint16Array>();
+
+/** Live grazers per patch, counted once per snapshot. */
+export function grazersPerPatch(snap: Snapshot): Uint16Array {
+  let n = crowdCache.get(snap);
+  if (!n) {
+    n = new Uint16Array(PATCHES);
+    for (const e of snap.entities) if (e.kind === 'grazer') n[patchOf(Math.floor(e.x), Math.floor(e.y))]++;
+    crowdCache.set(snap, n);
+  }
+  return n;
+}
+
 /** Color of the top voxel of column (x, y) under the given overlay. */
 export function columnColor(snap: Snapshot, x: number, y: number, overlay: Overlay): RGB {
   const col = columnIndex(x, y);
@@ -69,10 +114,19 @@ export function columnColor(snap: Snapshot, x: number, y: number, overlay: Overl
     return lightColor(snap.light[voxelIndex(x, y, h + 1)]);
   }
   if (mat === WATER) return C.water;
-  const patch = snap.patches[patchOf(x, y)];
+  const p = patchOf(x, y);
+  const patch = snap.patches[p];
+  const burning = patch.burning_ticks_left ?? 0;
   switch (overlay) {
     case 'material':
+    case 'traits':
       return mat === SOIL ? soilColor(patch.grass, patch.shrub) : C.rock;
+    case 'fire':
+      if (mat !== SOIL) return C.rock;
+      if (burning > 0) return burningColor(burning);
+      return isBurnt(patch) ? C.burnt : soilColor(patch.grass, patch.shrub);
+    case 'crowding':
+      return crowdingColor(grazersPerPatch(snap)[p]);
     case 'moisture':
       return mat === SOIL ? moistureColor(snap.moisture[col]) : C.rock;
     case 'fertility':

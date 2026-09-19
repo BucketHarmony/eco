@@ -134,3 +134,37 @@ The job sets its own `defaults.run.working-directory: ecoview`, which overrides 
 - **Accepted versions.** The loader accepts `format_version` 1 and 2 (`FORMAT_VERSIONS` in `loader.ts`) and rejects anything else. Version 2 differs only by `state.bin` in each snapshot and `forked_from` in `meta.json`. The loader never fetches `state.bin`, so a v2 run renders exactly like the same run at v1.
 - **Sidebar.** When `forked_from` is non-null, the status line reads `<run> · seed N · forked from <parent run> @ tick T · K entities`. A v1 run, or a v2 run with `forked_from: null`, shows the line unchanged.
 - **Tests.** The v2 fixture is the committed mini fixture with `meta.json` rewritten in flight, as before. The unit test serves it through a fetcher and the e2e test through `page.route`. The error-state scenario now uses version 3. The committed data under `public/` isn't regenerated, so the shot references are unchanged.
+
+## Fire, crowding and traits (shot 12)
+
+**Data.** `public/runs/s42` was refreshed with `bash scripts/sync-data.sh` to ecosim's shot-11 run (format 2, 35 series columns). `public/fixtures/s42-mini` is unchanged: ecosim still ships it, and the sim's newer `s42-mini-v2` isn't in the sync script, which is outside this component.
+
+**Loader**
+- `OPTIONAL_COLUMNS` lists the columns sim shots 9 and 11 appended: `patches_burning`, `total_burnt` and the 12 trait means and SDs. Each is read into `series.extra` by header name when present and left undefined when not, so older runs still load.
+- `Patch.burning_ticks_left` and the animal traits `energy_cost_mult`, `flee_distance` and `repro_threshold` are optional fields. An animal without them is drawn as a default animal.
+
+**Overlays.** `fire`, `crowding` and `traits` join the overlay list. All three are "field overlays" for canopies, so in the top camera canopies are hidden and the ground and animals under them show.
+- **`fire`.** A burning soil column is orange by ticks left: `#b3300a` at 1 to `#ffb020` at 3 (`FIRE_TICKS_FULL`, the sim's `fire.duration` default), clamped. Rock and water keep their colours, because burn-out only touches soil columns in the sim.
+  - **"Burnt" is inferred.** The sim writes no burnt flag. Burn-out leaves a patch bare, so a patch that isn't burning and has grass + shrub below 0.05 (`BURNT_COVER`) is drawn charcoal `#2b2b2b`. Across all 201 snapshots of the s42 run, only tick 17300 has such patches: the four burnt-out patches next to the fire. Grazing never takes a patch that low, and a scar regrows past 0.05 within one 100-tick snapshot interval, so most fires leave no charcoal in any snapshot.
+  - Everything else is the material colour.
+- **`crowding`.** Live grazers per patch, counted from `entities.json` once per snapshot. The colour goes from white at 0 to magenta `#d81b9c` at 32 (`CROWDING_FULL`), clamped. 32 is twice the sim's grazer disease threshold of 16, so that threshold is half-magenta. The scale is a fixed constant, not read from `meta.json` params, so the colour means the same thing across runs. Like `temperature`, it colours every non-water column of the patch.
+- **`traits`.** The ground is the material colour. Grazers are coloured by `energy_cost_mult`: white at the default 1, lerping to blue `#1f5bff` below and red `#ff1f1f` above, fully saturated at ±0.25 (`TRAIT_SPAN`). The s42 grazers have a standard deviation of about 0.13.
+  - **Hunters are drawn gray `#555555` on this overlay.** Species red would read as a high-cost grazer.
+  - Per-instance colours need a white material, so trait grazers and gray hunters are two extra `Layer`s, shown only on this overlay.
+
+**Chart: fourth panel.** The canvas is now 300×500 (was 300×390), and a fourth panel sits under the deaths.
+- `patches_burning` is drawn as orange bars, each the **max** of its pixel's bucket of rows on a 0..max axis. Fires last about 3 ticks, and a bucket mean would erase them.
+- The mean grazer `energy_cost_mult` is a blue line on its own min..max range, since it moves a few percent around 1. The legend shows the range (`grazer cost × 0.96–1.00`).
+- Rows where the species is extinct are written as 0 by the sim. They are left out of the range and break the line.
+- A run with neither column shows an empty panel labelled "no fire or trait data".
+
+**Screenshots**
+- `09_fire_t17300_top.png`: 17300 is the snapshot with the most patches burning in `runs/s42` (5). The series peak is 6 at tick 5605, but that isn't a snapshot tick.
+- `10_crowding_t20000_top.png` and `11_traits_t20000_top.png` use the top camera, where overlay colours are exact.
+- All 11 references were re-accepted with `shot:accept`. The data had moved to the shot-11 run, and the taller chart changes the sidebar in every shot.
+
+**Tests**
+- `tests/e2e/overlays.spec.ts` rewrites the mini fixture's tick-0 `patches.json` or `entities.json` in flight and checks exact colours in the top camera, over patches that are all soil with no trees. For fire, it sets burning 3, burning 1 and a bare patch. For crowding, it puts a herd of 40 and one of 16 into two patches. For traits, it sets a grazer below the default cost, one above, one with no traits, and a hunter.
+- A mutation check confirmed the traits test fails when blue and red are swapped.
+- The tests decode the screenshot with `pngjs`, typed by a small `tests/pngjs.d.ts` rather than a new `@types` dependency.
+- Unit tests cover the new colour functions, `grazersPerPatch` and the optional series columns.

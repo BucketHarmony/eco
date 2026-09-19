@@ -155,7 +155,7 @@ async function apply(next: ViewState): Promise<void> {
     const top = state.cam === 'top';
     world.setLit(!top);
     world.build(snap, state.overlay);
-    entities!.build(snap, { fieldOverlay: state.overlay !== 'material', top });
+    entities!.build(snap, { fieldOverlay: state.overlay !== 'material', top, traits: state.overlay === 'traits' });
     const m = r.meta;
     drawChart(ui.chart, r.series, {
       grazer: speciesColor(m, 'grazer'),

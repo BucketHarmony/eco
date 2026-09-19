@@ -1,10 +1,12 @@
 // Trees as stacked cubes (trunk + canopy by stage) and animals as spheres, one InstancedMesh per part.
 import * as THREE from 'three';
 import { DIM_X, DIM_Y, speciesColor, type Meta, type Snapshot } from './loader';
-import { voxelCenter } from './world';
+import { traitColor, voxelCenter, type RGB } from './world';
 
 export const CANOPY_FIELD_OPACITY = 0.25;
 export const ANIMAL_RADIUS = 0.45;
+/** Traits overlay: hunters are drawn in this neutral gray so they aren't read as high-cost (red) grazers. */
+export const TRAITS_HUNTER_COLOR = '#555555';
 
 /** Canopy voxels (sim coordinates) for a tree whose trunk voxel is at (x, y, z). */
 export function canopyVoxels(x: number, y: number, z: number, stage: string): [number, number, number][] {
@@ -44,7 +46,8 @@ class Layer {
     return mesh;
   }
 
-  set(positions: THREE.Vector3[], useLit: boolean, visible: boolean): void {
+  /** `colors`, if given, are per-instance and should be used with a white material. */
+  set(positions: THREE.Vector3[], useLit: boolean, visible: boolean, colors?: RGB[]): void {
     if (positions.length > this.capacity) {
       this.group.remove(this.mesh);
       this.mesh.dispose();
@@ -55,6 +58,11 @@ class Layer {
     positions.forEach((p, i) => this.mesh.setMatrixAt(i, m.makeTranslation(p.x, p.y, p.z)));
     this.mesh.count = positions.length;
     this.mesh.instanceMatrix.needsUpdate = true;
+    if (colors?.length) {
+      const c = new THREE.Color();
+      colors.forEach(([r, g, b], i) => this.mesh.setColorAt(i, c.setRGB(r / 255, g / 255, b / 255, THREE.SRGBColorSpace)));
+      this.mesh.instanceColor!.needsUpdate = true;
+    }
     this.mesh.material = useLit ? this.lit : this.unlit;
     this.mesh.visible = visible && positions.length > 0;
   }
@@ -70,6 +78,8 @@ export interface EntityView {
   fieldOverlay: boolean;
   /** Top camera: unlit materials; canopies hidden on field overlays (see DECISIONS.md). */
   top: boolean;
+  /** Traits overlay: grazers colored by `energy_cost_mult`, hunters gray. */
+  traits: boolean;
 }
 
 export class Entities {
@@ -78,6 +88,8 @@ export class Entities {
   private readonly canopies: Layer;
   private readonly grazers: Layer;
   private readonly hunters: Layer;
+  private readonly traitGrazers: Layer;
+  private readonly grayHunters: Layer;
 
   constructor(meta: Meta) {
     const box = new THREE.BoxGeometry(1, 1, 1);
@@ -86,6 +98,8 @@ export class Entities {
     this.canopies = new Layer(this.group, box, ...materials(speciesColor(meta, 'tree', 'canopy_color')));
     this.grazers = new Layer(this.group, sphere, ...materials(speciesColor(meta, 'grazer')));
     this.hunters = new Layer(this.group, sphere, ...materials(speciesColor(meta, 'hunter')));
+    this.traitGrazers = new Layer(this.group, sphere, ...materials('#ffffff'));
+    this.grayHunters = new Layer(this.group, sphere, ...materials(TRAITS_HUNTER_COLOR));
   }
 
   build(snap: Snapshot, view: EntityView): void {
@@ -93,12 +107,14 @@ export class Entities {
     const canopies: THREE.Vector3[] = [];
     const grazers: THREE.Vector3[] = [];
     const hunters: THREE.Vector3[] = [];
+    const traits: RGB[] = [];
     for (const e of snap.entities) {
       if (e.kind === 'tree') {
         trunks.push(voxelCenter(e.x, e.y, e.z));
         for (const [x, y, z] of canopyVoxels(e.x, e.y, e.z, e.stage)) canopies.push(voxelCenter(x, y, z));
       } else {
         (e.kind === 'grazer' ? grazers : hunters).push(voxelCenter(e.x, e.y, e.z));
+        if (e.kind === 'grazer' && view.traits) traits.push(traitColor(e.energy_cost_mult));
       }
     }
     const lit = !view.top;
@@ -110,7 +126,9 @@ export class Entities {
     }
     this.trunks.set(trunks, lit, true);
     this.canopies.set(canopies, lit, !(view.top && view.fieldOverlay));
-    this.grazers.set(grazers, lit, true);
-    this.hunters.set(hunters, lit, true);
+    this.grazers.set(grazers, lit, !view.traits);
+    this.hunters.set(hunters, lit, !view.traits);
+    this.traitGrazers.set(view.traits ? grazers : [], lit, view.traits, traits);
+    this.grayHunters.set(view.traits ? hunters : [], lit, view.traits);
   }
 }

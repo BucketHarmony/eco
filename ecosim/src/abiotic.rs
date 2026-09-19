@@ -101,7 +101,7 @@ impl Sim {
     /// Patch temperature: base + amp·sin(2π·tick/year_len) − canopy_cool·canopy_fraction.
     pub fn update_temperature(&mut self, tick: u32) {
         let cl = &self.params.climate;
-        let season = cl.temp_base + cl.temp_amp * (2.0 * PI * tick as f32 / cl.year_len as f32).sin();
+        let season = cl.temp_base + self.params.season.amplitude * (2.0 * PI * tick as f32 / cl.year_len as f32).sin();
         for p in 0..PATCHES {
             let (px, py) = (p % 8, p / 8);
             let mut covered = 0;

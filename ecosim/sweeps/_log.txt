@@ -1,0 +1,8 @@
+grazer_energy_cost rc=0 wall=44s
+hunter_kill_prob rc=0 wall=32s
+hunter_refugium_shrub rc=0 wall=24s
+tree_mature_age rc=0 wall=29s
+season_amplitude rc=0 wall=17s
+energy_x_kill rc=0 wall=34s
+season_amplitude_no_rain_season rc=0 wall=15s
+total=195s

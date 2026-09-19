@@ -46,6 +46,8 @@ struct Meta<'a> {
     snapshots: Vec<u32>,
     species: Vec<Species>,
     params: &'a Params,
+    /// The `--set key=value` strings applied on top of the params file, in order.
+    overrides: &'a [String],
 }
 
 fn species_list() -> Vec<Species> {
@@ -163,7 +165,14 @@ pub fn write_snapshot(sim: &Sim, run_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn write_meta(sim: &Sim, seed: u64, ticks: u32, snapshot_every: u32, run_dir: &Path) -> io::Result<()> {
+pub fn write_meta(
+    sim: &Sim,
+    seed: u64,
+    ticks: u32,
+    snapshot_every: u32,
+    overrides: &[String],
+    run_dir: &Path,
+) -> io::Result<()> {
     let meta = Meta {
         format_version: FORMAT_VERSION,
         dims: Dims { x: WX, y: WY, z: WZ },
@@ -175,6 +184,7 @@ pub fn write_meta(sim: &Sim, seed: u64, ticks: u32, snapshot_every: u32, run_dir
         snapshots: (0..=ticks).filter(|t| t % snapshot_every == 0).collect(),
         species: species_list(),
         params: &sim.params,
+        overrides,
     };
     fs::write(run_dir.join("meta.json"), serde_json::to_vec(&meta)?)
 }
@@ -200,30 +210,56 @@ pub struct RunSummary {
     pub rows: Vec<StatsRow>,
 }
 
-/// Full run: tick 0 is recorded before any update, then ticks 1..=ticks.
-pub fn run(params: Params, seed: u64, ticks: u32, snapshot_every: u32, out: &Path) -> io::Result<RunSummary> {
+/// The one simulation driver shared by `run` and `sweep`: tick 0 is recorded before any update,
+/// then ticks 1..=ticks. `on_tick` sees the state each row is taken from, before it is taken.
+pub fn simulate(
+    sim: &mut Sim,
+    ticks: u32,
+    mut on_tick: impl FnMut(&Sim) -> io::Result<()>,
+) -> io::Result<Vec<StatsRow>> {
+    let mut rows = Vec::with_capacity(ticks as usize + 1);
+    loop {
+        on_tick(sim)?;
+        rows.push(sim.stats());
+        if sim.tick >= ticks {
+            return Ok(rows);
+        }
+        sim.step();
+    }
+}
+
+/// `series.csv` contents for a list of rows.
+pub fn series_csv(rows: &[StatsRow]) -> String {
+    let mut csv = String::with_capacity((rows.len() + 1) * 80);
+    csv.push_str(SERIES_HEADER);
+    csv.push('\n');
+    for r in rows {
+        let _ = writeln!(csv, "{}", format_row(r));
+    }
+    csv
+}
+
+/// Full run into a run directory. `overrides` are only recorded; they must already be applied to `params`.
+pub fn run(
+    params: Params,
+    seed: u64,
+    ticks: u32,
+    snapshot_every: u32,
+    overrides: &[String],
+    out: &Path,
+) -> io::Result<RunSummary> {
     assert!(snapshot_every > 0, "snapshot_every must be > 0");
     let start = Instant::now();
     prepare_dir(out)?;
     let mut sim = Sim::new(params, seed);
-    write_meta(&sim, seed, ticks, snapshot_every, out)?;
-    let mut rows = Vec::with_capacity(ticks as usize + 1);
-    let mut csv = String::with_capacity((ticks as usize + 2) * 80);
-    csv.push_str(SERIES_HEADER);
-    csv.push('\n');
-    loop {
-        if sim.tick % snapshot_every == 0 {
-            write_snapshot(&sim, out)?;
+    write_meta(&sim, seed, ticks, snapshot_every, overrides, out)?;
+    let rows = simulate(&mut sim, ticks, |s| {
+        if s.tick % snapshot_every == 0 {
+            write_snapshot(s, out)?;
         }
-        let row = sim.stats();
-        let _ = writeln!(csv, "{}", format_row(&row));
-        rows.push(row);
-        if sim.tick >= ticks {
-            break;
-        }
-        sim.step();
-    }
-    fs::write(out.join("series.csv"), csv)?;
+        Ok(())
+    })?;
+    fs::write(out.join("series.csv"), series_csv(&rows))?;
     let wall_ms = start.elapsed().as_millis();
     fs::write(out.join("timing.json"), format!("{{\"wall_ms\":{wall_ms}}}"))?;
     Ok(RunSummary { wall_ms, rows })

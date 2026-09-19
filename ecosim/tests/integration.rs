@@ -79,13 +79,15 @@ fn snapshot_round_trips_through_reader() {
     }
     let dir = tmp("snap_rt");
     fs::create_dir_all(&dir).unwrap();
-    write_meta(&sim, 3, 300, 100, &dir).unwrap();
+    write_meta(&sim, 3, 300, 100, &["hunter.kill_prob=0.2".to_string()], &dir).unwrap();
     write_snapshot(&sim, &dir).unwrap();
 
     let meta = read_json(&dir.join("meta.json"));
     assert_eq!(meta["format_version"], FORMAT_VERSION);
     assert_eq!(meta["dims"]["x"], WX);
     assert_eq!(meta["snapshots"].as_array().unwrap().len(), 4);
+    assert_eq!(meta["overrides"], serde_json::json!(["hunter.kill_prob=0.2"]));
+    assert_eq!(meta["params"]["season"]["amplitude"], 12.0);
 
     let snap = dir.join("snap_000300");
     assert_eq!(fs::read(snap.join("material.bin")).unwrap(), sim.world.material);
@@ -127,7 +129,7 @@ fn snapshot_round_trips_through_reader() {
 #[test]
 fn full_run_writes_series_header_and_one_row_per_tick() {
     let dir = tmp("series");
-    let s = run(Params::load_default(), 5, 250, 100, &dir).unwrap();
+    let s = run(Params::load_default(), 5, 250, 100, &[], &dir).unwrap();
     let csv = fs::read_to_string(dir.join("series.csv")).unwrap();
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines[0], SERIES_HEADER);

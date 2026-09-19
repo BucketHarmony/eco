@@ -11,6 +11,7 @@ pub type Curve = [f32; 4];
 pub struct Params {
     pub world: WorldParams,
     pub climate: ClimateParams,
+    pub season: SeasonParams,
     pub cover: CoverParams,
     pub grass: CoverSpecies,
     pub shrub: CoverSpecies,
@@ -39,7 +40,6 @@ pub struct WorldParams {
 pub struct ClimateParams {
     pub year_len: u32,
     pub temp_base: f32,
-    pub temp_amp: f32,
     pub canopy_cool: f32,
     pub rain_base: f32,
     pub rain_amp: f32,
@@ -51,6 +51,13 @@ pub struct ClimateParams {
     pub decay_temp_full: f32,
     pub initial_moisture: f32,
     pub initial_fertility: f32,
+}
+
+/// Seasonal forcing. Temperature is `temp_base + amplitude·sin(2π t / year_len)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeasonParams {
+    pub amplitude: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,12 +161,29 @@ pub struct HunterParams {
 
 impl Params {
     pub fn from_toml_str(s: &str) -> Result<Params, String> {
-        toml::from_str(s).map_err(|e| format!("params: {e}"))
+        Params::from_toml_str_with(s, &[])
+    }
+
+    /// Parse a params file and apply `--set key=value` overrides before deserializing.
+    pub fn from_toml_str_with(s: &str, overrides: &[String]) -> Result<Params, String> {
+        let mut root = toml::Value::Table(s.parse::<toml::Table>().map_err(|e| format!("params: {e}"))?);
+        for o in overrides {
+            apply_override(&mut root, o)?;
+        }
+        Params::from_value(root)
+    }
+
+    pub fn from_value(root: toml::Value) -> Result<Params, String> {
+        root.try_into().map_err(|e| format!("params: {e}"))
     }
 
     pub fn load(path: &Path) -> Result<Params, String> {
+        Params::load_with(path, &[])
+    }
+
+    pub fn load_with(path: &Path, overrides: &[String]) -> Result<Params, String> {
         let s = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Params::from_toml_str(&s)
+        Params::from_toml_str_with(&s, overrides).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// The crate's own `params.toml`, used by tests so tuning applies to them too.
@@ -173,5 +197,90 @@ impl Params {
         let mut c = self.tree.light;
         c[1] = self.tree.sapling_light.max(c[0] + 1.0);
         c
+    }
+}
+
+/// Apply one `dotted.key=value` override to a parsed params document. The key must already exist,
+/// and the value must have the existing value's type (an integer-valued float such as `500.0` is
+/// accepted for an integer key, and an integer for a float key). Errors name the key.
+pub fn apply_override(root: &mut toml::Value, spec: &str) -> Result<(), String> {
+    let (key, raw) = spec.split_once('=').ok_or_else(|| format!("--set {spec}: expected key=value"))?;
+    let (key, raw) = (key.trim(), raw.trim());
+    let mut cur = root;
+    for part in key.split('.') {
+        let table = cur.as_table_mut().ok_or_else(|| format!("--set {key}: unknown key ('{part}' is under a non-table)"))?;
+        cur = table.get_mut(part).ok_or_else(|| format!("--set {key}: unknown key"))?;
+    }
+    *cur = coerce(cur, raw).map_err(|e| format!("--set {key}: {e}"))?;
+    Ok(())
+}
+
+fn coerce(old: &toml::Value, raw: &str) -> Result<toml::Value, String> {
+    use toml::Value as V;
+    match old {
+        V::Integer(_) => match (raw.parse::<i64>(), raw.parse::<f64>()) {
+            (Ok(i), _) => Ok(V::Integer(i)),
+            (_, Ok(f)) if f.is_finite() && f.fract() == 0.0 => Ok(V::Integer(f as i64)),
+            _ => Err(format!("expected an integer, got '{raw}'")),
+        },
+        V::Float(_) => raw.parse::<f64>().map(V::Float).map_err(|_| format!("expected a number, got '{raw}'")),
+        V::Boolean(_) => raw.parse::<bool>().map(V::Boolean).map_err(|_| format!("expected true or false, got '{raw}'")),
+        V::String(_) => Ok(V::String(raw.to_string())),
+        V::Array(a) => {
+            let doc = format!("v = {raw}").parse::<toml::Table>().map_err(|_| format!("expected an array, got '{raw}'"))?;
+            let V::Array(new) = &doc["v"] else { return Err(format!("expected an array, got '{raw}'")) };
+            if new.len() != a.len() {
+                return Err(format!("expected an array of {} elements, got {}", a.len(), new.len()));
+            }
+            let items: Result<Vec<_>, _> =
+                a.iter().zip(new).map(|(o, n)| coerce(o, &n.to_string())).collect();
+            Ok(V::Array(items?))
+        }
+        V::Table(_) => Err("is a table; set one of its keys".into()),
+        V::Datetime(_) => Err("datetime keys are not supported".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defaults() -> String {
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml")).unwrap()
+    }
+
+    #[test]
+    fn set_nested_keys_round_trip() {
+        let sets: Vec<String> = ["hunter.kill_prob=0.25", "tree.mature_age=1500.0", "grass.initial=1", "shrub.light=[1, 2.5, 3, 4]"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let p = Params::from_toml_str_with(&defaults(), &sets).unwrap();
+        assert_eq!(p.hunter.kill_prob, 0.25);
+        assert_eq!(p.tree.mature_age, 1500);
+        assert_eq!(p.grass.initial, 1.0);
+        assert_eq!(p.shrub.light, [1.0, 2.5, 3.0, 4.0]);
+        // Setting a key to its current value changes nothing.
+        let same = Params::from_toml_str_with(&defaults(), &["season.amplitude=12".into()]).unwrap();
+        assert_eq!(serde_json::to_string(&same).unwrap(), serde_json::to_string(&Params::load_default()).unwrap());
+    }
+
+    #[test]
+    fn set_unknown_key_errors_naming_it() {
+        for bad in ["hunter.kill_probability=0.2", "nosuch.key=1", "hunter.kill_prob.x=1", "hunter=1"] {
+            let e = Params::from_toml_str_with(&defaults(), &[bad.into()]).unwrap_err();
+            let key = bad.split('=').next().unwrap();
+            assert!(e.contains(key), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn set_wrong_type_errors_naming_it() {
+        for bad in ["tree.mature_age=1.5", "hunter.kill_prob=high", "shrub.light=[1, 2]", "grazer.cooldown=abc"] {
+            let e = Params::from_toml_str_with(&defaults(), &[bad.into()]).unwrap_err();
+            let key = bad.split('=').next().unwrap();
+            assert!(e.contains(key), "{bad}: {e}");
+        }
+        assert!(Params::from_toml_str_with(&defaults(), &["no_equals_sign".into()]).is_err());
     }
 }

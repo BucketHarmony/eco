@@ -14,7 +14,6 @@ compact_every = 100
 [climate]
 year_len = 4000
 temp_base = 12.0
-temp_amp = 12.0
 canopy_cool = 3.0
 rain_base = 8.0
 rain_amp = 4.0
@@ -26,6 +25,10 @@ decay_k = 0.015
 decay_temp_full = 30.0
 initial_moisture = 128.0
 initial_fertility = 128.0
+
+[season]
+# Temperature swing: temp_base ± amplitude over one year (was climate.temp_amp).
+amplitude = 12.0
 
 [cover]
 moisture_draw = 15.0

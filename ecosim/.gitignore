@@ -1,0 +1,3 @@
+runs/
+sweeps/*/cells/
+__pycache__/

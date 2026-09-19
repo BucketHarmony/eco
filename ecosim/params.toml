@@ -121,3 +121,17 @@ refugium_k = 2.0
 seek_radius = 16.0
 immigration_floor = 0
 immigration_interval = 500
+
+[fire]
+# Fire disturbance (shot 9). base_rate 0 switches fire off: no draws, no burning.
+base_rate = 0.002
+temp_min = 15.0
+temp_full = 30.0
+detritus_weight = 0.0002
+canopy_weight = 1.0
+duration = 3
+spread = 0.1
+tree_kill = 0.5
+detritus_yield = 10.0
+ash = 5.0
+animal_damage = 2.0

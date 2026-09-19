@@ -393,3 +393,83 @@ This shot adds `state.bin` to every snapshot, `Sim::restore`, and `ecosim fork`.
 - **`runs/s42` (gitignored) was regenerated as format 2,** so that it can be forked. ecoview's copy in `ecoview/public/` is still the format-1 run. This shot doesn't touch the renderer, and the renderer's shot 8 teaches it format 2.
 
 **Size and speed.** `state.bin` is about 100 KB for seed 42 at tick 10000, so that snapshot grows from 452 KB to 554 KB. A 20000-tick release run of seed 42 takes 6.1 s, and the fork demo takes 2.6 s. Both are well inside the 30 s runtime invariant.
+
+## Fire (shot 09)
+
+**Where fire sits in the tick**
+- Tick order: animals → immigration → producers → trees (every `tree.update_every`) → **fire (every tick)** → soil (every 10) → temperature (every 100) → compaction.
+- Fire runs after producers so that burn-out zeroes grass and shrub after that tick's growth. That makes "grass = shrub = 0 the tick after burn-out" hold.
+- It runs before soil, so the ash lands in the fertility that the next soil update diffuses.
+- Animals act first in each tick, so they take damage from the burning state left by the previous tick.
+
+**Fuel** (`Sim::fuel`)
+- Fuel is grass×0.5 + shrub×1.0 + detritus×`detritus_weight` + canopy_fraction×`canopy_weight`, where canopy_fraction = canopied columns / 64 (the same count the temperature update uses, now `canopy_columns`).
+- A patch with no soil columns (all water or all rock) has fuel 0 whatever its detritus or canopy. So it never ignites, and fire never spreads into it.
+- A mixed patch burns, but burn-out touches only its soil columns: fertility and ash go to those columns, and detritus scales by their count.
+
+**Ignition, spread and burn-out** (`Sim::update_fire`)
+Each tick the phase works in this order:
+1. Collect the patches burning at the start of the phase.
+2. Each of them rolls against each non-burning 4-neighbour, in the order +x, −x, +y, −y. There is no roll when the probability is 0, so fuel-0 neighbours and spread 0 draw nothing.
+3. The collected patches count down, and a patch that reaches 0 burns out.
+4. Every 10 ticks, when `base_rate` > 0, there is one draw per patch in patch order. A non-burning patch ignites when the draw is below p.
+
+Consequences of that order:
+- A patch lit by spread starts counting down on the next tick, so it burns exactly `duration` ticks.
+- A patch that has burnt out can be relit at once. Its fuel is then only detritus and canopy, which is small but not zero.
+- `duration` 0 is read as 1, so an ignited patch always burns out once.
+
+Probabilities:
+- The temperature ramp f(T) is linear from `temp_min` (15 °C) to `temp_full` (30 °C), both exposed as params so the tests can force ignition.
+- The ignition p is clamped to [0, 1].
+- Moisture is the patch's mean surface moisture, the same as the grass-growth input.
+- The rate-0 check sits outside the patch loop, so at base_rate 0 nothing ever burns and the fire phase makes no draws and no writes.
+
+Burn-out:
+- Tree deaths go through `kill_tree` (now `pub(crate)`), which updates light and canopy cover for the 3×3 columns the same way age deaths do. That is the "light is recomputed for the affected columns" requirement.
+- There is one `tree_kill` draw per live tree in the patch, in Vec order, and none when `tree_kill` is 0.
+
+**Animals**
+- An animal in a burning patch loses `animal_damage` energy that tick before anything else. It then flees: one greedy step directly away from the patch centre.
+- Fleeing fire comes before fleeing hunters (grazers) and before satiation or hunting (hunters). Hunters flee too, because the rule says "animals".
+- A death at energy ≤ 0 in a burning patch records `burnt`. Burnt takes precedence over `starved`, since the fire damage is what took the energy below 0 that tick.
+- The death-cause property used to assert that `burnt` and `crowded` are both 0. It now asserts only `crowded` is 0, since `burnt` is a normal cause.
+
+**Outputs**
+- **series.csv** gains `patches_burning` (patches burning after the fire phase) and `total_burnt` (cumulative burn-outs) as its last two columns, giving 23 fields.
+  - `check`, `stats` and `sweep` also accept the 21-field pre-fire header and read the fire columns as 0, so version-1 and shot-8 run directories still check.
+- **patches.json** gains `burning_ticks_left` per patch, as its last field.
+- **`format_version` stays 2.** Both changes only append fields, which JSON and CSV readers keyed by name ignore.
+- **state.bin** goes to `STATE_VERSION` 2: layout v1 plus a fire section of `total_burnt` (u32) and 64 × `burning_ticks_left` (u32).
+  - Restore rejects v1 `state.bin`, so a pre-fire run directory can no longer be forked. Rerun it instead; shot-7 runs were throwaway.
+  - The fixture was regenerated, so no committed file carries v1 state.
+
+**Tests**
+- There are four fire properties in `src/fire.rs`, each with a named regression sibling:
+  - fuel is 0 on water and rock
+  - spread never crosses water: a full water column band, 400 ticks at certain spread
+  - a burnt patch is bare the tick after burn-out
+  - ignition is monotone in fuel and temperature
+- Unit tests pin:
+  - the one-draw-per-patch rule on ignition ticks only
+  - no draws and no writes at rate 0
+  - the burn-out effects
+  - certain spread to the four neighbours
+  - animal damage, fleeing and `burnt`
+- **Rate-0 identity:** `fire_off_reproduces_the_pre_fire_manifest` runs seed 42 at `fire.base_rate=0` and compares it with the pre-shot manifest, kept as `tests/data/s42-manifest-prefire.sha256`. Each file first passes through `tests/common::without_fire`, which strips the two series columns, the `burning_ticks_left` field and the state.bin fire section, asserting they are all zero, and sets the state version back to 1. The run is byte-identical otherwise.
+- `format_2_and_fire_only_add_to_version_1_files` checks the fixtures:
+  - A fire-off 100-tick run, passed through `without_fire`, still matches the v1 fixture `s42-mini`.
+  - A default run matches the regenerated `s42-mini-v2`.
+- `forced_fire_extinction_runs_to_the_end_and_is_attributed_to_fire` runs at base_rate 1, a ramp from −50 to −40 °C (always hot) and damage 100. It checks:
+  - both animal species die out, with `burnt` as their dominant cause
+  - the run reaches 20000 with valid snapshots and no NaN
+  - the last snapshot restores
+- The forced-starvation test now also sets `fire.base_rate=0`. Otherwise fire deaths change its window's dominant cause.
+
+**Regenerated artifacts (fire changes behaviour at the defaults)**
+- `tests/data/s42-manifest.sha256`: 1609 lines, same file set. The snapshots before the first fire are unchanged.
+- `tests/data/s42-check.txt`: seed 42 still passes every invariant, with 61 mature trees at tick 10000.
+- `fixtures/s42-mini-v2`
+- `runs/s42` (gitignored)
+- `fixtures/s42-mini` (v1) is unchanged.
+- ecoview's copy in `ecoview/public/` is now stale: it lacks the fire columns and field, and an ecosim shot doesn't edit ecoview. A renderer shot has to rerun `scripts/sync-data.sh`.

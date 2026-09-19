@@ -154,7 +154,8 @@ impl Sim {
         }
     }
 
-    fn kill_tree(&mut self, i: usize) {
+    /// Kill tree `i`: clear its trunk, add `death_detritus` to its patch and reopen the light under its crown.
+    pub(crate) fn kill_tree(&mut self, i: usize) {
         let (x, y, col) = {
             let t = &mut self.trees[i];
             t.alive = false;

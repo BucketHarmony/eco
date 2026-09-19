@@ -1,0 +1,5 @@
+# shot 09 sweeps, release binary, 24-core build machine (2026-09-19)
+ecosim sweep --param fire.base_rate --range 0:0.004:0.0005 --seeds 1,2,3 --jobs 22 --out sweeps/shot09/fire_base_rate
+fire_base_rate rc=0 wall=41s
+ecosim sweep --param fire.spread --range 0:0.5:0.1 --seeds 1,2,3 --jobs 22 --out sweeps/shot09/fire_spread
+fire_spread rc=0 wall=31s

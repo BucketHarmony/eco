@@ -19,6 +19,8 @@ pub struct Patch {
     pub detritus: f32,
     /// Temperature, °C.
     pub temperature: f32,
+    /// Ticks until the patch burns out; 0 when it is not burning.
+    pub burning_ticks_left: u32,
 }
 
 /// Deaths during one tick, indexed `[Kind as usize][Cause as usize]` (grazers, then hunters).
@@ -51,6 +53,10 @@ pub struct StatsRow {
     pub hunter_immigrants: u32,
     /// Deaths during this tick by species and cause.
     pub deaths: Deaths,
+    /// Patches burning at the end of this tick.
+    pub patches_burning: u32,
+    /// Patches that have burnt out so far (cumulative).
+    pub total_burnt: u32,
 }
 
 /// Marks a column with no trunk in `Sim::trunk_at`.
@@ -116,6 +122,8 @@ pub struct Sim {
     pub hunter_immigrants: u32,
     /// Deaths during the current tick by species and cause; cleared at the start of each step.
     pub deaths: Deaths,
+    /// Patches that have burnt out so far.
+    pub total_burnt: u32,
 }
 
 impl Sim {
@@ -145,6 +153,7 @@ impl Sim {
                     shrub: if has_soil { params.shrub.initial } else { 0.0 },
                     detritus: 0.0,
                     temperature: 0.0,
+                    burning_ticks_left: 0,
                 }
             })
             .collect();
@@ -169,6 +178,7 @@ impl Sim {
             next_id: 0,
             hunter_immigrants: 0,
             deaths: Deaths::default(),
+            total_burnt: 0,
         };
         sim.seek_offsets = offsets_within(sim.params.hunter.seek_radius);
         sim.flee_offsets = offsets_within(sim.params.grazer.flee_radius);
@@ -188,6 +198,7 @@ impl Sim {
         p.hunter.start_count = 0;
         p.hunter.immigration_floor = 0;
         p.grazer.immigration_floor = 0;
+        p.fire.base_rate = 0.0;
         let world = World::from_heights(heights, &p);
         Sim::with_world(p, ChaCha8Rng::seed_from_u64(3), world)
     }
@@ -253,7 +264,8 @@ impl Sim {
     }
 
     /// Advance one tick, in the fixed order:
-    /// animals → immigration → producers → moisture/fertility (every 10) → temperature (every 100).
+    /// animals → immigration → producers → trees (every `update_every`) → fire → moisture/fertility
+    /// (every 10) → temperature (every 100).
     /// Snapshots and stats rows are taken by the caller after this returns.
     pub fn step(&mut self) {
         self.tick += 1;
@@ -265,6 +277,7 @@ impl Sim {
         if t.is_multiple_of(self.params.tree.update_every) {
             self.update_trees();
         }
+        self.update_fire(t);
         if t.is_multiple_of(10) {
             self.update_soil(t);
         }
@@ -333,6 +346,8 @@ impl Sim {
             temperature: (self.patches.iter().map(|p| p.temperature as f64).sum::<f64>() / PATCHES as f64) as f32,
             hunter_immigrants: self.hunter_immigrants,
             deaths: self.deaths,
+            patches_burning: self.patches.iter().filter(|p| p.burning_ticks_left > 0).count() as u32,
+            total_burnt: self.total_burnt,
         }
     }
 }

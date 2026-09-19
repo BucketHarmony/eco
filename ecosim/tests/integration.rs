@@ -9,6 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn tmp(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&d);
@@ -172,20 +174,17 @@ fn full_run_writes_series_header_and_one_row_per_tick() {
     assert!(!dir.join("snap_000250").exists());
 }
 
-/// Forced extinction: `grazer.energy_cost=0.5` starves the grazers out on seed 1 (tick 8461), and
-/// the hunters follow. The run still completes 20000 ticks: every snapshot `meta.json` lists exists
-/// with full-size fields and finite patch and entity values, the series has no NaN, and
-/// `ecosim stats` names `starved` as the dominant cause of the grazer extinction.
-#[test]
-fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
-    let dir = tmp("forced_extinction");
-    let set = ["grazer.energy_cost=0.5".to_string()];
-    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
-    let s = run(params, 1, 20_000, 1000, &set, &dir).unwrap();
+/// Seed 1 for 20000 ticks with `set` applied, a snapshot every 1000, into `dir`. Returns the last row.
+fn run_with(dir: &Path, set: &[String]) -> ecosim::StatsRow {
+    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), set).unwrap();
+    let s = run(params, 1, 20_000, 1000, set, dir).unwrap();
     assert_eq!(s.rows.len(), 20_001);
-    let last = s.rows.last().unwrap();
-    assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species extinct by the end");
-    assert!(last.trees > 0);
+    *s.rows.last().unwrap()
+}
+
+/// The run in `dir` completed: the series has no NaN, and every snapshot `meta.json` lists exists
+/// with full-size fields and finite patch and entity values. Returns `ecosim stats` output.
+fn assert_valid_run(dir: &Path) -> String {
     let csv = fs::read_to_string(dir.join("series.csv")).unwrap();
     assert!(!csv.to_lowercase().contains("nan") && !csv.contains("inf"), "non-finite value in series.csv");
 
@@ -206,47 +205,106 @@ fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
             for k in ["grass", "shrub", "detritus", "temperature"] {
                 assert!(finite(&p[k]), "{}: patch {k} = {}", snap.display(), p[k]);
             }
+            assert!(p["burning_ticks_left"].is_u64(), "{}: {p}", snap.display());
         }
         for e in read_json(&snap.join("entities.json")).as_array().unwrap() {
             assert!(finite(&e["x"]) && finite(&e["y"]), "{}: {e}", snap.display());
             assert!(e["kind"] == "tree" || finite(&e["energy"]), "{}: {e}", snap.display());
         }
     }
-
-    let out = Command::new(env!("CARGO_BIN_EXE_ecosim")).arg("stats").arg(&dir).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ecosim")).arg("stats").arg(dir).output().unwrap();
     assert!(out.status.success());
-    let text = String::from_utf8(out.stdout).unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Forced extinction: `grazer.energy_cost=0.5` starves the grazers out on seed 1, and the hunters
+/// follow. Fire is off (`fire.base_rate=0`) so starvation is the only thing forced. The run still
+/// completes 20000 ticks with valid snapshots, and `ecosim stats` names `starved` as the dominant
+/// cause of the grazer extinction.
+#[test]
+fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
+    let dir = tmp("forced_extinction");
+    let last = run_with(&dir, &["grazer.energy_cost=0.5".to_string(), "fire.base_rate=0".to_string()]);
+    assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species extinct by the end");
+    assert!(last.trees > 0);
+    let text = assert_valid_run(&dir);
     let grazer =
         text.lines().find(|l| l.starts_with("extinction: grazers at tick")).unwrap_or_else(|| panic!("{text}"));
     assert!(grazer.contains("dominant cause: starved"), "{grazer}");
     assert!(text.contains("extinction: hunters at tick"), "{text}");
 }
 
+/// Forced extinction by fire: every patch can ignite at any temperature and fire kills any animal
+/// in one tick, so both animal species burn out on seed 1 (hunters at tick 1333, grazers at 1611).
+/// The run continues to 20000 ticks with valid snapshots, fires keep burning, and `ecosim stats`
+/// names `burnt` as the dominant cause of both extinctions.
+#[test]
+fn forced_fire_extinction_runs_to_the_end_and_is_attributed_to_fire() {
+    let dir = tmp("forced_fire_extinction");
+    let set: Vec<String> = ["fire.base_rate=1", "fire.temp_min=-50", "fire.temp_full=-40", "fire.animal_damage=100"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let last = run_with(&dir, &set);
+    assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species burnt out");
+    assert!(last.total_burnt > 1000, "total_burnt {}", last.total_burnt);
+    let text = assert_valid_run(&dir);
+    for species in ["grazers", "hunters"] {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(&format!("extinction: {species} at tick")))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(line.contains("dominant cause: burnt"), "{line}");
+    }
+    let snap = dir.join("snap_020000");
+    let sim = Sim::restore(
+        Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap(),
+        &snap,
+    )
+    .unwrap();
+    assert_eq!((sim.tick, sim.total_burnt), (20_000, last.total_burnt), "the last snapshot restores");
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name)
 }
 
-/// Format version 2 only adds files: the v2 mini fixture (same command as the v1 one) differs from it
-/// in `meta.json` and the two new `state.bin` files, and its `meta.json` only in the version and the
-/// `forked_from` key.
+/// Format version 2 and fire only add files, fields and columns. A fresh seed-42 mini run with fire
+/// off, with the fire additions cut (`common::without_fire`), is the v1 fixture byte for byte apart
+/// from `meta.json` (the version, `forked_from` and the `[fire]` params) and the new `state.bin`
+/// files. The committed v2 fixture is the same command at the defaults, and is current.
 #[test]
-fn format_2_keeps_every_version_1_file_byte_for_byte() {
-    let (v1, v2) = (fixture("s42-mini"), fixture("s42-mini-v2"));
-    let diff = ecosim::check::diff_runs(&v1, &v2).unwrap();
-    let only_v2 = |f: &str| format!("only in {}: {f}", v2.display());
-    assert_eq!(
-        diff,
-        vec!["differs: meta.json".to_string(), only_v2("snap_000000/state.bin"), only_v2("snap_000100/state.bin")]
-    );
-    let (mut a, mut b) = (read_json(&v1.join("meta.json")), read_json(&v2.join("meta.json")));
+fn format_2_and_fire_only_add_to_version_1_files() {
+    let v1 = fixture("s42-mini");
+    let fresh = tmp("mini_fire_off");
+    let mut p = Params::load_default();
+    p.fire.base_rate = 0.0;
+    run(p, 42, 100, 100, &[], &fresh).unwrap();
+    let cut = |rel: &str| common::without_fire(Path::new(rel), fs::read(fresh.join(rel)).unwrap());
+    assert!(cut("series.csv") == fs::read(v1.join("series.csv")).unwrap(), "series.csv");
+    for snap in ["snap_000000", "snap_000100"] {
+        let files: Vec<_> = fs::read_dir(v1.join(snap)).unwrap().map(|e| e.unwrap().file_name()).collect();
+        for f in &files {
+            let rel = format!("{snap}/{}", f.to_str().unwrap());
+            assert!(cut(&rel) == fs::read(v1.join(&rel)).unwrap(), "{rel}");
+        }
+        assert_eq!(fs::read_dir(fresh.join(snap)).unwrap().count(), files.len() + 1);
+        assert!(fresh.join(snap).join("state.bin").exists());
+    }
+    let (mut a, mut b) = (read_json(&v1.join("meta.json")), read_json(&fresh.join("meta.json")));
     assert_eq!((a["format_version"].as_u64(), b["format_version"].as_u64()), (Some(1), Some(FORMAT_VERSION as u64)));
-    assert!(b["forked_from"].is_null());
+    assert!(b["forked_from"].is_null() && b["params"]["fire"].is_object());
     for m in [&mut a, &mut b] {
         let o = m.as_object_mut().unwrap();
         o.remove("format_version");
         o.remove("forked_from");
+        o["params"].as_object_mut().unwrap().remove("fire");
     }
     assert_eq!(a, b);
+
+    let defaults = tmp("mini_defaults");
+    run(Params::load_default(), 42, 100, 100, &[], &defaults).unwrap();
+    assert_eq!(ecosim::check::diff_runs(&fixture("s42-mini-v2"), &defaults).unwrap(), Vec::<String>::new());
 }
 
 /// Version-1 run directories still work with `check`, `stats` and `diff`; `fork` refuses them with

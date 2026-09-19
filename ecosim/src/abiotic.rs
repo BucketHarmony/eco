@@ -109,17 +109,23 @@ impl Sim {
         let season =
             cl.temp_base + self.params.season.amplitude * libm::sinf(2.0 * PI * tick as f32 / cl.year_len as f32);
         for p in 0..PATCHES {
-            let (px, py) = (p % 8, p / 8);
-            let mut covered = 0;
-            for y in py * 8..py * 8 + 8 {
-                for x in px * 8..px * 8 + 8 {
-                    if self.canopy_cover[cidx(x, y)] {
-                        covered += 1;
-                    }
-                }
-            }
+            let covered = self.canopy_columns(p);
             self.patches[p].temperature = season - cl.canopy_cool * covered as f32 / 64.0;
         }
+    }
+
+    /// Columns of patch `p` (of its 64) that lie under any canopy voxel.
+    pub fn canopy_columns(&self, p: usize) -> u32 {
+        let (px, py) = (p % 8, p / 8);
+        let mut covered = 0;
+        for y in py * 8..py * 8 + 8 {
+            for x in px * 8..px * 8 + 8 {
+                if self.canopy_cover[cidx(x, y)] {
+                    covered += 1;
+                }
+            }
+        }
+        covered
     }
 }
 

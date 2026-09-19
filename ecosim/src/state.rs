@@ -1,12 +1,12 @@
 //! `state.bin`: the part of a snapshot the other files don't hold exactly, and the restore path that
 //! turns a snapshot directory back into a `Sim` that steps identically to the one that wrote it.
 //!
-//! Layout (version 1), all integers and floats little-endian, no padding:
+//! Layout (version 2), all integers and floats little-endian, no padding:
 //!
 //! | field | type |
 //! |---|---|
 //! | magic | `b"ECOSTATE"` |
-//! | state version | u32 = 1 |
+//! | state version | u32 = 2 |
 //! | tick, next_id, hunter_immigrants | 3 × u32 |
 //! | RNG seed, stream, word position | [u8; 32], u64, u128 |
 //! | deaths this tick | 2 × 5 × u32 (grazers then hunters, `Cause` order) |
@@ -15,6 +15,9 @@
 //! | trees | u32 count, then per tree: id u32, x u8, y u8, age u32, dry_ticks u32, lifespan u32, alive u8 |
 //! | grazers, hunters | each: u32 count, then per animal: id u32, x f32, y f32, energy f32, age u32, cooldown u32, state u8, alive u8 |
 //! | grazer grid | per column (4096): u32 length, then that many u32 grazer indices |
+//! | fire | total_burnt u32, then 64 × burning_ticks_left u32 (patch order) |
+//!
+//! Version 2 is version 1 with the fire section appended; nothing before it moved.
 //!
 //! Entities are stored in `Vec` order, dead ones included, because indices into the Vecs (the trunk
 //! index, the grids) and the update order depend on it. Everything else a `Sim` holds is recomputed
@@ -33,7 +36,7 @@ use std::path::Path;
 /// First bytes of every `state.bin`.
 pub const MAGIC: &[u8; 8] = b"ECOSTATE";
 /// `state.bin` layout version; `decode` rejects any other.
-pub const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
 
 const STATES: [State; 6] = [State::Flee, State::Eat, State::Move, State::Wander, State::Rest, State::Hunt];
 
@@ -85,6 +88,10 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         for i in cell {
             b.extend_from_slice(&i.to_le_bytes());
         }
+    }
+    b.extend_from_slice(&sim.total_burnt.to_le_bytes());
+    for p in &sim.patches {
+        b.extend_from_slice(&p.burning_ticks_left.to_le_bytes());
     }
     b
 }
@@ -148,6 +155,7 @@ struct Decoded {
     grazers: Vec<Animal>,
     hunters: Vec<Animal>,
     grazer_grid: Vec<Vec<u32>>,
+    total_burnt: u32,
 }
 
 fn decode_animals(r: &mut Reader, kind: Kind) -> Result<Vec<Animal>, String> {
@@ -187,7 +195,15 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
     }
     let (moisture, fertility) = (r.f32s(COLS)?, r.f32s(COLS)?);
     let patches = (0..PATCHES)
-        .map(|_| Ok(Patch { grass: r.f32()?, shrub: r.f32()?, detritus: r.f32()?, temperature: r.f32()? }))
+        .map(|_| {
+            Ok(Patch {
+                grass: r.f32()?,
+                shrub: r.f32()?,
+                detritus: r.f32()?,
+                temperature: r.f32()?,
+                burning_ticks_left: 0,
+            })
+        })
         .collect::<Result<Vec<_>, String>>()?;
     let nt = r.count("tree")?;
     let trees = (0..nt)
@@ -217,6 +233,11 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
                 .collect()
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let total_burnt = r.u32()?;
+    let mut patches = patches;
+    for p in &mut patches {
+        p.burning_ticks_left = r.u32()?;
+    }
     if r.at != bytes.len() {
         return Err(format!("state.bin: {} trailing bytes", bytes.len() - r.at));
     }
@@ -233,6 +254,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
         grazers,
         hunters,
         grazer_grid,
+        total_burnt,
     })
 }
 
@@ -292,6 +314,7 @@ impl Sim {
             next_id: d.next_id,
             hunter_immigrants: d.hunter_immigrants,
             deaths: d.deaths,
+            total_burnt: d.total_burnt,
         };
         sim.recompute_derived();
         Ok(sim)

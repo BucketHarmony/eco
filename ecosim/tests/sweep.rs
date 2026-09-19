@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+mod common;
+
 fn tmp(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&d);
@@ -64,35 +66,35 @@ fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A fresh seed-42 run hashes to `tests/data/s42-manifest.sha256` (series.csv plus every snapshot
-/// file): the guard against unintended behaviour changes. A shot that changes behaviour on purpose
-/// regenerates the manifest and says so in DECISIONS.md.
-#[test]
-#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
-fn fresh_s42_matches_committed_manifest() {
-    let dir = fresh_s42();
-    let manifest =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/s42-manifest.sha256")).unwrap();
-    let want: BTreeMap<String, String> = manifest
+/// A committed manifest (`tests/data/<name>`): path → sha256.
+fn read_manifest(name: &str) -> BTreeMap<String, String> {
+    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(name)).unwrap();
+    manifest
         .lines()
         .map(|l| {
             let (hash, path) = l.split_once("  ").expect("manifest line is `sha256  path`");
             (path.to_string(), hash.to_string())
         })
-        .collect();
+        .collect()
+}
+
+/// The manifest of a run directory (series.csv plus every snapshot file), each file passed through
+/// `f` before hashing.
+fn hash_run(dir: &Path, f: impl Fn(&Path, Vec<u8>) -> Vec<u8>) -> BTreeMap<String, String> {
     let mut got = BTreeMap::new();
-    got.insert("series.csv".to_string(), sha256_hex(&fs::read(dir.join("series.csv")).unwrap()));
+    let series = dir.join("series.csv");
+    got.insert("series.csv".to_string(), sha256_hex(&f(&series, fs::read(&series).unwrap())));
     for snap in fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.is_dir()) {
-        for f in fs::read_dir(&snap).unwrap().map(|e| e.unwrap().path()) {
+        for p in fs::read_dir(&snap).unwrap().map(|e| e.unwrap().path()) {
             let rel =
-                format!("{}/{}", snap.file_name().unwrap().to_str().unwrap(), f.file_name().unwrap().to_str().unwrap());
-            got.insert(rel, sha256_hex(&fs::read(&f).unwrap()));
+                format!("{}/{}", snap.file_name().unwrap().to_str().unwrap(), p.file_name().unwrap().to_str().unwrap());
+            got.insert(rel, sha256_hex(&f(&p, fs::read(&p).unwrap())));
         }
     }
-    // 8 files per snapshot since format_version 2 added state.bin. The 1 + 201 × 7 entries that
-    // predate it were left untouched when the manifest was regenerated (DECISIONS.md, shot 7).
-    assert_eq!(got.len(), 1 + 201 * 8);
-    assert_eq!(want.keys().filter(|k| k.ends_with("/state.bin")).count(), 201);
+    got
+}
+
+fn assert_same_manifest(want: &BTreeMap<String, String>, got: &BTreeMap<String, String>) {
     let differing: Vec<&String> = want.keys().chain(got.keys()).filter(|k| want.get(*k) != got.get(*k)).collect();
     assert!(
         differing.is_empty(),
@@ -100,6 +102,36 @@ fn fresh_s42_matches_committed_manifest() {
         differing.len(),
         &differing[..differing.len().min(5)]
     );
+}
+
+/// A fresh seed-42 run hashes to `tests/data/s42-manifest.sha256` (series.csv plus every snapshot
+/// file): the guard against unintended behaviour changes. A shot that changes behaviour on purpose
+/// regenerates the manifest and says so in DECISIONS.md.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn fresh_s42_matches_committed_manifest() {
+    let want = read_manifest("s42-manifest.sha256");
+    let got = hash_run(fresh_s42(), |_, b| b);
+    // 8 files per snapshot since format_version 2 added state.bin.
+    assert_eq!(got.len(), 1 + 201 * 8);
+    assert_eq!(want.keys().filter(|k| k.ends_with("/state.bin")).count(), 201);
+    assert_same_manifest(&want, &got);
+}
+
+/// Rate-0 identity for fire: with `fire.base_rate=0`, seed 42 hashes to the manifest as it stood
+/// before fire (`s42-manifest-prefire.sha256`, shot 8) once the fire columns, the `burning_ticks_left`
+/// patch field and the `state.bin` fire section are cut. So fire at rate 0 draws nothing and writes
+/// nothing: every other byte of all 201 snapshots is unchanged.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn fire_off_reproduces_the_pre_fire_manifest() {
+    let dir = tmp("s42_fire_off");
+    let mut p = Params::load_default();
+    p.fire.base_rate = 0.0;
+    run(p, 42, 20_000, 100, &[], &dir).unwrap();
+    let got = hash_run(&dir, common::without_fire);
+    assert_eq!(got.len(), 1 + 201 * 8);
+    assert_same_manifest(&read_manifest("s42-manifest-prefire.sha256"), &got);
 }
 
 /// A 2-value × 1-seed × 500-tick sweep writes 2 rows and 2 cell CSVs, and each cell equals a

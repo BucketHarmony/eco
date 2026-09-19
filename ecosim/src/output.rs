@@ -16,12 +16,12 @@ use std::time::Instant;
 /// snapshot and `forked_from` to `meta.json`; every other file keeps its version-1 bytes.
 pub const FORMAT_VERSION: u32 = 2;
 
-/// The first line of `series.csv`. The last ten columns are that tick's deaths by species and cause,
-/// grazers then hunters, causes in `Cause` order.
-pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt";
+/// The first line of `series.csv`. Columns 11–20 are that tick's deaths by species and cause,
+/// grazers then hunters, causes in `Cause` order; the last two are the fire columns.
+pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt,patches_burning,total_burnt";
 
 /// Number of fields in a `series.csv` line.
-pub const SERIES_FIELDS: usize = 21;
+pub const SERIES_FIELDS: usize = 23;
 
 #[derive(Serialize)]
 struct Dims {
@@ -134,6 +134,7 @@ pub fn format_row(r: &StatsRow) -> String {
     for n in r.deaths.iter().flatten() {
         let _ = write!(line, ",{n}");
     }
+    let _ = write!(line, ",{},{}", r.patches_burning, r.total_burnt);
     line
 }
 

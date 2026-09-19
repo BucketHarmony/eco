@@ -268,3 +268,35 @@ Nothing else was tuned. Seeds 1, 2, 3 and 42 pass `ecosim check` at 20000 ticks,
 - Later shots leave them alone. If a new mechanism breaks the anchor, the sim-shot rules pick the smallest default for that mechanism, not a retune of these four.
 
 The death causes show that `hunter.cooldown` 5000 together with `max_age` 8000 is what sets the hunter count at the defaults: about 97% of hunter deaths are old age.
+
+## Fire (shot 09)
+
+### Starting values
+The `[fire]` section is new. These are guesses from the shot prompt's sketch: base_rate 0.002, temp_min 15 °C, temp_full 30 °C, detritus_weight 0.0002, canopy_weight 1.0, duration 10, spread 0.1, tree_kill 0.5, detritus_yield 10, ash 5 and animal_damage 2.
+
+### Round 1: duration 10 breaks the anchor
+- **Sweep:** base_rate 0:0.004:0.0005 on seeds 1, 2, 3 and 42 (exploratory, not committed).
+- **Result:** every rate above 0 failed `mature_trees_10k` on some seed. At 0.0005, seeds 1 and 3 failed with margin −0.886. At 0.002, 1 of 4 passed.
+- **Cause:** a patch that burns for 10 ticks gets 10 spread rolls at 0.1 against each neighbour. Every fire reached most of the grid and re-burned it, giving 600–1300 burn-outs per run. Each burn-out killed half the trees in the patch, so no cohort reached maturity by tick 10000.
+- **Conclusion:** no ignition rate low enough to keep the anchor also leaves fire doing anything, so ignition is not the knob to turn.
+
+### Round 2: spread × duration at base_rate 0.002
+Cells pass out of 4 seeds (1, 2, 3, 42):
+
+| spread \ duration | 3 | 5 | 10 |
+|---|---|---|---|
+| 0.02 | 4/4 | 4/4 | 4/4 |
+| 0.05 | 4/4 | 4/4 | 4/4 |
+| 0.1 | 4/4 | 2/4 | 1/4 |
+
+**duration 10 → 3.** This is the smallest change to the new mechanism that keeps the anchor at the prompt's spread (0.1) and base_rate (0.002). With 3 ticks, a burning patch rolls 3 times per neighbour, and fires stay below percolation: at most 12 of 64 patches burn at once, with 40–90 burn-outs per run at the default.
+
+### Round 3: base_rate at duration 3
+- **Sweep:** base_rate 0:0.004:0.0005 on seeds 1, 2, 3 and 42.
+- **Result:** every cell passes except 0.0025 on seed 42, where mature_trees_10k is 34 (margin −0.029). Seeds 1–3 pass everywhere, as the committed sweep `sweeps/shot09/fire_base_rate` confirms.
+- **Default base_rate stays 0.002.** It is the middle of the grid, and seed 42 passes it with 61 mature trees at tick 10000. The 0.0025 miss is a single-seed dip at one grid point with passes on both sides, not an edge.
+
+### Final
+- Values changed: `fire.duration` 10 → 3. No other parameter moved, including the four anchor values.
+- Seeds 1, 2, 3 and 42 pass `ecosim check` at 20000 ticks with the defaults.
+- `fire.spread` has a fragile safe band, [0.0, 0.1], with the default at its upper edge: the percolation threshold lies between 0.1 and 0.2 (`sweeps/shot09/FINDINGS.md`). Spread was not lowered, because the default passes on every seed and the sim-shot rule moves a default only when the anchor fails.

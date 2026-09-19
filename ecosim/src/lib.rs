@@ -4,6 +4,7 @@
 pub mod abiotic;
 pub mod animals;
 pub mod check;
+pub mod fire;
 pub mod output;
 pub mod params;
 pub mod producers;

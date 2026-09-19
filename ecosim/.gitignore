@@ -7,3 +7,5 @@ ci-runs/
 lcov.info
 sweeps/shot05/*/cells/
 sweeps/fork-demo/run/
+sweeps/shot09/*/cells/
+sweeps/shot09/canopy_runs/

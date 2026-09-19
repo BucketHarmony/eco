@@ -28,6 +28,8 @@ pub struct Params {
     pub grazer: GrazerParams,
     /// `[hunter]`
     pub hunter: HunterParams,
+    /// `[fire]`
+    pub fire: FireParams,
 }
 
 /// Terrain generation and world-level settings.
@@ -268,6 +270,34 @@ pub struct HunterParams {
     pub immigration_floor: u32,
     /// Ticks between immigration checks.
     pub immigration_interval: u32,
+}
+
+/// Fire disturbance, at patch scale. Nothing ignites while `base_rate` is 0.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FireParams {
+    /// Ignition: p = base_rate · f(T) · (1 − moisture/255)² · fuel per patch per fire update.
+    pub base_rate: f32,
+    /// f(T) is 0 at or below this patch temperature, °C.
+    pub temp_min: f32,
+    /// f(T) is 1 at or above this patch temperature, °C.
+    pub temp_full: f32,
+    /// Fuel per unit of patch detritus.
+    pub detritus_weight: f32,
+    /// Fuel of a fully canopied patch.
+    pub canopy_weight: f32,
+    /// Ticks a patch burns before it burns out.
+    pub duration: u32,
+    /// Per-tick spread chance to each 4-neighbour: spread · neighbour fuel · (1 − neighbour moisture/255).
+    pub spread: f32,
+    /// Chance that burn-out kills each tree whose trunk is in the patch.
+    pub tree_kill: f32,
+    /// Detritus added per unit of burnt grass and shrub density, per soil column.
+    pub detritus_yield: f32,
+    /// Fertility added to every soil column of a patch at burn-out.
+    pub ash: f32,
+    /// Energy an animal in a burning patch loses per tick.
+    pub animal_damage: f32,
 }
 
 impl Params {

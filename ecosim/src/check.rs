@@ -20,6 +20,9 @@ pub const LONG_BAND_FROM: u32 = 20_000;
 /// Runtime invariant limit for a 20000-tick run, in milliseconds.
 pub const RUNTIME_LIMIT_MS: u64 = 30_000;
 
+/// The fire columns `series.csv` gained in shot 9.
+const PRE_FIRE_TAIL: &str = ",patches_burning,total_burnt";
+
 /// Read and parse `series.csv` from a run directory.
 pub fn read_series(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
     let path = run_dir.join("series.csv");
@@ -29,17 +32,22 @@ pub fn read_series(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
 
 /// Parse `series.csv` text. Sweeps parse their own in-memory CSV through this too, so a sweep cell
 /// is evaluated on exactly the values a run directory would hold.
+///
+/// Runs written before fire existed (the header without its last two columns) still parse, with
+/// no burning recorded.
 pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
     let mut lines = text.lines();
-    if lines.next() != Some(SERIES_HEADER) {
-        return Err("unexpected header".into());
-    }
+    let fields = match lines.next() {
+        Some(SERIES_HEADER) => SERIES_FIELDS,
+        Some(h) if SERIES_HEADER.strip_suffix(PRE_FIRE_TAIL) == Some(h) => SERIES_FIELDS - 2,
+        _ => return Err("unexpected header".into()),
+    };
     lines
         .enumerate()
         .map(|(i, line)| {
             let f: Vec<&str> = line.split(',').collect();
-            if f.len() != SERIES_FIELDS {
-                return Err(format!("series.csv line {}: expected {SERIES_FIELDS} fields", i + 2));
+            if f.len() != fields {
+                return Err(format!("series.csv line {}: expected {fields} fields", i + 2));
             }
             let u = |k: usize| f[k].parse::<u32>().map_err(|e| format!("line {}: {e}", i + 2));
             let x = |k: usize| f[k].parse::<f32>().map_err(|e| format!("line {}: {e}", i + 2));
@@ -56,6 +64,8 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                 temperature: x(9)?,
                 hunter_immigrants: u(10)?,
                 deaths: [[u(11)?, u(12)?, u(13)?, u(14)?, u(15)?], [u(16)?, u(17)?, u(18)?, u(19)?, u(20)?]],
+                patches_burning: if fields == SERIES_FIELDS { u(21)? } else { 0 },
+                total_burnt: if fields == SERIES_FIELDS { u(22)? } else { 0 },
             })
         })
         .collect()
@@ -653,6 +663,8 @@ mod tests {
                 temperature: 12.0,
                 hunter_immigrants: 0,
                 deaths: Default::default(),
+                patches_burning: 0,
+                total_burnt: 0,
             })
             .collect()
     }
@@ -754,6 +766,8 @@ mod tests {
                 temperature: 12.0,
                 hunter_immigrants: 0,
                 deaths: Default::default(),
+                patches_burning: 0,
+                total_burnt: 0,
             })
             .collect();
         Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms) }

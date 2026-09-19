@@ -19,7 +19,7 @@ pub enum Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
-    /// Grazer stepping away from the nearest hunter.
+    /// Stepping out of a burning patch (either species), or a grazer stepping away from the nearest hunter.
     Flee,
     /// Grazer eating grass in its patch.
     Eat,
@@ -44,7 +44,7 @@ pub enum Cause {
     OldAge = 2,
     /// Density-dependent mortality (reserved; no rule records it yet).
     Crowded = 3,
-    /// Killed by fire (reserved; no rule records it yet).
+    /// Energy reached 0 in a burning patch (fire damage took part). Takes precedence over `Starved`.
     Burnt = 4,
 }
 
@@ -117,6 +117,16 @@ pub fn grazing_intake(grass: f32, intake_max: f32, intake_k: f32) -> f32 {
 pub fn attack_success(kill_prob: f64, shrub: f32, refugium_k: f32) -> f64 {
     let cover = (1.0 - shrub as f64).clamp(0.0, 1.0);
     (kill_prob * libm::pow(cover, refugium_k as f64)).clamp(0.0, 1.0)
+}
+
+/// Why an animal that died this update died: `Burnt` if its energy ran out in a burning patch,
+/// `Starved` if it ran out elsewhere, else `OldAge`.
+fn death_cause(energy: f32, burning: bool) -> Cause {
+    match (energy <= 0.0, burning) {
+        (true, true) => Cause::Burnt,
+        (true, false) => Cause::Starved,
+        _ => Cause::OldAge,
+    }
 }
 
 /// A grazer's fixed, arbitrary ranking of patches (lower is preferred): an integer hash mix.
@@ -282,18 +292,38 @@ impl Sim {
         scored.iter().filter(|s| s.1 >= floor).min_by_key(|s| preference(id, s.0)).map_or(p, |s| s.0)
     }
 
+    /// Fire damage for an animal standing in patch `p`: its new energy, and whether the patch burns.
+    fn scorch(&self, p: usize, energy: f32) -> (f32, bool) {
+        if self.is_burning(p) {
+            (energy - self.params.fire.animal_damage, true)
+        } else {
+            (energy, false)
+        }
+    }
+
+    /// The step out of burning patch `p`: away from its centre, as from a hunter.
+    fn flee_fire(&self, x: i32, y: i32, p: usize) -> Option<(i32, i32)> {
+        let (cx, cy) = crate::fire::patch_centre(p);
+        self.greedy_step(x, y, cx, cy, -1.0)
+    }
+
     fn update_grazer(&mut self, i: usize) {
         let gp = self.params.grazer.clone();
+        let p = self.grazers[i].patch();
+        let (energy, burning) = self.scorch(p, self.grazers[i].energy);
         {
             let g = &mut self.grazers[i];
             g.age += 1;
             g.cooldown = g.cooldown.saturating_sub(1);
+            g.energy = energy;
         }
         let (x, y) = self.grazers[i].col();
-        let p = self.grazers[i].patch();
         let mut step = None;
         let state;
-        if let Some((hx, hy)) = self.nearest_hunter(x, y) {
+        if burning {
+            state = State::Flee;
+            step = self.flee_fire(x, y, p);
+        } else if let Some((hx, hy)) = self.nearest_hunter(x, y) {
             state = State::Flee;
             step = self.greedy_step(x, y, hx, hy, -1.0);
         } else if self.patches[p].grass > gp.eat_min_grass && self.grazers[i].energy < gp.eat_below {
@@ -324,7 +354,7 @@ impl Sim {
         }
         let g = &self.grazers[i];
         if g.energy <= 0.0 || g.age >= gp.max_age {
-            self.kill_grazer(i, if g.energy <= 0.0 { Cause::Starved } else { Cause::OldAge });
+            self.kill_grazer(i, death_cause(g.energy, burning));
             return;
         }
         let p = g.patch();
@@ -338,7 +368,7 @@ impl Sim {
     }
 
     /// Add a newborn grazer on column (x, y), keeping the per-patch counts and the column grid current.
-    fn spawn_grazer(&mut self, x: usize, y: usize) {
+    pub(crate) fn spawn_grazer(&mut self, x: usize, y: usize) {
         let gp = &self.params.grazer;
         self.add_grazer(x, y, gp.newborn_energy, gp.cooldown);
     }
@@ -423,15 +453,21 @@ impl Sim {
     /// One hunter update: rest when satiated, else attack, approach or wander; then energy, death and birth.
     pub fn update_hunter(&mut self, i: usize) {
         let hp = self.params.hunter.clone();
+        let p = self.hunters[i].patch();
+        let (energy, burning) = self.scorch(p, self.hunters[i].energy);
         {
             let h = &mut self.hunters[i];
             h.age += 1;
             h.cooldown = h.cooldown.saturating_sub(1);
+            h.energy = energy;
         }
         let (x, y) = self.hunters[i].col();
         let mut step = None;
         let state;
-        if self.hunters[i].energy > hp.satiation {
+        if burning {
+            state = State::Flee;
+            step = self.flee_fire(x, y, p);
+        } else if self.hunters[i].energy > hp.satiation {
             state = State::Rest;
             step = self.random_step(x, y);
         } else {
@@ -461,7 +497,7 @@ impl Sim {
         h.energy -= cost;
         if h.energy <= 0.0 || h.age >= hp.max_age {
             h.alive = false;
-            let cause = if h.energy <= 0.0 { Cause::Starved } else { Cause::OldAge };
+            let cause = death_cause(h.energy, burning);
             let p = h.patch();
             self.deaths[Kind::Hunter as usize][cause as usize] += 1;
             self.patches[p].detritus += hp.corpse_detritus;
@@ -932,7 +968,7 @@ mod tests {
     /// With compaction off, dead animals stay in their Vec, so the deaths of a tick are the growth
     /// of each species' dead count, newborns eaten on their first tick included. The recorded causes
     /// must sum to exactly that, per species and tick, and the stats row must carry them. The
-    /// reserved causes (`crowded`, `burnt`) are never recorded.
+    /// reserved cause `crowded` is never recorded.
     fn death_causes_sum_to_deaths(seed: u64, ticks: u32, m: &Mortality) -> Result<crate::sim::Deaths, TestCaseError> {
         let mut p = Params::load_default();
         p.world.compact_every = u32::MAX;
@@ -952,7 +988,7 @@ mod tests {
             for k in 0..2 {
                 let recorded: u32 = sim.deaths[k].iter().sum();
                 prop_assert_eq!(recorded, after[k] - before[k], "species {} at tick {}", k, sim.tick);
-                prop_assert_eq!(sim.deaths[k][Cause::Crowded as usize] + sim.deaths[k][Cause::Burnt as usize], 0);
+                prop_assert_eq!(sim.deaths[k][Cause::Crowded as usize], 0);
             }
             prop_assert_eq!(sim.deaths[Kind::Hunter as usize][Cause::Eaten as usize], 0, "hunters have no predator");
             prop_assert_eq!(sim.stats().deaths, sim.deaths);

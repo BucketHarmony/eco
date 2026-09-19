@@ -1,5 +1,6 @@
 //! Tree entities: stages, canopy geometry and light, seeding and death.
 
+use crate::events::EventKind;
 use crate::producers::suitability;
 use crate::sim::{Sim, NO_TREE};
 use crate::world::{cidx, in_bounds, patch_of};
@@ -128,7 +129,8 @@ impl Sim {
 
     /// Plant a tree on (x, y) and refresh the light of the columns its canopy covers. Its lifespan is
     /// `max_age · (1 + lifespan_jitter · u)` with u uniform in [−1, 1], one draw from the sim RNG.
-    pub fn plant_tree(&mut self, x: usize, y: usize, age: u32) {
+    /// Returns the new tree's id.
+    pub fn plant_tree(&mut self, x: usize, y: usize, age: u32) -> u32 {
         let id = self.alloc_id();
         let tp = &self.params.tree;
         let (mean, jitter) = (tp.max_age as f32, tp.lifespan_jitter);
@@ -137,6 +139,7 @@ impl Sim {
         self.trunk_at[cidx(x, y)] = self.trees.len() as u32;
         self.trees.push(Tree { id, x: x as u8, y: y as u8, age, dry_ticks: 0, lifespan, alive: true });
         self.refresh_canopy_columns(x as u8, y as u8);
+        id
     }
 
     /// Plant `initial_count` trees on random soil columns, respecting `min_spacing`.
@@ -154,13 +157,15 @@ impl Sim {
         }
     }
 
-    /// Kill tree `i`: clear its trunk, add `death_detritus` to its patch and reopen the light under its crown.
-    pub(crate) fn kill_tree(&mut self, i: usize) {
-        let (x, y, col) = {
+    /// Kill tree `i` (`cause` is one of `events::TREE_CAUSES`): clear its trunk, add `death_detritus`
+    /// to its patch and reopen the light under its crown.
+    pub(crate) fn kill_tree(&mut self, i: usize, cause: &'static str) {
+        let (x, y, col, id) = {
             let t = &mut self.trees[i];
             t.alive = false;
-            (t.x, t.y, t.col())
+            (t.x, t.y, t.col(), t.id)
         };
+        self.log_at(EventKind::TreeDeath, "tree", (x as usize, y as usize), cause, id);
         self.trunk_at[col] = NO_TREE;
         self.patches[patch_of(x as usize, y as usize)].detritus += self.params.tree.death_detritus;
         self.refresh_canopy_columns(x, y);
@@ -214,7 +219,8 @@ impl Sim {
         }
         let p = self.germination_prob(tx as usize, ty as usize);
         if p > 0.0 && self.rng.gen::<f32>() < p {
-            self.plant_tree(tx as usize, ty as usize, 0);
+            let id = self.plant_tree(tx as usize, ty as usize, 0);
+            self.log_at(EventKind::Germination, "tree", (tx as usize, ty as usize), "", id);
         }
     }
 
@@ -235,8 +241,12 @@ impl Sim {
             } else {
                 self.trees[i].dry_ticks = 0;
             }
-            if self.trees[i].age >= self.trees[i].lifespan || self.trees[i].dry_ticks >= tp.dry_death_ticks {
-                self.kill_tree(i);
+            if self.trees[i].age >= self.trees[i].lifespan {
+                self.kill_tree(i, "old_age");
+                continue;
+            }
+            if self.trees[i].dry_ticks >= tp.dry_death_ticks {
+                self.kill_tree(i, "drought");
                 continue;
             }
             let after = self.tree_stage(&self.trees[i]);
@@ -246,7 +256,7 @@ impl Sim {
                 && self.crowding(i) >= 2
                 && self.rng.gen::<f32>() < tp.crowding_mortality
             {
-                self.kill_tree(i);
+                self.kill_tree(i, "crowded");
                 continue;
             }
             if after != before {
@@ -307,7 +317,7 @@ mod tests {
                 Op::Kill(i) => {
                     let live: Vec<usize> = (0..sim.trees.len()).filter(|&i| sim.trees[i].alive).collect();
                     if !live.is_empty() {
-                        sim.kill_tree(live[i % live.len()]);
+                        sim.kill_tree(live[i % live.len()], "old_age");
                     }
                 }
                 Op::Update => sim.update_trees(),
@@ -449,7 +459,7 @@ mod tests {
         assert_eq!(sim.world.surface_light(cidx(12, 10)), 255);
         assert!(!sim.spacing_ok(11, 11));
         assert!(sim.spacing_ok(12, 12));
-        sim.kill_tree(0);
+        sim.kill_tree(0, "old_age");
         assert_eq!(sim.world.surface_light(cidx(10, 10)), 255);
         assert_eq!(sim.patches[patch_of(10, 10)].detritus, 40.0);
     }

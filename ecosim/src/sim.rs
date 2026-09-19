@@ -1,6 +1,7 @@
 //! Simulation state and the fixed tick order.
 
 use crate::animals::{Animal, Kind, CAUSES};
+use crate::events::Event;
 use crate::heredity::{trait_stats, TraitStats, Traits, TRAIT_CLAMP};
 use crate::params::Params;
 use crate::trees::Tree;
@@ -135,6 +136,10 @@ pub struct Sim {
     pub deaths: Deaths,
     /// Patches that have burnt out so far.
     pub total_burnt: u32,
+    /// Whether events are recorded into `events` (`events.csv`); off by default.
+    pub log_events: bool,
+    /// Events recorded since the writer last drained them.
+    pub events: Vec<Event>,
 }
 
 impl Sim {
@@ -195,6 +200,8 @@ impl Sim {
             hunter_immigrants: 0,
             deaths: Deaths::default(),
             total_burnt: 0,
+            log_events: false,
+            events: Vec::new(),
         };
         sim.seek_offsets = offsets_within(sim.params.hunter.seek_radius);
         sim.flee_offsets = flee_offsets(&sim.params);

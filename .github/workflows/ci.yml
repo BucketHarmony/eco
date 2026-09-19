@@ -132,7 +132,8 @@ jobs:
           cd ../ecosim
           rm -f target/release/ecosim
           cargo build --release
-          ./target/release/ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100
+          # Pinned to the v2 writer until the renderer reads format_version 3 (ecosim/DECISIONS.md, Event log; shot 16 removes it).
+          ./target/release/ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100 --format-version 2
           cd ..
           bash scripts/sync-data.sh
 

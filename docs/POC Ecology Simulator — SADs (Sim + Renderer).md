@@ -115,6 +115,7 @@ Fixed tick order: animals → producers (staggered patches) → moisture/fertili
 runs/s42/
   meta.json           world dims, seed, params snapshot, tick count, snapshot_every, species list with ids and colors
   series.csv          one row per tick: tick, grazers, hunters, trees, grass_mean, shrub_mean, moisture_mean, fertility_mean, detritus_total, temperature
+  events.csv          (format_version 3) one row per event: tick,kind,species,patch_x,patch_y,x,y,cause,detail
   snap_000000/
     material.bin      131072 × u8, x-fastest
     light.bin         131072 × u8
@@ -127,6 +128,15 @@ runs/s42/
 ```
 
 All integers little-endian. `meta.json` carries a `format_version: 1`. The renderer treats anything else as a hard error.
+
+Later versions only add files (`ecosim/DECISIONS.md` has the details). Version 2 adds `state.bin` to each snapshot and `forked_from` to `meta.json`. Version 3 adds `events.csv` (plain CSV; a seed-42 20000-tick run writes about 1.7 MB, so it is not compressed):
+
+- Header `tick,kind,species,patch_x,patch_y,x,y,cause,detail`, then one row per event in the order they happen within the run. Absent fields are empty.
+- `kind` is one of `death`, `birth`, `ignition`, `spread`, `burnout`, `germination`, `tree_death`, `immigration`, or `seed_drop` (reserved, not written yet).
+- `species` is `grazer`, `hunter` or `tree`, and empty for the three fire kinds. `patch_x`, `patch_y` are 0–7. `x`, `y` are the column, and empty for fire kinds.
+- `cause`: for `death`, one of `starved`, `eaten`, `old_age`, `crowded`, `burnt`; for `tree_death`, one of `old_age`, `drought`, `crowded`, `burnt`; empty otherwise.
+- `detail`: the entity's id for entity kinds (the newborn's for `birth`); for `spread`, the source patch index `patch_x + 8·patch_y`; empty for `ignition` and `burnout`.
+- Tick 0 has no events. The file is appended at each snapshot, so rows up to a snapshot's tick are on disk when its directory is.
 
 ### Debug loop and tests
 

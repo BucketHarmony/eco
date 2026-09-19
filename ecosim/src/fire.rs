@@ -5,6 +5,7 @@
 //! the burnt biomass becomes detritus, each tree whose trunk is in it may die, and its soil gains
 //! ash. Animals in a burning patch take damage and flee it (`animals.rs`).
 
+use crate::events::EventKind;
 use crate::params::FireParams;
 use crate::sim::Sim;
 use crate::world::{patch_of, PATCHES, PATCHES_X, PATCH_SIZE};
@@ -79,8 +80,13 @@ impl Sim {
         self.is_burning(patch_of(x, y))
     }
 
-    fn ignite(&mut self, p: usize) {
+    /// Set patch `p` burning; `from` is the burning neighbour it caught from, or None for an ignition.
+    fn ignite(&mut self, p: usize, from: Option<usize>) {
         self.patches[p].burning_ticks_left = self.params.fire.duration.max(1);
+        match from {
+            Some(q) => self.log_with(EventKind::Spread, "", p, None, "", Some(q as u32)),
+            None => self.log(EventKind::Ignition, "", p, None),
+        }
     }
 
     /// Fire phase, every tick. First the patches burning at its start spread to each non-burning
@@ -97,7 +103,7 @@ impl Sim {
                 }
                 let pr = spread_prob(&self.params.fire, self.patch_moisture(q), self.fuel(q));
                 if pr > 0.0 && self.rng.gen::<f32>() < pr {
-                    self.ignite(q);
+                    self.ignite(q, Some(p));
                 }
             }
         }
@@ -113,7 +119,7 @@ impl Sim {
                     ignition_prob(&self.params.fire, self.patches[p].temperature, self.patch_moisture(p), self.fuel(p));
                 let u: f32 = self.rng.gen();
                 if u < pr && !self.is_burning(p) {
-                    self.ignite(p);
+                    self.ignite(p, None);
                 }
             }
         }
@@ -123,6 +129,7 @@ impl Sim {
     /// ash, and each tree whose trunk is in the patch dies with chance `tree_kill` (one draw per
     /// tree, in Vec order, only when `tree_kill` > 0).
     pub fn burn_out(&mut self, p: usize) {
+        self.log(EventKind::Burnout, "", p, None);
         let fp = self.params.fire.clone();
         let n = self.world.patch_soil[p].len() as f32;
         let pa = &mut self.patches[p];
@@ -137,7 +144,7 @@ impl Sim {
             for i in 0..self.trees.len() {
                 let t = &self.trees[i];
                 if t.alive && patch_of(t.x as usize, t.y as usize) == p && self.rng.gen::<f32>() < fp.tree_kill {
-                    self.kill_tree(i);
+                    self.kill_tree(i, "burnt");
                 }
             }
         }

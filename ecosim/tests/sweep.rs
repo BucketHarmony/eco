@@ -1,7 +1,9 @@
 //! Sweep harness and shared-check tests: a sweep cell must equal `ecosim run --set …` + `ecosim check`.
 
 use ecosim::check::diff_runs;
-use ecosim::check::{check_run, evaluate, parse_series, CheckReport, Series};
+use ecosim::check::{check_run, evaluate, extinctions, parse_series, read_series, read_series_for_stats};
+use ecosim::check::{CheckReport, Series};
+use ecosim::events::{deaths_per_tick, parse_events, unlit_burnout, EventKind, EVENTS_FILE, TREE_CAUSES};
 use ecosim::output::run;
 use ecosim::sweep::{baseline, margin_table, sweep, ParamSpec, SweepConfig};
 use ecosim::Params;
@@ -78,12 +80,14 @@ fn read_manifest(name: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The manifest of a run directory (series.csv plus every snapshot file), each file passed through
-/// `f` before hashing.
+/// The manifest of a run directory (series.csv, events.csv and every snapshot file), each file
+/// passed through `f` before hashing.
 fn hash_run(dir: &Path, f: impl Fn(&Path, Vec<u8>) -> Vec<u8>) -> BTreeMap<String, String> {
     let mut got = BTreeMap::new();
-    let series = dir.join("series.csv");
-    got.insert("series.csv".to_string(), sha256_hex(&f(&series, fs::read(&series).unwrap())));
+    for name in ["series.csv", EVENTS_FILE] {
+        let p = dir.join(name);
+        got.insert(name.to_string(), sha256_hex(&f(&p, fs::read(&p).unwrap())));
+    }
     for snap in fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.is_dir()) {
         for p in fs::read_dir(&snap).unwrap().map(|e| e.unwrap().path()) {
             let rel =
@@ -91,6 +95,12 @@ fn hash_run(dir: &Path, f: impl Fn(&Path, Vec<u8>) -> Vec<u8>) -> BTreeMap<Strin
             got.insert(rel, sha256_hex(&f(&p, fs::read(&p).unwrap())));
         }
     }
+    got
+}
+
+/// A manifest from before the event log (shot 14b) has no `events.csv` line: drop the fresh one.
+fn without_events(mut got: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    assert!(got.remove(EVENTS_FILE).is_some());
     got
 }
 
@@ -112,10 +122,44 @@ fn assert_same_manifest(want: &BTreeMap<String, String>, got: &BTreeMap<String, 
 fn fresh_s42_matches_committed_manifest() {
     let want = read_manifest("s42-manifest.sha256");
     let got = hash_run(fresh_s42(), |_, b| b);
-    // 8 files per snapshot since format_version 2 added state.bin.
-    assert_eq!(got.len(), 1 + 201 * 8);
+    // 8 files per snapshot since format_version 2 added state.bin, and events.csv since version 3.
+    assert_eq!(got.len(), 2 + 201 * 8);
+    assert!(want.contains_key(EVENTS_FILE));
     assert_eq!(want.keys().filter(|k| k.ends_with("/state.bin")).count(), 201);
     assert_same_manifest(&want, &got);
+}
+
+/// Shot 14b regenerated the manifest for events.csv only: every other line is the one the manifest
+/// held before (`s42-manifest-preshot14a.sha256`, which 14a left equal to it).
+#[test]
+fn manifest_regeneration_for_the_event_log_changed_no_existing_line() {
+    let want = read_manifest("s42-manifest.sha256");
+    assert_eq!(want.len(), 2 + 201 * 8);
+    assert_same_manifest(&read_manifest("s42-manifest-preshot14a.sha256"), &without_events(want));
+}
+
+/// The seed-42 event log: its death rows equal the series death columns on every tick, so `stats`
+/// reports the same extinctions from either (the old method); every burnout was lit first; every tree
+/// death cause occurs; and the file is well under the 20 MB that would call for compression.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn s42_event_log_matches_the_series_and_stays_small() {
+    let dir = fresh_s42();
+    let text = fs::read_to_string(dir.join(EVENTS_FILE)).unwrap();
+    assert!(text.len() < 20_000_000, "events.csv is {} bytes", text.len());
+    let events = parse_events(&text).unwrap();
+    let rows = read_series(dir).unwrap();
+    let counted = deaths_per_tick(&events, rows.len()).unwrap();
+    for (r, d) in rows.iter().zip(&counted) {
+        assert_eq!(r.deaths, *d, "tick {}", r.tick);
+    }
+    let from_events = read_series_for_stats(dir).unwrap();
+    assert_eq!(from_events, rows);
+    assert_eq!(extinctions(&from_events), extinctions(&rows));
+    assert_eq!(unlit_burnout(&events), None);
+    for c in TREE_CAUSES {
+        assert!(events.iter().any(|e| e.kind == EventKind::TreeDeath && e.cause == c), "tree {c}");
+    }
 }
 
 /// Identity case for food-limited hunters: the pre-shot hunting economics set explicitly through
@@ -129,8 +173,8 @@ fn old_hunting_economics_via_set_reproduce_the_shot_14_manifest() {
         ["disease.hunter_rate=0.001", "hunter.kill_energy=40", "hunter.hunt_cost=0"].map(String::from).to_vec();
     run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
     let got = hash_run(&dir, |_, b| b);
-    assert_eq!(got.len(), 1 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-manifest-preshot14a.sha256"), &got);
+    assert_eq!(got.len(), 2 + 201 * 8);
+    assert_same_manifest(&read_manifest("s42-manifest-preshot14a.sha256"), &without_events(got));
 }
 
 /// Default params with shot 11 switched off: mutation 0 (the immigration floors already default to 0).
@@ -151,8 +195,8 @@ fn heredity_off_reproduces_the_pre_shot_11_manifest() {
     let dir = tmp("s42_heredity_off");
     run(pre_shot_11(), 42, 20_000, 100, &[], &dir).unwrap();
     let got = hash_run(&dir, common::without_traits);
-    assert_eq!(got.len(), 1 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-manifest-preshot11.sha256"), &got);
+    assert_eq!(got.len(), 2 + 201 * 8);
+    assert_same_manifest(&read_manifest("s42-manifest-preshot11.sha256"), &without_events(got));
 }
 
 /// Default params with shots 10 and 11 switched off: crowding rates 0, the hunter refractory at the
@@ -175,8 +219,8 @@ fn crowding_off_reproduces_the_pre_shot_10_manifest() {
     let dir = tmp("s42_crowding_off");
     run(pre_shot_10(), 42, 20_000, 100, &[], &dir).unwrap();
     let got = hash_run(&dir, common::without_traits);
-    assert_eq!(got.len(), 1 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-manifest-preshot10.sha256"), &got);
+    assert_eq!(got.len(), 2 + 201 * 8);
+    assert_same_manifest(&read_manifest("s42-manifest-preshot10.sha256"), &without_events(got));
 }
 
 /// Rate-0 identity for fire: with `fire.base_rate=0` (and shots 10 and 11 switched off), seed 42
@@ -191,8 +235,8 @@ fn fire_off_reproduces_the_pre_fire_manifest() {
     p.fire.base_rate = 0.0;
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
     let got = hash_run(&dir, |f, b| common::without_fire(f, common::without_traits(f, b)));
-    assert_eq!(got.len(), 1 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-manifest-prefire.sha256"), &got);
+    assert_eq!(got.len(), 2 + 201 * 8);
+    assert_same_manifest(&read_manifest("s42-manifest-prefire.sha256"), &without_events(got));
 }
 
 /// A 2-value × 1-seed × 500-tick sweep writes 2 rows and 2 cell CSVs, and each cell equals a

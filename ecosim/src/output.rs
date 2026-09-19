@@ -1,6 +1,7 @@
-//! Run directory writer: meta.json, series.csv, snap_NNNNNN/, timing.json.
+//! Run directory writer: meta.json, series.csv, events.csv, snap_NNNNNN/, timing.json.
 
 use crate::animals::{Animal, State};
+use crate::events::{parse_events, Event, EVENTS_FILE, EVENTS_HEADER};
 use crate::params::Params;
 use crate::sim::{Sim, StatsRow};
 use crate::trees::Stage;
@@ -13,8 +14,9 @@ use std::path::Path;
 use std::time::Instant;
 
 /// `meta.json` format version; readers reject any other value. Version 2 added `state.bin` to each
-/// snapshot and `forked_from` to `meta.json`; every other file keeps its version-1 bytes.
-pub const FORMAT_VERSION: u32 = 2;
+/// snapshot and `forked_from` to `meta.json`; version 3 added `events.csv`. Every other file keeps
+/// its version-1 bytes.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// The first line of `series.csv`. Columns 11–20 are that tick's deaths by species and cause,
 /// grazers then hunters, causes in `Cause` order; 21–22 are the fire columns; the last 12 are the
@@ -220,12 +222,21 @@ pub fn write_meta(
     run_dir: &Path,
 ) -> io::Result<()> {
     let snapshots = (0..=ticks).filter(|t| t % snapshot_every == 0).collect();
-    let info = RunInfo { seed, ticks, snapshot_every, snapshots, overrides, forked_from: None };
+    let info = RunInfo {
+        format_version: FORMAT_VERSION,
+        seed,
+        ticks,
+        snapshot_every,
+        snapshots,
+        overrides,
+        forked_from: None,
+    };
     write_meta_info(sim, &info, run_dir)
 }
 
 /// The run settings `meta.json` records besides the sim's params.
 struct RunInfo<'a> {
+    format_version: u32,
     seed: u64,
     ticks: u32,
     snapshot_every: u32,
@@ -235,9 +246,9 @@ struct RunInfo<'a> {
 }
 
 fn write_meta_info(sim: &Sim, info: &RunInfo, run_dir: &Path) -> io::Result<()> {
-    let RunInfo { seed, ticks, snapshot_every, overrides, forked_from, .. } = *info;
+    let RunInfo { format_version, seed, ticks, snapshot_every, overrides, forked_from, .. } = *info;
     let meta = Meta {
-        format_version: FORMAT_VERSION,
+        format_version,
         dims: Dims { x: WX, y: WY, z: WZ },
         seed,
         ticks,
@@ -278,11 +289,12 @@ pub struct RunSummary {
 }
 
 /// The one simulation driver shared by `run` and `sweep`: tick 0 is recorded before any update,
-/// then ticks 1..=ticks. `on_tick` sees the state each row is taken from, before it is taken.
+/// then ticks 1..=ticks. `on_tick` sees the state each row is taken from, before it is taken, and
+/// may drain `Sim::events`.
 pub fn simulate(
     sim: &mut Sim,
     ticks: u32,
-    mut on_tick: impl FnMut(&Sim) -> io::Result<()>,
+    mut on_tick: impl FnMut(&mut Sim) -> io::Result<()>,
 ) -> io::Result<Vec<StatsRow>> {
     let mut rows = Vec::with_capacity(ticks as usize + 1);
     loop {
@@ -306,8 +318,36 @@ pub fn series_csv(rows: &[StatsRow]) -> String {
     csv
 }
 
-/// Full run into a run directory, with `state.bin` in every snapshot. `overrides` are only recorded;
-/// they must already be applied to `params`.
+/// How `run_with` writes a run directory.
+#[derive(Debug, Clone, Copy)]
+pub struct RunOptions {
+    /// Write `state.bin` into every snapshot (`ecosim run --snapshot-state`).
+    pub state: bool,
+    /// 3 (`FORMAT_VERSION`) writes `events.csv`; 2 writes the version-2 directory without it
+    /// (`ecosim run --format-version 2`), for readers that know only versions 1 and 2.
+    pub format_version: u32,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        RunOptions { state: true, format_version: FORMAT_VERSION }
+    }
+}
+
+/// Append the events recorded since the last call to `events.csv`, draining them.
+fn flush_events(events: &mut Vec<Event>, out: &Path) -> io::Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut text = String::with_capacity(events.len() * 32);
+    events.iter().for_each(|e| e.write_line(&mut text));
+    events.clear();
+    let mut f = fs::OpenOptions::new().append(true).open(out.join(EVENTS_FILE))?;
+    io::Write::write_all(&mut f, text.as_bytes())
+}
+
+/// Full run into a run directory (format version 3), with `state.bin` in every snapshot.
+/// `overrides` are only recorded; they must already be applied to `params`.
 pub fn run(
     params: Params,
     seed: u64,
@@ -316,30 +356,47 @@ pub fn run(
     overrides: &[String],
     out: &Path,
 ) -> io::Result<RunSummary> {
-    run_with_state(params, seed, ticks, snapshot_every, overrides, out, true)
+    run_with(params, seed, ticks, snapshot_every, overrides, out, RunOptions::default())
 }
 
-/// `run`, choosing whether snapshots carry `state.bin` (`ecosim run --snapshot-state`).
-pub fn run_with_state(
+/// `run` with the given options. Events are appended to `events.csv` at each snapshot and at the end.
+pub fn run_with(
     params: Params,
     seed: u64,
     ticks: u32,
     snapshot_every: u32,
     overrides: &[String],
     out: &Path,
-    state: bool,
+    opts: RunOptions,
 ) -> io::Result<RunSummary> {
     assert!(snapshot_every > 0, "snapshot_every must be > 0");
+    assert!(matches!(opts.format_version, 2 | FORMAT_VERSION), "format_version must be 2 or {FORMAT_VERSION}");
     let start = Instant::now();
     prepare_dir(out)?;
     let mut sim = Sim::new(params, seed);
-    write_meta(&sim, seed, ticks, snapshot_every, overrides, out)?;
+    let snapshots = (0..=ticks).filter(|t| t % snapshot_every == 0).collect();
+    let info = RunInfo {
+        format_version: opts.format_version,
+        seed,
+        ticks,
+        snapshot_every,
+        snapshots,
+        overrides,
+        forked_from: None,
+    };
+    write_meta_info(&sim, &info, out)?;
+    sim.log_events = opts.format_version >= 3;
+    if sim.log_events {
+        fs::write(out.join(EVENTS_FILE), format!("{EVENTS_HEADER}\n"))?;
+    }
     let rows = simulate(&mut sim, ticks, |s| {
         if s.tick % snapshot_every == 0 {
-            write_snapshot(s, out, state)?;
+            write_snapshot(s, out, opts.state)?;
+            flush_events(&mut s.events, out)?;
         }
         Ok(())
     })?;
+    flush_events(&mut sim.events, out)?;
     fs::write(out.join("series.csv"), series_csv(&rows))?;
     let wall_ms = start.elapsed().as_millis();
     fs::write(out.join("timing.json"), format!("{{\"wall_ms\":{wall_ms}}}"))?;
@@ -348,7 +405,7 @@ pub fn run_with_state(
 
 /// What `ecosim fork` continues and how.
 pub struct ForkSpec<'a> {
-    /// The parent run directory (format version 2, with `state.bin` in its snapshots).
+    /// The parent run directory (format version 3, with `state.bin` in its snapshots).
     pub parent: &'a Path,
     /// The snapshot tick to restore.
     pub at: u32,
@@ -393,7 +450,9 @@ fn fork_params(parent: &Path, meta: &serde_json::Value, overrides: &[String]) ->
 /// Continue a run from one of its snapshots into a new run directory, optionally with changed params.
 ///
 /// The fork directory is a complete run directory: the parent's `series.csv` rows and snapshots
-/// before `at` are copied verbatim, and everything from `at` on is simulated from the restored state.
+/// before `at` are copied verbatim, and so are its `events.csv` rows up to and including tick `at`
+/// (the events of the ticks the restored state has already stepped). Everything after is simulated
+/// from the restored state.
 /// With no overrides and `at + ticks` equal to the parent's length, it differs from the parent only
 /// in `meta.json` (and `timing.json`). Returns the summary of the simulated part (rows from `at`).
 pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
@@ -401,11 +460,18 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
     let parent = spec.parent;
     let meta = read_meta(parent)?;
     match meta["format_version"].as_u64() {
-        Some(2) => {}
+        Some(3) => {}
+        Some(2) => {
+            return Err(format!(
+                "{}: format_version 2 run directories have no events.csv, so a fork's event log would \
+                 lack the parent's history; rerun it with this ecosim (format_version 3)",
+                parent.display()
+            ))
+        }
         Some(1) => {
             return Err(format!(
                 "{}: format_version 1 run directories have no state.bin and can't be forked; \
-                 rerun it with this ecosim (format_version 2)",
+                 rerun it with this ecosim (format_version 3)",
                 parent.display()
             ))
         }
@@ -423,6 +489,13 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
         return Err(format!("{}: no state.bin (was the run written with --snapshot-state false?)", snap.display()));
     }
     let csv = fs::read_to_string(parent.join("series.csv")).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let events_text = fs::read_to_string(parent.join(EVENTS_FILE)).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let events_before: Vec<&str> = events_text
+        .lines()
+        .skip(1)
+        .take_while(|l| l.split(',').next().and_then(|t| t.parse::<u32>().ok()).is_some_and(|t| t <= spec.at))
+        .collect();
+    parse_events(&events_text).map_err(|e| format!("{}: {e}", parent.display()))?;
     let mut lines = csv.lines();
     if lines.next() != Some(SERIES_HEADER) {
         return Err(format!("{}: series.csv header is not this ecosim's", parent.display()));
@@ -452,6 +525,7 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
         parent_snaps.iter().copied().filter(|&t| t < spec.at).chain((spec.at..=end).filter(|t| t % every == 0));
     let from = ForkedFrom { run: parent.to_string_lossy().replace('\\', "/"), tick: spec.at };
     let info = RunInfo {
+        format_version: FORMAT_VERSION,
         seed,
         ticks: end,
         snapshot_every: every,
@@ -460,13 +534,23 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
         forked_from: Some(&from),
     };
     write_meta_info(&sim, &info, out).map_err(io)?;
+    let mut log =
+        String::with_capacity(EVENTS_HEADER.len() + 1 + events_before.iter().map(|l| l.len() + 1).sum::<usize>());
+    for l in std::iter::once(EVENTS_HEADER).chain(events_before) {
+        log.push_str(l);
+        log.push('\n');
+    }
+    fs::write(out.join(EVENTS_FILE), log).map_err(io)?;
+    sim.log_events = true;
     let rows = simulate(&mut sim, end, |s| {
         if s.tick % every == 0 {
             write_snapshot(s, out, true)?;
+            flush_events(&mut s.events, out)?;
         }
         Ok(())
     })
     .map_err(io)?;
+    flush_events(&mut sim.events, out).map_err(io)?;
     let mut text = String::with_capacity(csv.len());
     text.push_str(SERIES_HEADER);
     text.push('\n');
@@ -594,16 +678,20 @@ mod tests {
         assert!(!out.exists(), "nothing is written when the fork is refused");
 
         let stateless = scratch_dir();
-        run_with_state(Params::load_default(), 1, 100, 50, &[], &stateless, false).unwrap();
+        let opts = RunOptions { state: false, ..RunOptions::default() };
+        run_with(Params::load_default(), 1, 100, 50, &[], &stateless, opts).unwrap();
         assert!(!stateless.join("snap_000050/state.bin").exists());
         assert_eq!(diff_runs(&parent, &stateless).unwrap().len(), 3, "only the three state.bin files differ");
         assert!(err(&stateless, 50, &[], &out).contains("no state.bin"));
 
         let mut m = meta(&parent);
-        m["format_version"] = 3.into();
+        m["format_version"] = 4.into();
         fs::write(parent.join("meta.json"), serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(err(&parent, 50, &[], &out).contains("unsupported format_version"));
         m["format_version"] = 2.into();
+        fs::write(parent.join("meta.json"), serde_json::to_vec(&m).unwrap()).unwrap();
+        assert!(err(&parent, 50, &[], &out).contains("no events.csv"));
+        m["format_version"] = 3.into();
         m["params"]["grazer"]["energy_cost"] = "cheap".into();
         fs::write(parent.join("meta.json"), serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(err(&parent, 50, &[], &out).contains("meta.json params"));

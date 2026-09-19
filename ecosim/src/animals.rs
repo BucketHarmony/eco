@@ -1,5 +1,6 @@
 //! Grazers and hunters: fixed-priority behaviour, energy, reproduction and death.
 
+use crate::events::EventKind;
 use crate::heredity::Traits;
 use crate::sim::Sim;
 use crate::world::{cidx, patch_of, ColClass, PATCHES_X, UNREACHABLE, WX, WY};
@@ -254,6 +255,8 @@ impl Sim {
 
     fn kill_grazer(&mut self, i: usize, cause: Cause) {
         self.deaths[Kind::Grazer as usize][cause as usize] += 1;
+        let (id, at) = (self.grazers[i].id, (self.grazers[i].x as usize, self.grazers[i].y as usize));
+        self.log_at(EventKind::Death, "grazer", at, cause.name(), id);
         let g = &mut self.grazers[i];
         g.alive = false;
         let (p, c) = (g.patch(), Sim::animal_col(g));
@@ -407,7 +410,8 @@ impl Sim {
             g.energy -= gp.repro_cost;
             g.cooldown = gp.cooldown;
             let traits = self.offspring_traits(Kind::Grazer, parent, mutate);
-            self.add_grazer(cx, cy, gp.newborn_energy, gp.cooldown, traits);
+            let id = self.add_grazer(cx, cy, gp.newborn_energy, gp.cooldown, traits);
+            self.log_at(EventKind::Birth, "grazer", (cx, cy), "", id);
         }
     }
 
@@ -419,11 +423,13 @@ impl Sim {
         self.add_grazer(x, y, gp.newborn_energy, gp.cooldown, self.params.default_traits(Kind::Grazer));
     }
 
-    fn add_grazer(&mut self, x: usize, y: usize, energy: f32, cooldown: u32, traits: Traits) {
+    /// Add a live grazer on column (x, y) and return its id.
+    fn add_grazer(&mut self, x: usize, y: usize, energy: f32, cooldown: u32, traits: Traits) -> u32 {
         let id = self.alloc_id();
         self.grazer_grid[cidx(x, y)].push(self.grazers.len() as u32);
         self.grazers.push(Animal::new(id, Kind::Grazer, (x, y), energy, 0, cooldown, traits));
         self.grazers_in_patch[patch_of(x, y)] += 1;
+        id
     }
 
     /// A uniformly random soil column on the world's edge (x or y at 0 or 63), or None (and no
@@ -451,7 +457,8 @@ impl Sim {
         let gp = self.params.grazer.clone();
         if t.is_multiple_of(gp.immigration_interval) && self.count_grazers() < gp.immigration_floor {
             if let Some((x, y)) = self.random_edge_soil_column() {
-                self.add_grazer(x, y, gp.start_energy, 0, self.params.default_traits(Kind::Grazer));
+                let id = self.add_grazer(x, y, gp.start_energy, 0, self.params.default_traits(Kind::Grazer));
+                self.log_at(EventKind::Immigration, "grazer", (x, y), "", id);
             }
         }
         let hp = self.params.hunter.clone();
@@ -462,13 +469,15 @@ impl Sim {
                 self.hunters.push(Animal::new(id, Kind::Hunter, (x, y), hp.start_energy, 0, 0, traits));
                 self.hunters_in_patch[patch_of(x, y)] += 1;
                 self.hunter_immigrants += 1;
+                self.log_at(EventKind::Immigration, "hunter", (x, y), "", id);
             }
         }
         let tp = &self.params.tree;
         if t.is_multiple_of(tp.immigration_interval) && self.count_trees() < tp.immigration_floor {
             if let Some((x, y)) = self.random_edge_soil_column() {
                 if self.spacing_ok(x as i32, y as i32) {
-                    self.plant_tree(x, y, 0);
+                    let id = self.plant_tree(x, y, 0);
+                    self.log_at(EventKind::Immigration, "tree", (x, y), "", id);
                 }
             }
         }
@@ -578,11 +587,14 @@ impl Sim {
             let id = self.alloc_id();
             self.hunters.push(Animal::new(id, Kind::Hunter, (cx, cy), hp.newborn_energy, 0, hp.refractory, traits));
             self.hunters_in_patch[p] += 1;
+            self.log_at(EventKind::Birth, "hunter", (cx, cy), "", id);
         }
     }
 
     fn kill_hunter(&mut self, i: usize, cause: Cause) {
         self.deaths[Kind::Hunter as usize][cause as usize] += 1;
+        let (id, at) = (self.hunters[i].id, (self.hunters[i].x as usize, self.hunters[i].y as usize));
+        self.log_at(EventKind::Death, "hunter", at, cause.name(), id);
         let h = &mut self.hunters[i];
         h.alive = false;
         let p = h.patch();

@@ -83,8 +83,9 @@ Architecture points that span modules:
 ## The run directory contract
 
 The run directory is the only interface between the two projects. Its full format is in SAD 1 under "Run directory format". The key points:
-- `meta.json` must contain `format_version: 1`.
+- `meta.json` must contain `format_version` (currently 3; versions 2 and 3 only add files: `state.bin` per snapshot in 2, `events.csv` in 3). `ecosim run --format-version 2` still writes version 2 for readers that know only 1 and 2.
 - `series.csv` has one row per tick.
+- `events.csv` (version 3) has one row per event: `tick,kind,species,patch_x,patch_y,x,y,cause,detail`. The kinds and field meanings are in SAD 1's run directory format.
 - Each snapshot is a `snap_NNNNNN/` directory (tick zero-padded to 6 digits) with:
   - `material.bin` and `light.bin`: 131072 bytes each, x-fastest
   - `moisture.bin`, `fertility.bin`, and `height.bin`: 4096 bytes each

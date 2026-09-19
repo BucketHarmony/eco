@@ -1,7 +1,9 @@
 //! Integration tests from SAD 1 and the addendum. They load the crate's own `params.toml`
 //! (so tuning applies) and drive the library directly; only the determinism test shells out.
 
-use ecosim::output::{run, write_meta, write_snapshot, FORMAT_VERSION, SERIES_HEADER};
+use ecosim::output::{
+    run, run_with as run_opts, write_meta, write_snapshot, RunOptions, FORMAT_VERSION, SERIES_HEADER,
+};
 use ecosim::world::{COLS, WX, WY, WZ};
 use ecosim::{Params, Sim};
 use serde_json::Value;
@@ -212,9 +214,18 @@ fn assert_valid_run(dir: &Path) -> String {
             assert!(e["kind"] == "tree" || finite(&e["energy"]), "{}: {e}", snap.display());
         }
     }
+    // `stats` reads death causes from events.csv; they equal the series columns on every tick.
+    let rows = ecosim::check::read_series(dir).unwrap();
+    assert_eq!(ecosim::check::read_series_for_stats(dir).unwrap(), rows, "events.csv deaths = series deaths");
+    let events = ecosim::events::parse_events(&fs::read_to_string(dir.join("events.csv")).unwrap()).unwrap();
+    assert_eq!(ecosim::events::unlit_burnout(&events), None);
     let out = Command::new(env!("CARGO_BIN_EXE_ecosim")).arg("stats").arg(dir).output().unwrap();
     assert!(out.status.success());
-    String::from_utf8(out.stdout).unwrap()
+    let text = String::from_utf8(out.stdout).unwrap();
+    let old: Vec<String> = ecosim::check::extinctions(&rows).iter().map(ecosim::check::extinction_line).collect();
+    let new: Vec<&str> = text.lines().filter(|l| l.starts_with("extinction:")).collect();
+    assert_eq!(new, old, "stats from events.csv = the series method");
+    text
 }
 
 /// Forced extinction: `grazer.energy_cost=1.0` starves the grazers out on seed 1, and the hunters
@@ -417,9 +428,21 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     }
     assert_eq!(a, b);
 
+    // `--format-version 2` still writes the committed v2 fixture byte for byte; format 3 adds only
+    // events.csv and the version number.
+    let v2 = tmp("mini_v2");
+    run_opts(Params::load_default(), 42, 100, 100, &[], &v2, RunOptions { format_version: 2, ..Default::default() })
+        .unwrap();
+    assert_eq!(ecosim::check::diff_runs(&fixture("s42-mini-v2"), &v2).unwrap(), Vec::<String>::new());
     let defaults = tmp("mini_defaults");
     run(Params::load_default(), 42, 100, 100, &[], &defaults).unwrap();
-    assert_eq!(ecosim::check::diff_runs(&fixture("s42-mini-v2"), &defaults).unwrap(), Vec::<String>::new());
+    let only = format!("only in {}: events.csv", defaults.display());
+    assert_eq!(ecosim::check::diff_runs(&v2, &defaults).unwrap(), [only, "differs: meta.json".to_string()]);
+    let (mut a, mut b) = (read_json(&v2.join("meta.json")), read_json(&defaults.join("meta.json")));
+    assert_eq!((a["format_version"].as_u64(), b["format_version"].as_u64()), (Some(2), Some(3)));
+    a["format_version"] = 3.into();
+    b["format_version"] = 3.into();
+    assert_eq!(a, b);
 }
 
 /// Version-1 run directories still work with `check`, `stats` and `diff`; `fork` refuses them with

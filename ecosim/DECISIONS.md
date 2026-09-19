@@ -634,3 +634,32 @@ The shot's code is in, but its defaults are not: **no kill_energy × hunt_cost c
 
 **Not regenerated.** The manifest, the golden check output and the fixtures are unchanged, because behaviour at the defaults is unchanged.
 
+
+## Event log (shot 14b)
+
+**File.** Every run directory now has `events.csv`, and `format_version` goes up to 3. Versions 2 and 3 only add files. The file is plain CSV: seed 42 at 20000 ticks writes 1,666,750 bytes, well under the 20 MB that would call for zstd. The header is `tick,kind,species,patch_x,patch_y,x,y,cause,detail`, and each event gets one row, in the order it happens. Fields that don't apply are left empty.
+
+| kind | species | x,y | cause | detail |
+|---|---|---|---|---|
+| `death` | grazer / hunter | column | `starved` `eaten` `old_age` `crowded` `burnt` | animal id |
+| `birth` | grazer / hunter | newborn's column | | newborn id |
+| `immigration` | grazer / hunter / tree | column | | id |
+| `germination` | tree | column | | tree id |
+| `tree_death` | tree | column | `old_age` `drought` `crowded` `burnt` | tree id |
+| `ignition` | | | | |
+| `spread` | | | | source patch `patch_x + 8·patch_y` |
+| `burnout` | | | | |
+| `seed_drop` | reserved, never written | | | |
+
+- **Tree causes.** Trees used to have one combined age-or-drought check. It is now two checks, age first and then drought, with the same condition and no RNG, so behaviour is unchanged. Crowding and fire deaths get their own causes.
+- **Flushing.** Recording happens only when `Sim::log_events` is on; the writer turns it on for format 3. Events go into `Sim::events`. The writer appends them to the file at every snapshot tick, after the snapshot is written, and once more at the end. So when a snapshot directory exists, every event up to its tick is already on disk.
+- **No RNG draws.** Logging only reads state that is already there. `logging_draws_nothing_and_changes_nothing` checks that the stats rows and the RNG word position are the same with logging on and off.
+- **Fork** copies the parent's rows with tick ≤ `at`, which are the ticks the restored state has already stepped, and then logs its own. It refuses a format-2 parent, because the parent has no event history to copy.
+- **`stats`** reads death causes from `events.csv` when the file is there (`check::read_series_for_stats`), and from the series columns otherwise (versions 1 and 2). The two agree:
+  - `s42_event_log_matches_the_series_and_stays_small` checks per-tick death counts, the extinction lines, and that every burnout has a matching ignition or spread. It also checks the size and that all four tree causes occur.
+  - `assert_valid_run` makes the same checks for every forced-extinction run.
+  - `prop_event_deaths_match_series` and `prop_every_burnout_was_lit` cover fire-heavy and die-off parameters, together with the regression sibling `event_deaths_regression_every_kind_and_cause`.
+- **Writing v2.** `ecosim run --format-version 2` writes the version-2 directory, which has no `events.csv`. The fixture test checks that it still equals `fixtures/s42-mini-v2` byte for byte.
+- **Temporary ecoview pin.** The renderer rejects format 3, so the ecoview CI job's s42 run is pinned to `--format-version 2` in `.github/workflows/ci.yml` only. **Shot 16 removes that pin** when the renderer learns version 3.
+- **No v3 mini fixture.** `sync-data.sh` copies the highest-versioned mini fixture, so committing `fixtures/s42-mini-v3` now would break ecoview. The shot that teaches the renderer version 3 can add it.
+- **Manifest.** `tests/data/s42-manifest.sha256` was regenerated for `events.csv` only: one line was added and every existing hash is unchanged. `manifest_regeneration_for_the_event_log_changed_no_existing_line` asserts this. The older manifests are compared with the `events.csv` line dropped.

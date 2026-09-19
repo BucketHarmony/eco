@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use ecosim::check::{self, check_run, check_run_long, diff_runs, read_series, signature_line, stats_report};
-use ecosim::output::{fork, run_with_state, ForkSpec};
+use ecosim::check::{self, check_run, check_run_long, diff_runs, read_series_for_stats, signature_line, stats_report};
+use ecosim::output::{fork, run_with, ForkSpec, RunOptions, FORMAT_VERSION};
 use ecosim::sweep::{baseline, margin_table, parse_range, parse_values, sweep, ParamSpec, SweepConfig};
 use ecosim::Params;
 use std::path::PathBuf;
@@ -33,10 +33,13 @@ enum Cmd {
         /// Write `state.bin` into every snapshot, so the run can be forked (`--snapshot-state false` to skip).
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         snapshot_state: bool,
+        /// Run directory format: 3 writes `events.csv`; 2 writes the version-2 directory without it.
+        #[arg(long, default_value_t = FORMAT_VERSION, value_parser = clap::value_parser!(u32).range(2..=3))]
+        format_version: u32,
     },
     /// Continue a run from one of its snapshots into a new run directory, optionally with changed params.
     Fork {
-        /// The parent run directory (format_version 2).
+        /// The parent run directory (format_version 3).
         run: PathBuf,
         /// The snapshot tick to continue from.
         #[arg(long)]
@@ -149,7 +152,7 @@ fn parse_sweep(args: &[String]) -> Result<SweepCmd, String> {
 
 fn main() -> ExitCode {
     match Cli::parse().cmd {
-        Cmd::Run { seed, ticks, out, snapshot_every, params, set, snapshot_state } => {
+        Cmd::Run { seed, ticks, out, snapshot_every, params, set, snapshot_state, format_version } => {
             if snapshot_every == 0 {
                 eprintln!("--snapshot-every must be > 0");
                 return ExitCode::FAILURE;
@@ -161,7 +164,8 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match run_with_state(p, seed, ticks, snapshot_every, &set, &out, snapshot_state) {
+            let opts = RunOptions { state: snapshot_state, format_version };
+            match run_with(p, seed, ticks, snapshot_every, &set, &out, opts) {
                 Ok(s) => {
                     let last = s.rows.last().unwrap();
                     println!(
@@ -220,7 +224,7 @@ fn main() -> ExitCode {
             }
         },
         Cmd::Stats { run_dir, signature } => match if signature {
-            read_series(&run_dir).map(|rows| vec![signature_line(&check::signature(&rows))])
+            read_series_for_stats(&run_dir).map(|rows| vec![signature_line(&check::signature(&rows))])
         } else {
             stats_report(&run_dir)
         } {

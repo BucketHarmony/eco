@@ -330,6 +330,8 @@ impl Sim {
             hunter_immigrants: d.hunter_immigrants,
             deaths: d.deaths,
             total_burnt: d.total_burnt,
+            log_events: false,
+            events: Vec::new(),
         };
         sim.recompute_derived();
         Ok(sim)

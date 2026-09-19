@@ -2,6 +2,7 @@
 //! themselves live in [`evaluate`], which `check` and `sweep` share.
 
 use crate::animals::{Cause, CAUSES};
+use crate::events::{deaths_per_tick, parse_events, EVENTS_FILE};
 use crate::output::{snapshot_dir_name, SERIES_FIELDS, SERIES_HEADER, TRAIT_FIELDS};
 use crate::sim::StatsRow;
 use std::collections::BTreeSet;
@@ -34,6 +35,21 @@ pub fn read_series(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
     let path = run_dir.join("series.csv");
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     parse_series(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// `series.csv` with its death columns replaced by the counts of `death` rows in `events.csv`, when
+/// the run directory has one (format version 3): what `ecosim stats` reports extinctions from.
+/// Directories without it (versions 1 and 2) keep the series' own columns.
+pub fn read_series_for_stats(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
+    let mut rows = read_series(run_dir)?;
+    let path = run_dir.join(EVENTS_FILE);
+    if path.exists() {
+        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let events = parse_events(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let deaths = deaths_per_tick(&events, rows.len()).map_err(|e| format!("{}: {e}", path.display()))?;
+        rows.iter_mut().zip(deaths).for_each(|(r, d)| r.deaths = d);
+    }
+    Ok(rows)
 }
 
 /// Parse `series.csv` text. Sweeps parse their own in-memory CSV through this too, so a sweep cell
@@ -669,9 +685,10 @@ pub fn signature_line(s: &Signature) -> String {
     }
 }
 
-/// min/max/mean per series column plus first extinction tick, as printable lines.
+/// min/max/mean per series column plus first extinction tick, as printable lines. Extinction causes
+/// come from `events.csv` when the run has one (`read_series_for_stats`).
 pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
-    let rows = read_series(run_dir)?;
+    let rows = read_series_for_stats(run_dir)?;
     if rows.is_empty() {
         return Err("series.csv has no rows".into());
     }

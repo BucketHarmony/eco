@@ -163,7 +163,8 @@ async function apply(next: ViewState): Promise<void> {
       tree: speciesColor(m, 'tree'),
     }, snapTick);
     syncControls(ui, state, m.snapshots, snapTick, playing);
-    ui.status.textContent = `${state.run} · seed ${m.seed} · ${snap.entities.length} entities`;
+    const fork = m.forked_from ? ` · forked from ${m.forked_from.run} @ tick ${m.forked_from.tick}` : '';
+    ui.status.textContent = `${state.run} · seed ${m.seed}${fork} · ${snap.entities.length} entities`;
     ui.status.classList.remove('error');
     delete window.__ecoviewError;
     render();

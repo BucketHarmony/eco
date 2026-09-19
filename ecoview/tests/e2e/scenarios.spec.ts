@@ -71,7 +71,31 @@ test('every URL parameter is reflected in the DOM on load', async ({ page }) => 
   expect(await chartMarker(page)).toMatchObject({ tick: 10000 });
 });
 
-test('a format_version 2 fixture shows the error state and never sets __ecoviewReady', async ({ page }) => {
+test('a format_version 2 fixture loads, ignores state.bin and shows forked_from', async ({ page }) => {
+  const errors = trackErrors(page);
+  const stateFetches: string[] = [];
+  page.on('request', (r) => {
+    if (r.url().endsWith('/state.bin')) stateFetches.push(r.url());
+  });
+  await page.route('**/fixtures/s42-mini/meta.json', async (route) => {
+    const res = await route.fetch();
+    const forked_from = { run: 'runs/s42', tick: 5000 };
+    await route.fulfill({ response: res, json: { ...(await res.json()), format_version: 2, forked_from } });
+  });
+  await open(page, '/');
+  const v2 = await page.locator('#view').screenshot();
+  await expect(page.locator('#status')).not.toHaveClass(/error/);
+  await expect(page.locator('#status')).toContainText('forked from runs/s42 @ tick 5000');
+  expect(await page.evaluate(() => window.__ecoviewError)).toBeUndefined();
+  await page.unrouteAll();
+  await open(page, '/');
+  await expect(page.locator('#status')).not.toContainText('forked from');
+  expect((await page.locator('#view').screenshot()).equals(v2)).toBe(true);
+  expect(stateFetches).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test('a format_version 3 fixture shows the error state and never sets __ecoviewReady', async ({ page }) => {
   await page.addInitScript(() => {
     let v = false;
     const w = window as unknown as { __readyEverTrue: boolean };
@@ -87,12 +111,12 @@ test('a format_version 2 fixture shows the error state and never sets __ecoviewR
   });
   await page.route('**/fixtures/s42-mini/meta.json', async (route) => {
     const res = await route.fetch();
-    await route.fulfill({ response: res, json: { ...(await res.json()), format_version: 2 } });
+    await route.fulfill({ response: res, json: { ...(await res.json()), format_version: 3 } });
   });
   await page.goto('/');
   await page.waitForFunction(() => !!window.__ecoviewError, null, { timeout: 5_000 });
   await expect(page.locator('#status')).toHaveClass(/error/);
-  await expect(page.locator('#status')).toContainText('unsupported format_version 2');
+  await expect(page.locator('#status')).toContainText('unsupported format_version 3');
   await page.waitForTimeout(500);
   expect(await page.evaluate(() => (window as unknown as { __readyEverTrue: boolean }).__readyEverTrue)).toBe(false);
 });

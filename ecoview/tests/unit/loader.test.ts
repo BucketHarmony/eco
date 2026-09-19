@@ -6,6 +6,7 @@ import {
   voxelIndex, type Fetcher,
 } from '../../src/loader';
 import { binDeaths } from '../../src/ui';
+import { OVERLAYS, columnColor } from '../../src/world';
 
 const PUBLIC = path.resolve(__dirname, '../../public');
 
@@ -92,10 +93,42 @@ describe('loader on fixtures/s42-mini', () => {
     }
   });
 
-  it('throws on format_version 2', async () => {
+  it('loads a format_version 2 run to the same scene data as version 1, never fetching state.bin', async () => {
+    const fetched: string[] = [];
+    const v2: Fetcher = async (url) => {
+      fetched.push(url);
+      if (url.endsWith('/state.bin')) return new Response(new Uint8Array(64), { status: 200 });
+      const res = await fsFetcher(url);
+      if (!url.endsWith('/meta.json')) return res;
+      const meta = { ...(await res.json()), format_version: 2, forked_from: { run: 'runs/s42', tick: 5000 } };
+      return new Response(JSON.stringify(meta), { status: 200 });
+    };
+    const a = await loadRun('/fixtures/s42-mini', fsFetcher);
+    const b = await loadRun('/fixtures/s42-mini', v2);
+    expect(a.meta.format_version).toBe(1);
+    expect(b.meta.format_version).toBe(2);
+    expect(b.meta.forked_from).toEqual({ run: 'runs/s42', tick: 5000 });
+    expect({ ...b.meta, format_version: 1, forked_from: undefined }).toEqual({ ...a.meta, forked_from: undefined });
+    expect(b.series).toEqual(a.series);
+    for (const tick of a.meta.snapshots) {
+      const sa = await loadSnapshot(a, tick, fsFetcher);
+      const sb = await loadSnapshot(b, tick, v2);
+      expect(sb).toEqual(sa);
+      for (const overlay of OVERLAYS) {
+        for (let y = 0; y < 64; y++) {
+          for (let x = 0; x < 64; x++) {
+            expect(columnColor(sb, x, y, overlay)).toEqual(columnColor(sa, x, y, overlay));
+          }
+        }
+      }
+    }
+    expect(fetched.some((u) => u.endsWith('state.bin'))).toBe(false);
+  });
+
+  it('throws on format_version 3', async () => {
     const meta = JSON.parse(await readFile(path.join(PUBLIC, 'fixtures/s42-mini/meta.json'), 'utf8'));
-    meta.format_version = 2;
-    expect(() => parseMeta(meta)).toThrow(/format_version 2/);
+    meta.format_version = 3;
+    expect(() => parseMeta(meta)).toThrow(/format_version 3/);
     const f = fakeFetcher({ '/bad/meta.json': JSON.stringify(meta), '/bad/series.csv': 'tick\n0\n' });
     await expect(loadRun('/bad', f)).rejects.toThrow(/format_version/);
   });

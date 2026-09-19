@@ -20,6 +20,14 @@ export interface Species {
   canopy_color?: string;
 }
 
+/** Format versions this reader accepts. Version 2 adds `state.bin` (ignored here) and `forked_from`. */
+export const FORMAT_VERSIONS = [1, 2];
+
+export interface ForkedFrom {
+  run: string;
+  tick: number;
+}
+
 export interface Meta {
   format_version: number;
   dims: { x: number; y: number; z: number };
@@ -30,6 +38,8 @@ export interface Meta {
   water_level: number;
   snapshots: number[];
   species: Species[];
+  /** Version 2 only: the run a fork continues, or null for a run started at tick 0. */
+  forked_from?: ForkedFrom | null;
 }
 
 export const SERIES_COLUMNS = [
@@ -121,8 +131,8 @@ async function getBin(fetcher: Fetcher, url: string, len: number): Promise<Uint8
 export function parseMeta(raw: unknown): Meta {
   const m = raw as Meta;
   if (!m || typeof m !== 'object') throw new Error('meta.json: not an object');
-  if (m.format_version !== 1) {
-    throw new Error(`unsupported format_version ${String(m.format_version)} (expected 1)`);
+  if (!FORMAT_VERSIONS.includes(m.format_version)) {
+    throw new Error(`unsupported format_version ${String(m.format_version)} (expected ${FORMAT_VERSIONS.join(' or ')})`);
   }
   const d = m.dims;
   if (!d || d.x !== DIM_X || d.y !== DIM_Y || d.z !== DIM_Z) {

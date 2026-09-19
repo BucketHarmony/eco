@@ -129,3 +129,8 @@ from `meta.json`. A dashed vertical line marks the current snapshot tick.
 6. Upload `shots/*.png` and any diff images.
 
 The job sets its own `defaults.run.working-directory: ecoview`, which overrides the workflow-level `ecosim` default.
+
+## Format version 2 (shot 8)
+- **Accepted versions.** The loader accepts `format_version` 1 and 2 (`FORMAT_VERSIONS` in `loader.ts`) and rejects anything else. Version 2 differs only by `state.bin` in each snapshot and `forked_from` in `meta.json`. The loader never fetches `state.bin`, so a v2 run renders exactly like the same run at v1.
+- **Sidebar.** When `forked_from` is non-null, the status line reads `<run> · seed N · forked from <parent run> @ tick T · K entities`. A v1 run, or a v2 run with `forked_from: null`, shows the line unchanged.
+- **Tests.** The v2 fixture is the committed mini fixture with `meta.json` rewritten in flight, as before. The unit test serves it through a fetcher and the e2e test through `page.route`. The error-state scenario now uses version 3. The committed data under `public/` isn't regenerated, so the shot references are unchanged.

@@ -37,7 +37,16 @@ export const SERIES_COLUMNS = [
   'moisture_mean', 'fertility_mean', 'detritus_total', 'temperature',
 ] as const;
 export type SeriesColumn = (typeof SERIES_COLUMNS)[number];
-export type Series = Record<SeriesColumn, Float64Array>;
+
+/** Death causes in the sim's `Cause` order; each is an optional `<species>_<cause>` column, deaths that tick. */
+export const DEATH_CAUSES = ['starved', 'eaten', 'old_age', 'crowded', 'burnt'] as const;
+export type DeathCause = (typeof DEATH_CAUSES)[number];
+export const DEATH_SPECIES = ['grazer', 'hunter'] as const;
+
+export type Series = Record<SeriesColumn, Float64Array> & {
+  /** Deaths per tick by cause, summed over the species that have the column. Absent causes are omitted. */
+  deaths: Partial<Record<DeathCause, Float64Array>>;
+};
 
 export interface Patch {
   grass: number;
@@ -56,6 +65,7 @@ export interface TreeEntity {
   z: number;
   age: number;
   stage: Stage;
+  lifespan?: number;
 }
 
 export interface AnimalEntity {
@@ -125,6 +135,7 @@ export function parseMeta(raw: unknown): Meta {
   return m;
 }
 
+/** Reads columns by header name, so column order and unknown extra columns don't matter. */
 export function parseSeries(text: string): Series {
   const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
   const header = lines[0].split(',');
@@ -134,13 +145,23 @@ export function parseSeries(text: string): Series {
     return i;
   });
   const n = lines.length - 1;
-  const out = {} as Series;
+  const out = { deaths: {} } as Series;
   for (const c of SERIES_COLUMNS) out[c] = new Float64Array(n);
+  const deathCols: [Float64Array, number][] = [];
+  for (const cause of DEATH_CAUSES) {
+    for (const sp of DEATH_SPECIES) {
+      const i = header.indexOf(`${sp}_${cause}`);
+      if (i < 0) continue;
+      const col = (out.deaths[cause] ??= new Float64Array(n));
+      deathCols.push([col, i]);
+    }
+  }
   for (let r = 0; r < n; r++) {
     const cells = lines[r + 1].split(',');
     for (let k = 0; k < SERIES_COLUMNS.length; k++) {
       out[SERIES_COLUMNS[k]][r] = Number(cells[idx[k]]);
     }
+    for (const [col, i] of deathCols) col[r] += Number(cells[i]);
   }
   return out;
 }

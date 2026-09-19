@@ -2,9 +2,10 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  COLUMNS, SOIL, VOXELS, WATER, columnIndex, loadRun, loadSnapshot, parseMeta, pickSnapshot, voxelIndex,
-  type Fetcher,
+  COLUMNS, SOIL, VOXELS, WATER, columnIndex, loadRun, loadSnapshot, parseMeta, parseSeries, pickSnapshot,
+  voxelIndex, type Fetcher,
 } from '../../src/loader';
+import { binDeaths } from '../../src/ui';
 
 const PUBLIC = path.resolve(__dirname, '../../public');
 
@@ -32,6 +33,24 @@ describe('loader on fixtures/s42-mini', () => {
     expect(run.series.tick[100]).toBe(100);
     for (const v of run.series.grass_mean) expect(v).toBeGreaterThanOrEqual(0);
     expect(run.series.grazers[0]).toBeGreaterThan(0);
+    expect(Object.keys(run.series.deaths)).toEqual(['starved', 'eaten', 'old_age', 'crowded', 'burnt']);
+    for (const col of Object.values(run.series.deaths)) expect(col.length).toBe(101);
+  });
+
+  it('reads tree lifespan and ignores unknown entity keys', async () => {
+    const run = await loadRun('/fixtures/s42-mini', fsFetcher);
+    const s = await loadSnapshot(run, 0, fsFetcher);
+    const trees = s.entities.filter((e) => e.kind === 'tree');
+    expect(trees.length).toBeGreaterThan(0);
+    for (const t of trees) expect(t.lifespan).toBeGreaterThan(t.age);
+    const extra: Fetcher = async (url) => {
+      if (!url.endsWith('entities.json')) return fsFetcher(url);
+      const ents = await (await fsFetcher(url)).json();
+      return new Response(JSON.stringify(ents.map((e: object) => ({ ...e, genome: [1, 2], future: 'x' }))));
+    };
+    const t = await loadSnapshot(run, 0, extra);
+    expect(t.entities.length).toBe(s.entities.length);
+    expect(t.entities[0].x).toBe(s.entities[0].x);
   });
 
   it('parses both snapshots with the right lengths and value ranges', async () => {
@@ -87,6 +106,47 @@ describe('loader on fixtures/s42-mini', () => {
     const short: Fetcher = async (url) =>
       url.endsWith('light.bin') ? new Response(new Uint8Array(10)) : fsFetcher(url);
     await expect(loadSnapshot(run, 0, short)).rejects.toThrow(/expected 131072 bytes/);
+  });
+});
+
+describe('parseSeries', () => {
+  const CORE = 'tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature';
+
+  it('reads columns by header name, whatever their order, and ignores unknown ones', () => {
+    const a = parseSeries(`${CORE}
+0,5,2,1,0.1,0.2,3,4,5,6
+1,6,3,1,0.1,0.2,3,4,5,7
+`);
+    const cols = CORE.split(',');
+    const order = [...cols.keys()].reverse();
+    const row = (r: string) => order.map((i) => r.split(',')[i]).join(',');
+    const b = parseSeries(
+      `new_col,${order.map((i) => cols[i]).join(',')}
+9,${row('0,5,2,1,0.1,0.2,3,4,5,6')}
+9,${row('1,6,3,1,0.1,0.2,3,4,5,7')}
+`,
+    );
+    for (const c of cols) expect([...b[c as keyof typeof b] as Float64Array]).toEqual([...a[c as keyof typeof a] as Float64Array]);
+    expect(a.deaths).toEqual({});
+  });
+
+  it('sums each death cause over the species that have the column', () => {
+    const s = parseSeries(`hunter_eaten,grazer_starved,${CORE},hunter_starved,hunter_immigrants
+` +
+      `0,4,0,5,2,1,0,0,0,0,0,0,1,7
+0,0,1,5,2,1,0,0,0,0,0,0,2,7
+`);
+    expect(Object.keys(s.deaths)).toEqual(['starved', 'eaten']);
+    expect([...s.deaths.starved!]).toEqual([5, 2]);
+    expect([...s.deaths.eaten!]).toEqual([0, 0]);
+  });
+
+  it('bins deaths per 100 ticks', () => {
+    const ticks = Float64Array.from({ length: 250 }, (_, i) => i);
+    const ones = new Float64Array(250).fill(1);
+    const { start, by } = binDeaths(ticks, { old_age: ones });
+    expect(start).toEqual([0, 100, 200]);
+    expect(by).toEqual([['old_age', [100, 100, 50]]]);
   });
 });
 

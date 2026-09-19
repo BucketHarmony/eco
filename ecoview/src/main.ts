@@ -5,7 +5,7 @@ import { loadRun, loadSnapshot, pickSnapshot, speciesColor, type Run, type Snaps
 import { World } from './world';
 import { Entities } from './entities';
 import {
-  drawChart, getControls, initControls, parseParams, seriesLines, syncControls, toSearch,
+  drawChart, getControls, initControls, parseParams, syncControls, toSearch,
   type Cam, type ViewState,
 } from './ui';
 
@@ -20,7 +20,7 @@ const VIEW_W = 960;
 const VIEW_H = 800;
 const BG = 0xe8ecf0;
 const TARGET = new THREE.Vector3(32, 12, 32);
-const PLAY_MS = 250;
+const PLAY_MS = 150;
 const CACHE_SIZE = 8;
 
 window.__ecoviewReady = false;
@@ -94,6 +94,9 @@ let cam: Cam | null = null;
 let playing = false;
 let playTimer: number | undefined;
 let seq = 0;
+let loading = false;
+/** The state behind the frame on screen; an error falls back to it. */
+let shown: ViewState | null = null;
 const cache = new Map<string, Promise<Snapshot>>();
 
 function getSnapshot(r: Run, tick: number): Promise<Snapshot> {
@@ -108,9 +111,16 @@ function getSnapshot(r: Run, tick: number): Promise<Snapshot> {
   return p;
 }
 
+/** Shows the error and leaves the last good frame on screen, with the controls and URL put back to match it. */
 function fail(err: unknown): void {
   const msg = err instanceof Error ? err.message : String(err);
   window.__ecoviewError = msg;
+  if (playing) togglePlay();
+  if (shown && run) {
+    state = shown;
+    history.replaceState(null, '', toSearch(state));
+    syncControls(ui, state, run.meta.snapshots, snapTick, playing);
+  }
   ui.status.textContent = `Error: ${msg}`;
   ui.status.classList.add('error');
   console.error(err);
@@ -119,6 +129,7 @@ function fail(err: unknown): void {
 async function apply(next: ViewState): Promise<void> {
   const token = ++seq;
   window.__ecoviewReady = false;
+  loading = true;
   state = next;
   history.replaceState(null, '', toSearch(state));
   try {
@@ -146,19 +157,24 @@ async function apply(next: ViewState): Promise<void> {
     world.build(snap, state.overlay);
     entities!.build(snap, { fieldOverlay: state.overlay !== 'material', top });
     const m = r.meta;
-    drawChart(ui.chart, r.series.tick, seriesLines(r.series, {
+    drawChart(ui.chart, r.series, {
       grazer: speciesColor(m, 'grazer'),
       hunter: speciesColor(m, 'hunter'),
       tree: speciesColor(m, 'tree'),
-    }), snapTick);
+    }, snapTick);
     syncControls(ui, state, m.snapshots, snapTick, playing);
     ui.status.textContent = `${state.run} · seed ${m.seed} · ${snap.entities.length} entities`;
+    ui.status.classList.remove('error');
+    delete window.__ecoviewError;
     render();
+    shown = state;
     requestAnimationFrame(() => {
       if (token === seq) window.__ecoviewReady = true;
     });
   } catch (err) {
     if (token === seq) fail(err);
+  } finally {
+    if (token === seq) loading = false;
   }
 }
 
@@ -175,6 +191,7 @@ function togglePlay(): void {
   clearInterval(playTimer);
   if (!playing || !run) return;
   playTimer = window.setInterval(() => {
+    if (loading) return; // a slow load skips beats rather than being cancelled by the next step
     const snaps = run!.meta.snapshots;
     const i = snaps.indexOf(snapTick);
     if (i >= snaps.length - 1) togglePlay();

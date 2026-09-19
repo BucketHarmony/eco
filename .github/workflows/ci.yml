@@ -100,3 +100,73 @@ jobs:
         run: |
           ./target/release/ecosim run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000
           ./target/release/ecosim check --long ci-runs/long-s1
+
+  # ecoview gate: build the seed-42 run it renders, then build, unit + scenario tests, and screenshots.
+  # shot:check compares against references rendered on the platform in shots/reference/PLATFORM, so it
+  # runs only on a matching runner; elsewhere it is skipped with a notice (ecoview/DECISIONS.md, Shot 6).
+  ecoview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: ecoview
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ecosim/target
+          key: ${{ runner.os }}-ecoview-cargo-${{ hashFiles('ecosim/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-ecoview-cargo-
+
+      - name: run s42 and sync
+        run: |
+          cd ../ecosim
+          rm -f target/release/ecosim
+          cargo build --release
+          ./target/release/ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100
+          cd ..
+          bash scripts/sync-data.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ecoview/package-lock.json
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - name: build, unit and scenario tests
+        run: npm test
+
+      - name: screenshots
+        run: npm run shot
+
+      - name: shot:check
+        run: |
+          ref="$(head -n1 shots/reference/PLATFORM)"
+          here="$(node -p 'process.platform + "-" + process.arch') swiftshader"
+          if [ "$ref" = "$here" ]; then
+            node scripts/shot-ref.mjs check
+          else
+            echo "::notice title=shot:check skipped::references were rendered on $ref, this runner is $here"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ecoview-shots
+          path: |
+            ecoview/shots/*.png
+            ecoview/shots/diff/*.png
+          if-no-files-found: ignore

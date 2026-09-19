@@ -72,3 +72,60 @@ from `meta.json`. A dashed vertical line marks the current snapshot tick.
   - canopy geometry clipping;
   - a DOM-driven overlay switch;
   - an end-to-end scrub over every 20th snapshot of the full run.
+
+## Shot 6: sync to ecosim shot 5, scenario tests, visual regression
+
+**Data**
+- `public/fixtures/s42-mini` and `public/runs/s42` were refreshed with `bash scripts/sync-data.sh`. The shot-5 run passes ecosim's committed seed-42 manifest.
+- **Tree `lifespan`** is an optional number on `TreeEntity`. Nothing draws it yet.
+- **Unknown JSON keys** on entities, patches or meta are ignored, so extra keys never break the loader. A unit test adds made-up keys to every entity.
+- **`series.csv` is read by header name.** Column order doesn't matter, and unknown columns such as `hunter_immigrants` are skipped. A unit test reverses the columns and adds an unknown one.
+
+**Death causes**
+- The loader looks for `<species>_<cause>` columns, with species `grazer` and `hunter` and causes `starved`, `eaten`, `old_age`, `crowded` and `burnt`. These are the sim's `Cause` enum, in its order.
+- Each cause present is summed over both species into `series.deaths[cause]`. A run without the columns simply has no death data.
+- The cause list is fixed rather than matched by pattern, because a pattern like `hunter_*` would also catch `hunter_immigrants`. A new sim cause needs one line here.
+- Cause colours are fixed in `ui.ts` (`CAUSE_COLORS`). The sim owns species colours, but causes aren't species, and `meta.json` has no place for them.
+
+**Chart: three panels**
+- The chart canvas is now 300×390 (was 300×220) and stacks three panels over one tick axis:
+  1. grazers and hunters, each normalized to its own max as before;
+  2. trees;
+  3. deaths per 100 ticks, stacked by cause bottom to top in `Cause` order, on a linear axis labelled with the tallest bin.
+- Grazers and hunters share a panel; trees get their own. That's how "a third panel" is read.
+- **The death axis is linear.** At seed 42 one bin at the grazer crash (1211 deaths) dwarfs the rest. It is left linear because the crash is the event worth seeing.
+- **The marker** crosses all three panels.
+- **Test hooks.** The chart canvas mirrors the marker tick and x, and the panel rectangles, into `data-marker-tick`, `data-marker-x` and `data-panels`, so scenario tests can check the chart without decoding text.
+
+**Runtime changes**
+- **Play steps every 150 ms** (was 250) and skips a beat while a snapshot is still loading. Before, a slow load could be cancelled by the next step and playback stalled. At 150 ms, "≥3 snapshots in 1 s" holds with room to spare.
+- **An error keeps the last good frame.** A failed snapshot load leaves the canvas untouched, puts the slider, readout and URL back to the frame on screen, stops playback, and shows the error. `__ecoviewReady` stays false.
+- **A later successful load clears the error state.** Before, the red status never cleared.
+
+**Scenario tests** are in `tests/e2e/scenarios.spec.ts`, and the helpers shared with `view.spec.ts` are in `tests/e2e/helpers.ts`.
+- **Format version 2.** The "never sets `__ecoviewReady`" test traps every write to the flag with a property setter installed before the page loads. The v2 fixture is the committed mini fixture with `meta.json` rewritten in flight by `page.route`, so there's no second copy of the fixture to keep in sync. This test replaces the POC's bad-format test.
+- **Missing snapshot file.** The test 404s one `.bin` of snapshot 100 and requires the `#view` screenshot to be byte-identical to the one before.
+- **Species at zero.** The test zeroes `hunters` from row 30 of the fixture series. It then requires hunter-red pixels on the panel's zero line in every column past the drop, none above it, and no `NaN` anywhere in the page HTML. A mutation check confirmed the test fails when the series doesn't reach 0.
+
+**Visual regression**
+- **References.** `shots/reference/*.png` are the 8 shots on the new data, with `shots/reference/PLATFORM` = `win32-x64 swiftshader`.
+  - This shot is the one that creates them. After this, only a shot that says it changes rendering runs `shot:accept`.
+  - The top-level `shots/*.png` stay committed. `REPORT.md` describes them.
+- **The scripts.**
+  - `npm run shot:check` builds, takes fresh shots and compares them with `scripts/shot-ref.mjs check`: pixelmatch at threshold 0.1, failing when more than 2% of an image's pixels differ. Diff images go to `shots/diff/`, which is gitignored.
+  - `npm run shot:accept` builds, takes fresh shots and copies them over the references.
+  - The shot list moved to `scripts/shots.mjs`, so `shot.mjs` and `shot-ref.mjs` share it.
+- **Platform.** SwiftShader on Windows and on Linux CI won't agree within 2%: fonts, antialiasing and ANGLE backends differ. So `shot:check` against the committed references is the local gate.
+  - CI runs `npm run shot` and uploads the PNGs.
+  - CI runs `shot:check` only when the first line of `PLATFORM` matches the runner (`<platform>-<arch> swiftshader`). Otherwise it skips the check with a `::notice`.
+  - `shot-ref.mjs check` itself prints a note on a mismatch but still compares, so a local run on another machine fails loudly rather than skipping.
+
+**CI.** An `ecoview` job sits beside the unchanged `ecosim` job in `.github/workflows/ci.yml`, with an 8-minute timeout. Steps:
+1. Build ecosim release and run seed 42 at 20000 ticks, snapshot every 100.
+2. Copy the run into `public/` with `scripts/sync-data.sh`. `public/runs/` is gitignored, and `runs/s42` is deterministic across platforms (libm).
+3. `npm ci` and `npx playwright install --with-deps chromium`.
+4. `npm test`, which runs the build, the unit tests, and the page and scenario tests.
+5. `npm run shot`, then the platform-gated `shot:check`.
+6. Upload `shots/*.png` and any diff images.
+
+The job sets its own `defaults.run.working-directory: ecoview`, which overrides the workflow-level `ecosim` default.

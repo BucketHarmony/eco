@@ -3,6 +3,8 @@
 //   npm run film -- --run runs/s42 --overlay material --cam iso --every 100 --fps 12 --out film/s42-material.mp4
 // Frames go to <out without .mp4>-frames/NNNNN.png, with frames.json listing their ticks.
 // Optional: --limit N (first N frames), --max-seconds S (fail if the whole export takes longer).
+// Tiled: --tiles overlay:cam,… [--layout CxR] [--scale N] replaces --overlay/--cam with a grid of views in lockstep:
+//   npm run film -- --run runs/s42 --tiles material:iso,fire:top,crowding:top,traits:top --layout 2x2 --out film/s42-tiled.mp4
 import { spawnSync } from 'node:child_process';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +12,9 @@ import path from 'node:path';
 import { preview } from 'vite';
 import { chromium } from '@playwright/test';
 import { CHROMIUM_ARGS } from './chromium.mjs';
-import { captureFrames, parseArgs } from './film-lib.mjs';
+import {
+  FRAME, captureFrames, captureTiledFrames, gridFor, h264Level, parseArgs, parseTiles, tiledFrameSize,
+} from './film-lib.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 4175;
@@ -19,6 +23,8 @@ const t0 = Date.now();
 const opts = parseArgs(process.argv.slice(2));
 const out = path.resolve(root, opts.out);
 const framesDir = out.replace(/\.mp4$/i, '') + '-frames';
+const size = opts.tiles ? tiledFrameSize(gridFor(parseTiles(opts.tiles).length, opts.layout), opts.scale) : FRAME;
+const level = h264Level(size.width, size.height, opts.fps);
 await rm(framesDir, { recursive: true, force: true });
 await mkdir(framesDir, { recursive: true });
 
@@ -28,15 +34,19 @@ let failed = false;
 let ticks = [];
 try {
   browser = await chromium.launch({ args: CHROMIUM_ARGS });
-  const page = await browser.newPage({ deviceScaleFactor: 1 });
-  page.on('pageerror', (e) => {
+  const context = await browser.newContext({ deviceScaleFactor: opts.scale });
+  context.on('weberror', (e) => {
     failed = true;
-    console.error(`page error: ${e.message}`);
+    console.error(`page error: ${e.error().message}`);
   });
-  ticks = await captureFrames(page, `http://localhost:${PORT}`, opts, async (i, tick, png) => {
+  const onFrame = async (i, tick, png) => {
     await writeFile(path.join(framesDir, `${String(i).padStart(5, '0')}.png`), png);
     if (i % 50 === 0) console.log(`frame ${i} (tick ${tick})`);
-  });
+  };
+  const url = `http://localhost:${PORT}`;
+  ticks = opts.tiles
+    ? await captureTiledFrames(context, url, opts, onFrame)
+    : await captureFrames(await context.newPage(), url, opts, onFrame);
   await writeFile(path.join(framesDir, 'frames.json'), `${JSON.stringify({ ...opts, limit: undefined, maxSeconds: undefined, ticks })}\n`);
 } catch (e) {
   failed = true;
@@ -48,7 +58,7 @@ try {
 
 if (!failed) {
   const args = ['-y', '-loglevel', 'error', '-framerate', String(opts.fps), '-i', path.join(framesDir, '%05d.png'),
-    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '20', '-preset', 'medium', out];
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-level', level, '-crf', '20', '-preset', 'medium', out];
   const r = spawnSync('ffmpeg', args, { stdio: 'inherit' });
   if (r.error || r.status !== 0) {
     failed = true;
@@ -59,7 +69,7 @@ if (!failed) {
 }
 
 const secs = (Date.now() - t0) / 1000;
-console.log(`${ticks.length} frames${failed ? '' : ` → ${path.relative(root, out)}`} in ${secs.toFixed(1)} s`);
+console.log(`${ticks.length} frames${failed ? '' : ` → ${path.relative(root, out)}, ${size.width}x${size.height}, H.264 level ${level}`} in ${secs.toFixed(1)} s`);
 if (secs > opts.maxSeconds) {
   failed = true;
   console.error(`took ${secs.toFixed(1)} s, over --max-seconds ${opts.maxSeconds}`);

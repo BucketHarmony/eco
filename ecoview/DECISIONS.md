@@ -214,3 +214,38 @@ The job sets its own `defaults.run.working-directory: ecoview`, which overrides 
 Top on a field overlay is cheaper because canopies are not drawn there (see "Canopies are hidden in the top camera on field overlays"). Both gates have plenty of headroom on the slower machine, CI: 4.4× for draw (250 against 56.75 ms, fertility/iso) and 10.6× for step (1000 against 94.45 ms).
 
 **Mutation check.** A 300 ms busy-wait added at the top of `render()` turned the spec red on the gate: `draw material/iso`, 344.05 ms against ≤ 250. The sleep was reverted. Before the early stop was added, the same mutation failed only on the test timeout, after 5 minutes.
+
+## Tiled multi-view time-lapse (shot 29)
+
+**Command.** `npm run film -- --run runs/s42 --tiles material:iso,fire:top,crowding:top,traits:top --layout 2x2 --every 100 --fps 12 --out film/s42-tiled.mp4`. `--tiles` is a comma-separated list of `overlay:cam` pairs; the cam must be `iso`, `top` or `side`. The overlay isn't checked in the script: an unknown one fails in the page like it does in the viewer. `--layout CxR` defaults to the smallest near-square grid, `cols = ⌈√n⌉` and `rows = ⌈n / cols⌉`, so 3 tiles give 2x2 and 5 give 3x2. `--layout` and `--scale` without `--tiles` are errors, because they would silently do nothing. `npm run film:tiled:check` runs the command above with `--max-seconds 360` and then `film-check.mjs`.
+
+**Capture: one page per tile, stepped in lockstep.** Each tile has its own page in one browser context, loaded with its overlay and camera. For every frame, all pages go to the tick through `__ecoviewGoto` in parallel, the script waits for every `__ecoviewReady`, and then it takes a `#view` screenshot of each page. The alternative, switching overlay and camera between captures on one page, needs two extra on-demand renders and a readiness wait per tile per frame, and it rebuilds the instance colours on every switch. That alternative was not timed. The separate pages share nothing, so each one is deterministic on its own, just like the single-view page. The 10-frame test confirms this. The parallel steps overlap each page's fetch and parse with the other pages' drawing.
+
+**Compositing** is done in Node with pngjs (`captureTiledFrames` in `film-lib.mjs`). Tiles are placed row-major, and empty cells are the page background `#e8ecf0`. The frame is encoded as RGB PNG with the Paeth filter, which takes a third of the time of pngjs's adaptive default at the same size: 46 against 130 ms for a 1920×1632 frame.
+- **Labels.** The script adds a `overlay · cam` label to each tile page, drawn in the top-left corner of `#view` (dark, 80% opaque, 24 px tall, `LABEL_H`), so it appears in the tile screenshot. Nothing is added to the app, which still has no film mode.
+- **Caption bar.** There is one bar across the whole grid, drawn by page 0 at y 800, `cols × 960` px wide. Every tile page's viewport is `max(1280, cols × 960)` wide so the bar fits. The bar is a separate screenshot pasted under the grid. It has the same style and text as shot 13.
+
+**Resolution.** A tile is 960×800 CSS px, so a frame is `cols·960·N × (rows·800 + 32)·N` at `--scale N`. The browser context's `deviceScaleFactor` is N.
+- **Renderer pixel ratio.** For a sharper frame and not just a bigger one, `main.ts` now calls `renderer.setPixelRatio(window.devicePixelRatio)` instead of `1`. The viewer, the tests and `npm run shot` all run at device scale 1, so their frames are unchanged: all 11 references pass `shot:check` at 0.000%, and the single-view film is byte-identical (below).
+- **Even sides.** Width and height are always even for a whole-number N. `h264Level` still refuses an odd side, because yuv420p needs even ones.
+- **H.264 level.** `h264Level(w, h, fps)` picks the lowest level from Annex A tables A-1/A-3 that allows the frame size in macroblocks, the √(8·MaxFS) limit on each side, and the macroblock rate. It is passed to ffmpeg as `-level`. Examples: 960×832 at 12 fps is 3.1, 1920×1632 is 5.0, and 3840×3264 is 6.0. Anything beyond 6.2 fails before capture, with a message saying to use a smaller layout, scale or fps. The single-view encode now passes `-level 3.1` too, which only changes the MP4 header. The frames are the deterministic artefact.
+
+**Single view is unchanged.** With no `--tiles`, the script calls shot 13's `captureFrames` exactly as before. The page now comes from a context with `deviceScaleFactor: 1` instead of `browser.newPage`, and a context-level `weberror` listener replaces the page's `pageerror` listener. All 201 frames of `--overlay material --cam iso --every 100` were captured with the shot-13 code (stashed) and with the new code, and they compared byte-identical with `cmp`.
+
+**Checks**
+- **Determinism.** `tests/e2e/film.spec.ts` captures 10 tiled frames (2x2, scale 1, ticks 0–9000) twice, each in a fresh context. It requires byte-identical PNGs, 10 distinct hashes, and a 1920×1632 frame. It runs in `npm test`.
+- **Tile correctness.** `film-check.mjs` reads `tiles`, `layout` and `scale` from `frames.json`. For a tiled film, it compares the `material:iso` tile of frame 100 (tick 10000), minus its top 24 rows (the label band), with the same rows of `02_material_t10000_iso.png`. It uses the shot-13 threshold (pixelmatch 0.1, at most 2%) and the same rule for choosing between the reference and a fresh shot. It also requires the MP4's size to match the PNGs'. The check fails if the film has no `material:iso` tile, or if its scale isn't 1.
+  - Local result: 0.000%.
+  - **Mutation check.** Swapping the first two tiles in `frames.json`, so the check reads the fire tile, failed at 69.6%.
+
+**Measured on this machine** (win32-x64, SwiftShader):
+
+| Film | Frames | Size | Level | Time |
+| --- | --- | --- | --- | --- |
+| single view, material/iso (shot 13) | 201 | 960×832 | 3.1 | 25 s |
+| 2x2 tiled, scale 1 | 201 | 1920×1632 | 5.0 | 126 s |
+| 2x2 tiled, scale 2 (local only) | 201 | 3840×3264 | 6.0 | 305 s |
+
+At scale 2, the tiles are rendered at 2× in WebGL, not upscaled. The iso tile's voxel edges and agents are sharp at 3840×3264. CI makes only the scale-1 tiled film, as the shot allows.
+
+**CI.** After the single-view film, `npm run film:tiled:check` runs and `film/s42-tiled.mp4` is uploaded as `ecoview-film-tiled`. The ecoview job timeout went from 12 to 18 minutes. Before this shot the job took 4.5 minutes, and the tiled film is allowed 6.

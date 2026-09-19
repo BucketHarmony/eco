@@ -101,12 +101,12 @@ jobs:
           ./target/release/ecosim run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000
           ./target/release/ecosim check --long ci-runs/long-s1
 
-  # ecoview gate: build the seed-42 run it renders, then build, unit + scenario tests, screenshots and the s42 film.
+  # ecoview gate: build the seed-42 run it renders, then build, unit + scenario tests, screenshots and the s42 films (single-view and 2x2 tiled).
   # shot:check compares against references rendered on the platform in shots/reference/PLATFORM, so it
   # runs only on a matching runner; elsewhere it is skipped with a notice (ecoview/DECISIONS.md, Shot 6).
   ecoview:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 18
     defaults:
       run:
         working-directory: ecoview
@@ -181,6 +181,17 @@ jobs:
         with:
           name: ecoview-film
           path: ecoview/film/s42-material.mp4
+          if-no-files-found: error
+
+      # The 2x2 tiled film at scale 1; its material:iso tile is checked against 02 like the single-view film (Shot 29).
+      - name: tiled film
+        run: npm run film:tiled:check
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ecoview-film-tiled
+          path: ecoview/film/s42-tiled.mp4
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4

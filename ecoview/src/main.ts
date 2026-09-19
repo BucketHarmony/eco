@@ -31,7 +31,7 @@ window.__ecoviewReady = false;
 
 const canvas = document.getElementById('view') as HTMLCanvasElement;
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'low-power' });
-renderer.setPixelRatio(1);
+renderer.setPixelRatio(window.devicePixelRatio); // 1 everywhere except `npm run film -- --scale N`
 renderer.setSize(VIEW_W, VIEW_H, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.setClearColor(new THREE.Color().setHex(BG, THREE.SRGBColorSpace));

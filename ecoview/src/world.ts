@@ -1,9 +1,6 @@
 // Surface voxels: one InstancedMesh with one top voxel per column, colored by the active overlay.
 import * as THREE from 'three';
-import {
-  COLUMNS, DIM_X, DIM_Y, PATCHES, SOIL, WATER, columnIndex, patchOf, voxelIndex,
-  type Patch, type Snapshot,
-} from './loader';
+import { SOIL, WATER, type Grid, type Snapshot } from './loader';
 
 export const OVERLAYS = [
   'material', 'light', 'moisture', 'fertility', 'temperature', 'fire', 'crowding', 'traits',
@@ -36,8 +33,6 @@ export const COLORS = {
 
 /** Fire overlay: a burning patch is brightest at this many ticks left (the sim's `fire.duration` default). */
 export const FIRE_TICKS_FULL = 3;
-/** Fire overlay: a non-burning patch with grass + shrub below this is drawn as burnt ground. */
-export const BURNT_COVER = 0.05;
 /** Crowding overlay: grazers per patch at full magenta (twice the sim's grazer disease threshold of 16). */
 export const CROWDING_FULL = 32;
 /** Traits overlay: `energy_cost_mult` this far from the default 1 is fully blue (below) or red (above). */
@@ -82,8 +77,6 @@ export const soilColor = (grass: number, shrub: number): RGB =>
 /** Fire overlay color of a burning patch: dark orange with 1 tick left to bright orange at FIRE_TICKS_FULL. */
 export const burningColor = (ticksLeft: number): RGB =>
   lerpRgb(C.fireLo, C.fireHi, (ticksLeft - 1) / (FIRE_TICKS_FULL - 1));
-/** Fire overlay: a patch that isn't burning but has lost its cover reads as burnt (see DECISIONS.md). */
-export const isBurnt = (p: Patch): boolean => (p.burning_ticks_left ?? 0) === 0 && p.grass + p.shrub < BURNT_COVER;
 /** Crowding overlay: white at 0 grazers to magenta at CROWDING_FULL, clamped. */
 export const crowdingColor = (grazers: number): RGB => lerpRgb(C.crowdLo, C.crowdHi, grazers / CROWDING_FULL);
 /** Traits overlay grazer color: white at the default multiplier 1, blue below, red above, full at ±TRAIT_SPAN. */
@@ -98,8 +91,9 @@ const crowdCache = new WeakMap<Snapshot, Uint16Array>();
 export function grazersPerPatch(snap: Snapshot): Uint16Array {
   let n = crowdCache.get(snap);
   if (!n) {
-    n = new Uint16Array(PATCHES);
-    for (const e of snap.entities) if (e.kind === 'grazer') n[patchOf(Math.floor(e.x), Math.floor(e.y))]++;
+    const g = snap.grid;
+    n = new Uint16Array(g.patches);
+    for (const e of snap.entities) if (e.kind === 'grazer') n[g.patchOf(Math.floor(e.x), Math.floor(e.y))]++;
     crowdCache.set(snap, n);
   }
   return n;
@@ -107,14 +101,15 @@ export function grazersPerPatch(snap: Snapshot): Uint16Array {
 
 /** Color of the top voxel of column (x, y) under the given overlay. */
 export function columnColor(snap: Snapshot, x: number, y: number, overlay: Overlay): RGB {
-  const col = columnIndex(x, y);
+  const g = snap.grid;
+  const col = g.column(x, y);
   const h = snap.height[col];
-  const mat = snap.material[voxelIndex(x, y, h)];
+  const mat = snap.material[g.voxel(x, y, h)];
   if (overlay === 'light') {
-    return lightColor(snap.light[voxelIndex(x, y, h + 1)]);
+    return lightColor(snap.light[g.voxel(x, y, h + 1)]);
   }
   if (mat === WATER) return C.water;
-  const p = patchOf(x, y);
+  const p = g.patchOf(x, y);
   const patch = snap.patches[p];
   const burning = patch.burning_ticks_left ?? 0;
   switch (overlay) {
@@ -124,7 +119,8 @@ export function columnColor(snap: Snapshot, x: number, y: number, overlay: Overl
     case 'fire':
       if (mat !== SOIL) return C.rock;
       if (burning > 0) return burningColor(burning);
-      return isBurnt(patch) ? C.burnt : soilColor(patch.grass, patch.shrub);
+      // Burnt ground is a burnout event since the last snapshot (DECISIONS.md, shot 16), not low cover.
+      return snap.burnt[p] ? C.burnt : soilColor(patch.grass, patch.shrub);
     case 'crowding':
       return crowdingColor(grazersPerPatch(snap)[p]);
     case 'moisture':
@@ -136,9 +132,12 @@ export function columnColor(snap: Snapshot, x: number, y: number, overlay: Overl
   }
 }
 
-/** Three-space center of the voxel at sim (x, y, z): sim z is Three y, sim +y is Three -z. */
-export function voxelCenter(x: number, y: number, z: number, out = new THREE.Vector3()): THREE.Vector3 {
-  return out.set(x + 0.5, z + 0.5, 63.5 - y);
+/**
+ * Three-space center of the voxel at sim (x, y, z) in a world `depth` columns deep: sim z is Three y and
+ * sim +y is Three -z, so the world spans x in [0, width] and z in [0, depth].
+ */
+export function voxelCenter(x: number, y: number, z: number, depth: number, out = new THREE.Vector3()): THREE.Vector3 {
+  return out.set(x + 0.5, z + 0.5, depth - 0.5 - y);
 }
 
 export class World {
@@ -146,8 +145,9 @@ export class World {
   private readonly basic = new THREE.MeshBasicMaterial({ color: 0xffffff });
   private readonly lambert = new THREE.MeshLambertMaterial({ color: 0xffffff });
 
-  constructor() {
-    this.mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), this.lambert, COLUMNS);
+  /** One instance per column of `grid`; a run with other dims gets a new World. */
+  constructor(readonly grid: Grid) {
+    this.mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), this.lambert, grid.columns);
     this.mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
     this.mesh.frustumCulled = false;
     // Allocate the instanceColor buffer up front.
@@ -162,10 +162,11 @@ export class World {
     const m = new THREE.Matrix4();
     const p = new THREE.Vector3();
     const c = new THREE.Color();
-    for (let y = 0; y < DIM_Y; y++) {
-      for (let x = 0; x < DIM_X; x++) {
-        const i = columnIndex(x, y);
-        voxelCenter(x, y, snap.height[i], p);
+    const grid = this.grid;
+    for (let y = 0; y < grid.y; y++) {
+      for (let x = 0; x < grid.x; x++) {
+        const i = grid.column(x, y);
+        voxelCenter(x, y, snap.height[i], grid.y, p);
         m.makeTranslation(p.x, p.y, p.z);
         this.mesh.setMatrixAt(i, m);
         const [r, g, b] = columnColor(snap, x, y, overlay);

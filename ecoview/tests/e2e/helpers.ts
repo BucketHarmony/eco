@@ -24,10 +24,13 @@ export interface Stats {
   mean: [number, number, number];
 }
 
-/** Screenshots #view only and measures its pixels in the page (no image library needed). */
-export async function viewStats(page: Page): Promise<Stats> {
+/**
+ * Screenshots #view only and measures its pixels in the page (no image library needed). With `worldOnly`, pixels
+ * of the exact background colour #e8ecf0 (the letterbox around a world that doesn't fill the view) are left out.
+ */
+export async function viewStats(page: Page, worldOnly = false): Promise<Stats> {
   const png = await page.locator('#view').screenshot();
-  return page.evaluate(async (b64) => {
+  return page.evaluate(async ([b64, only]) => {
     const img = new Image();
     img.src = `data:image/png;base64,${b64}`;
     await img.decode();
@@ -40,13 +43,15 @@ export async function viewStats(page: Page): Promise<Stats> {
     let dark = 0;
     let light = 0;
     const sum = [0, 0, 0];
+    let n = 0;
     for (let i = 0; i < d.length; i += 4) {
       const r = d[i], g = d[i + 1], b = d[i + 2];
+      if (only && r === 0xe8 && g === 0xec && b === 0xf0) continue;
+      n++;
       if (r < 60 && g < 60 && b < 60) dark++;
       if (r > 200 && g > 200 && b > 200) light++;
       sum[0] += r; sum[1] += g; sum[2] += b;
     }
-    const n = d.length / 4;
     return { n, dark, light, mean: [sum[0] / n, sum[1] / n, sum[2] / n] as [number, number, number] };
-  }, png.toString('base64'));
+  }, [png.toString('base64'), worldOnly] as const);
 }

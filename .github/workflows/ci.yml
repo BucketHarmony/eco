@@ -189,12 +189,12 @@ jobs:
           path: ecosim/ci-runs/bench-tick.json
           if-no-files-found: error
 
-  # ecoview gate: build the seed-42 run it renders, then build, unit + scenario tests, screenshots and the s42 films (single-view and 2x2 tiled).
+  # ecoview gate: build the seed-42 run it renders (the strip, format 3), then build, unit + scenario tests, screenshots and the s42 films (single-view and 2x2 tiled).
   # shot:check compares against references rendered on the platform in shots/reference/PLATFORM, so it
   # runs only on a matching runner; elsewhere it is skipped with a notice (ecoview/DECISIONS.md, Shot 6).
   ecoview:
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: ecoview
@@ -220,9 +220,8 @@ jobs:
           cd ../ecosim
           rm -f target/release/ecosim
           cargo build --release
-          # Pinned to the v2 writer until the renderer reads format_version 3 (ecosim/DECISIONS.md, Event log; shot 16 removes it).
-          # Pinned to the 64x64 world until the renderer reads meta.json dims (ecosim/DECISIONS.md, shot 15; shot 16 removes it).
-          ./target/release/ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100 --format-version 2             --set world.width=64 --set climate.rain_gradient=0 --set world.slope_bias=0
+          # The reference world at defaults: the 256x64 strip, format 3 (ecoview/DECISIONS.md, shot 16).
+          ./target/release/ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100
           cd ..
           bash scripts/sync-data.sh
 

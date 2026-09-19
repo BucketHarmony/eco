@@ -1,12 +1,5 @@
 // Fetches and parses a run directory (see SAD 1 "Run directory format").
 
-export const DIM_X = 64;
-export const DIM_Y = 64;
-export const DIM_Z = 32;
-export const VOXELS = DIM_X * DIM_Y * DIM_Z;
-export const COLUMNS = DIM_X * DIM_Y;
-export const PATCHES = 64;
-
 export const AIR = 0;
 export const SOIL = 1;
 export const ROCK = 2;
@@ -20,17 +13,72 @@ export interface Species {
   canopy_color?: string;
 }
 
-/** Format versions this reader accepts. Version 2 adds `state.bin` (ignored here) and `forked_from`. */
-export const FORMAT_VERSIONS = [1, 2];
+/**
+ * Format versions this reader accepts. Version 2 adds `state.bin` (ignored here) and `forked_from`; version 3
+ * adds `events.csv`.
+ */
+export const FORMAT_VERSIONS = [1, 2, 3];
 
 export interface ForkedFrom {
   run: string;
   tick: number;
 }
 
+/** `meta.json` `dims`: x = width, y = depth, z = height, patch = patch side in columns. */
+export interface Dims {
+  x: number;
+  y: number;
+  z: number;
+  /** Absent before ecosim shot 15, when every patch was 8×8. */
+  patch?: number;
+}
+
+/** A world's sizes and index helpers, derived once from `Dims`. */
+export class Grid {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly patch: number;
+  /** Patches along x and along y. */
+  readonly px: number;
+  readonly py: number;
+  readonly voxels: number;
+  readonly columns: number;
+  readonly patches: number;
+
+  constructor(d: Dims) {
+    this.x = d.x;
+    this.y = d.y;
+    this.z = d.z;
+    this.patch = d.patch ?? 8;
+    this.px = this.x / this.patch;
+    this.py = this.y / this.patch;
+    this.voxels = this.x * this.y * this.z;
+    this.columns = this.x * this.y;
+    this.patches = this.px * this.py;
+  }
+
+  /** The longer horizontal side, which the cameras scale with. */
+  get longest(): number {
+    return Math.max(this.x, this.y);
+  }
+
+  voxel(x: number, y: number, z: number): number {
+    return x + this.x * (y + this.y * z);
+  }
+
+  column(x: number, y: number): number {
+    return x + this.x * y;
+  }
+
+  patchOf(x: number, y: number): number {
+    return Math.floor(x / this.patch) + this.px * Math.floor(y / this.patch);
+  }
+}
+
 export interface Meta {
   format_version: number;
-  dims: { x: number; y: number; z: number };
+  dims: Dims;
   seed: number;
   ticks: number;
   snapshot_every: number;
@@ -75,6 +123,19 @@ export type Series = Record<SeriesColumn, Float64Array> & {
   extra: Partial<Record<OptionalColumn, Float64Array>>;
 };
 
+/** One `events.csv` row (format 3). Empty numeric fields are `null`, empty text fields `''`. */
+export interface RunEvent {
+  tick: number;
+  kind: string;
+  species: string;
+  patch_x: number | null;
+  patch_y: number | null;
+  x: number | null;
+  y: number | null;
+  cause: string;
+  detail: number | null;
+}
+
 export interface Patch {
   grass: number;
   shrub: number;
@@ -116,6 +177,7 @@ export type Entity = TreeEntity | AnimalEntity;
 
 export interface Snapshot {
   tick: number;
+  grid: Grid;
   material: Uint8Array;
   light: Uint8Array;
   moisture: Uint8Array;
@@ -123,20 +185,24 @@ export interface Snapshot {
   height: Uint8Array;
   patches: Patch[];
   entities: Entity[];
+  /** 1 for each patch with a `burnout` event since the previous snapshot; all 0 for a run without `events.csv`. */
+  burnt: Uint8Array;
 }
 
 export interface Run {
   base: string;
   meta: Meta;
+  grid: Grid;
   series: Series;
+  /** `events.csv` rows in file order; empty for formats 1 and 2. */
+  events: RunEvent[];
+  /** The `burnout` rows of `events`. */
+  burnouts: RunEvent[];
 }
 
 /** Fetches a path relative to the run directory; tests swap in a filesystem reader. */
 export type Fetcher = (url: string) => Promise<Response>;
 
-export const voxelIndex = (x: number, y: number, z: number): number => x + DIM_X * (y + DIM_Y * z);
-export const columnIndex = (x: number, y: number): number => x + DIM_X * y;
-export const patchOf = (x: number, y: number): number => (x >> 3) + 8 * (y >> 3);
 export const snapDir = (tick: number): string => `snap_${String(tick).padStart(6, '0')}`;
 
 async function get(fetcher: Fetcher, url: string): Promise<Response> {
@@ -151,16 +217,21 @@ async function getBin(fetcher: Fetcher, url: string, len: number): Promise<Uint8
   return buf;
 }
 
+/** The sim's limits (ecosim `Params::check_dims`): sides in 1..=256, width and depth whole patches. */
+function validDims(d: Dims | undefined): d is Dims {
+  const side = (v: unknown) => Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 256;
+  if (!d || typeof d !== 'object') return false;
+  const patch = d.patch ?? 8;
+  return side(d.x) && side(d.y) && side(d.z) && side(patch) && d.x % patch === 0 && d.y % patch === 0;
+}
+
 export function parseMeta(raw: unknown): Meta {
   const m = raw as Meta;
   if (!m || typeof m !== 'object') throw new Error('meta.json: not an object');
   if (!FORMAT_VERSIONS.includes(m.format_version)) {
-    throw new Error(`unsupported format_version ${String(m.format_version)} (expected ${FORMAT_VERSIONS.join(' or ')})`);
+    throw new Error(`unsupported format_version ${String(m.format_version)} (expected ${FORMAT_VERSIONS.join(', ')})`);
   }
-  const d = m.dims;
-  if (!d || d.x !== DIM_X || d.y !== DIM_Y || d.z !== DIM_Z) {
-    throw new Error(`meta.json: unsupported dims ${JSON.stringify(d)}`);
-  }
+  if (!validDims(m.dims)) throw new Error(`meta.json: unsupported dims ${JSON.stringify(m.dims)}`);
   if (!Array.isArray(m.snapshots) || m.snapshots.length === 0) {
     throw new Error('meta.json: no snapshots');
   }
@@ -205,6 +276,52 @@ export function parseSeries(text: string): Series {
   return out;
 }
 
+const EVENT_COLUMNS = ['tick', 'kind', 'species', 'patch_x', 'patch_y', 'x', 'y', 'cause', 'detail'] as const;
+
+/** Parses `events.csv` by header name, like `series.csv`. */
+export function parseEvents(text: string): RunEvent[] {
+  const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
+  if (lines.length === 0) throw new Error('events.csv: no header');
+  const header = lines[0].split(',');
+  const idx = EVENT_COLUMNS.map((c) => {
+    const i = header.indexOf(c);
+    if (i < 0) throw new Error(`events.csv: missing column ${c}`);
+    return i;
+  });
+  const num = (v: string | undefined): number | null => (v === undefined || v === '' ? null : Number(v));
+  const out: RunEvent[] = new Array(lines.length - 1);
+  for (let r = 1; r < lines.length; r++) {
+    const c = lines[r].split(',');
+    out[r - 1] = {
+      tick: Number(c[idx[0]]),
+      kind: c[idx[1]] ?? '',
+      species: c[idx[2]] ?? '',
+      patch_x: num(c[idx[3]]),
+      patch_y: num(c[idx[4]]),
+      x: num(c[idx[5]]),
+      y: num(c[idx[6]]),
+      cause: c[idx[7]] ?? '',
+      detail: num(c[idx[8]]),
+    };
+  }
+  return out;
+}
+
+/**
+ * Patches with a `burnout` event in ticks (from, to]. For the snapshot at `to`, `from` is the previous
+ * snapshot's tick, or -1 for the first snapshot. These are the patches the fire overlay draws burnt.
+ */
+export function burntPatches(burnouts: RunEvent[], grid: Grid, from: number, to: number): Uint8Array {
+  const out = new Uint8Array(grid.patches);
+  for (const e of burnouts) {
+    if (e.tick <= from || e.tick > to || e.patch_x === null || e.patch_y === null) continue;
+    if (e.patch_x >= 0 && e.patch_x < grid.px && e.patch_y >= 0 && e.patch_y < grid.py) {
+      out[e.patch_x + grid.px * e.patch_y] = 1;
+    }
+  }
+  return out;
+}
+
 export function joinUrl(base: string, path: string): string {
   return base.endsWith('/') ? base + path : `${base}/${path}`;
 }
@@ -212,7 +329,11 @@ export function joinUrl(base: string, path: string): string {
 export async function loadRun(base: string, fetcher: Fetcher = fetch): Promise<Run> {
   const meta = parseMeta(await (await get(fetcher, joinUrl(base, 'meta.json'))).json());
   const series = parseSeries(await (await get(fetcher, joinUrl(base, 'series.csv'))).text());
-  return { base, meta, series };
+  const events = meta.format_version >= 3
+    ? parseEvents(await (await get(fetcher, joinUrl(base, 'events.csv'))).text())
+    : [];
+  const burnouts = events.filter((e) => e.kind === 'burnout');
+  return { base, meta, grid: new Grid(meta.dims), series, events, burnouts };
 }
 
 /** The snapshot with the largest tick <= `tick`, clamped to the first and last snapshot. */
@@ -225,22 +346,26 @@ export function pickSnapshot(snapshots: number[], tick: number): number {
 export async function loadSnapshot(run: Run, tick: number, fetcher: Fetcher = fetch): Promise<Snapshot> {
   const dir = joinUrl(run.base, snapDir(tick));
   const u = (f: string) => joinUrl(dir, f);
+  const grid = run.grid;
   const [material, light, moisture, fertility, height, patchesRes, entitiesRes] = await Promise.all([
-    getBin(fetcher, u('material.bin'), VOXELS),
-    getBin(fetcher, u('light.bin'), VOXELS),
-    getBin(fetcher, u('moisture.bin'), COLUMNS),
-    getBin(fetcher, u('fertility.bin'), COLUMNS),
-    getBin(fetcher, u('height.bin'), COLUMNS),
+    getBin(fetcher, u('material.bin'), grid.voxels),
+    getBin(fetcher, u('light.bin'), grid.voxels),
+    getBin(fetcher, u('moisture.bin'), grid.columns),
+    getBin(fetcher, u('fertility.bin'), grid.columns),
+    getBin(fetcher, u('height.bin'), grid.columns),
     get(fetcher, u('patches.json')),
     get(fetcher, u('entities.json')),
   ]);
   const patches = (await patchesRes.json()) as Patch[];
-  if (!Array.isArray(patches) || patches.length !== PATCHES) {
-    throw new Error(`${u('patches.json')}: expected ${PATCHES} patches`);
+  if (!Array.isArray(patches) || patches.length !== grid.patches) {
+    throw new Error(`${u('patches.json')}: expected ${grid.patches} patches`);
   }
   const entities = (await entitiesRes.json()) as Entity[];
   if (!Array.isArray(entities)) throw new Error(`${u('entities.json')}: not an array`);
-  return { tick, material, light, moisture, fertility, height, patches, entities };
+  const snaps = run.meta.snapshots;
+  const i = snaps.indexOf(tick);
+  const burnt = burntPatches(run.burnouts, grid, i > 0 ? snaps[i - 1] : -1, tick);
+  return { tick, grid, material, light, moisture, fertility, height, patches, entities, burnt };
 }
 
 export function speciesColor(meta: Meta, name: string, key: 'color' | 'canopy_color' = 'color'): string {

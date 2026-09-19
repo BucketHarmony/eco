@@ -197,7 +197,7 @@ The job sets its own `defaults.run.working-directory: ecoview`, which overrides 
 - **Step rate.** 50 consecutive snapshots, ticks 10000–14900, material/iso. Each step is timed in the page from `__ecoviewGoto(tick)` until `__ecoviewReady` is true, polled with `setTimeout(0)`. Every step fetches and parses a new snapshot, because the 8-entry cache holds none of them, and that is what a viewer sees when they press Play.
 - **First load** is timed in Node, from `page.goto` until `__ecoviewReady`. It includes fetching and parsing the 20,001-row `series.csv`.
 - **Summary.** The median, the p95 (nearest rank) and fps = 1000 / median, rounded to 0.01.
-- **World size.** Shot 16 hasn't landed, so `runs/` has only the 64×64×32 world, and `perf.json` records `world: "64x64x32"`.
+- **World size.** `perf.json` records the world it measured, read from `meta.json` `dims`. It was `64x64x32` when this was written; since shot 16 it is `256x64x32`, and the draw gate scales with it (see "Renderer dims sync").
 
 **Thresholds.** The test fails only if a pair's median draw is over 250 ms or the median step is over 1000 ms, which are the prompt's numbers. The first pair over the draw gate stops the measurement, so a gross regression fails on the gate within seconds instead of on the 5-minute test timeout. `perf.json` is written either way.
 
@@ -249,3 +249,43 @@ Top on a field overlay is cheaper because canopies are not drawn there (see "Can
 At scale 2, the tiles are rendered at 2× in WebGL, not upscaled. The iso tile's voxel edges and agents are sharp at 3840×3264. CI makes only the scale-1 tiled film, as the shot allows.
 
 **CI.** After the single-view film, `npm run film:tiled:check` runs and `film/s42-tiled.mp4` is uploaded as `ecoview-film-tiled`. The ecoview job timeout went from 12 to 18 minutes. Before this shot the job took 4.5 minutes, and the tiled film is allowed 6. In run 35443604889 the job took 6 min 56 s: the tiled determinism test took 20.4 s, the tiled film step 3 min 7 s, and the tiled check 0.000% against the fresh shots/02 (the references are Windows).
+
+## Renderer dims sync (shot 16)
+
+This shot supersedes the earlier sections wherever they assume the 64×64×32 world, the `BURNT_COVER` inference or the 17300 fire shot.
+
+**Data**
+- `public/runs/s42` is ecosim's reference world at defaults: the 256×64×32 strip with 8×8-column patches, format 3. It was regenerated and copied with `bash scripts/sync-data.sh`. CI no longer pins the run to the old square world: the ecoview job runs `ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100` at defaults.
+- **`public/fixtures/s42-strip-mini`** is a 2-snapshot strip fixture (ticks 0 and 100, format 3, about 2.8 MB). ecosim ships no strip fixture, this shot can't edit ecosim, and `sync-data.sh` is shared, so the fixture was made with the ecosim CLI directly: `ecosim run --seed 42 --ticks 100 --out <dir> --snapshot-every 100` at defaults. `public/fixtures/s42-mini` stays the 64×64 fixture (format 2). The unit tests run over both.
+
+**Loader**
+- All sizes come from `meta.json` `dims` through a `Grid` (`x`, `y`, `z`, `patch`, with the derived `px`, `py`, `voxels`, `columns`, `patches` and `longest`). The module-level `DIM_*` constants are gone.
+- A missing `patch` defaults to 8, the value in every run before shot 15.
+- `dims` is rejected unless each side is an integer in 1..256 and `x` and `y` are multiples of `patch`.
+- Every `.bin` is checked against the grid. A run whose dims disagree with its files fails on the first mismatched file with `expected N bytes, got M`.
+- Formats 1, 2 and 3 are accepted. A v3 run must have `events.csv`, which is read by header name, so column order doesn't matter and a missing column is an error. v1 and v2 runs never fetch it.
+
+**Burnt ground comes from events.** The fire overlay draws a non-burning soil column charcoal when its patch has a `burnout` event in (previous snapshot tick, this snapshot tick]. For the first snapshot, the window starts at −1. The old inference, bare cover below 0.05, is removed: on the strip it marked grazed-down ground as burnt and missed most scars. Burning takes precedence over burnt. Runs without events (v1 and v2) show no burnt ground, since claiming a burn from cover alone was the error being fixed.
+
+**Cameras.** All three are computed from the grid, and the target is the world centre.
+- **iso** keeps the square world's offsets (70, 75, 70) and scales them, the near plane and the far plane by `longest / 64`. The 64×64 world is framed exactly as before, and the strip is a diagonal band.
+- **top** fits the whole width × depth into the 960×800 view (orthographic). The 64×64 world is unchanged at 12.5 px per column. The strip is 3.75 px per column and letterboxed to rows 280–519, with the page background above and below.
+- **side** now looks north from beyond the south edge, so +x runs left to right. It is tilted down 25°, and its distance makes the x extent fill 90% of the view width. The old side camera was fixed for 64 and showed the strip as a thin sliver. This changes the side view of the 64 world too; no reference uses it.
+
+**Screenshots**
+- `09_fire_t17300_top.png` is now `09_fire_t17100_top.png`. 17100 is the strip snapshot with the most patches burning (3), with 27 burnouts since 17000.
+- `03_light` and the letterbox test measure world pixels only, skipping exact page-background pixels (`viewStats(page, true)`). Before this, the background counted as "light", which the letterbox would have inflated.
+- All 11 references were re-accepted. `shots/REACCEPT-16.md` shows the old and new images side by side with the diffs.
+
+**Tests**
+- The unit tests run the loader suite over both fixtures. They also cover `events.csv` parsing (the strip fixture's rows, and fire rows with empty fields in a shuffled column order), the `burntPatches` window, and a hand-built 24×8×4 world that exercises every fire-overlay case.
+- e2e:
+  - format 4 errors, and a v3 run with no `events.csv` errors;
+  - claiming the mini fixture is 256×64 errors on a `.bin` size;
+  - the strip fixture letterboxes to exactly 240 rows in the top camera;
+  - the fire overlay test serves an `events.csv` with one burnout, and checks that the bare patch next to it stays soil.
+- `perf.spec.ts` reads the world label for `perf.json` from `meta.json`.
+
+**Performance on the strip.** The strip has 16384 surface columns against the 64×64 world's 4096, and every draw cost about 4× more: iso medians went from 45.9–47.0 ms to 239.8–241.9, top field overlays from 34.2–34.8 to 164.6–165.3, and a step from 66.5 to 356.8 ms. Shot 28's draw gate of 250 ms was set on the 64 world and would fail on CI here for the world's size alone, not for a regression. **The draw gate is now per surface column:** 250 ms / 4096 columns, which is the same gate on the 64 world and 1000 ms on the strip. Local headroom is 4.1× (241.9 against 1000), close to shot 28's 5.3×. The step gate stays at an absolute 1000 ms: a step fetches and parses one snapshot, and 356.8 ms still leaves 2.8×. The cost of this is sensitivity: shot 28's 300 ms busy-wait mutation would no longer trip the draw gate on the strip. A mutation that scales with the frame, such as drawing every view twice, still does.
+
+**Film budgets.** `film:check` went from 31.5 s to 77.5 s and `film:tiled:check` from about 130 s to 315.8 s, again with the bigger world. `--max-seconds` went from 180 to 300 and from 360 to 700, so both keep roughly the 2× headroom they had, and the ecoview CI job's timeout went from 18 to 30 minutes. The films themselves are unchanged: both still match `shots/reference/02` at 0.000%.

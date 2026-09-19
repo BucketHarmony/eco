@@ -1,6 +1,6 @@
 // Trees as stacked cubes (trunk + canopy by stage) and animals as spheres, one InstancedMesh per part.
 import * as THREE from 'three';
-import { DIM_X, DIM_Y, speciesColor, type Meta, type Snapshot } from './loader';
+import { speciesColor, type Grid, type Meta, type Snapshot } from './loader';
 import { traitColor, voxelCenter, type RGB } from './world';
 
 export const CANOPY_FIELD_OPACITY = 0.25;
@@ -8,8 +8,8 @@ export const ANIMAL_RADIUS = 0.45;
 /** Traits overlay: hunters are drawn in this neutral gray so they aren't read as high-cost (red) grazers. */
 export const TRAITS_HUNTER_COLOR = '#555555';
 
-/** Canopy voxels (sim coordinates) for a tree whose trunk voxel is at (x, y, z). */
-export function canopyVoxels(x: number, y: number, z: number, stage: string): [number, number, number][] {
+/** Canopy voxels (sim coordinates) for a tree whose trunk voxel is at (x, y, z), clipped to the grid. */
+export function canopyVoxels(grid: Grid, x: number, y: number, z: number, stage: string): [number, number, number][] {
   if (stage === 'young') return [[x, y, z + 1]];
   if (stage !== 'mature') return [];
   const out: [number, number, number][] = [];
@@ -18,7 +18,7 @@ export function canopyVoxels(x: number, y: number, z: number, stage: string): [n
       for (let dx = -1; dx <= 1; dx++) {
         const cx = x + dx;
         const cy = y + dy;
-        if (cx >= 0 && cx < DIM_X && cy >= 0 && cy < DIM_Y) out.push([cx, cy, z + dz]);
+        if (cx >= 0 && cx < grid.x && cy >= 0 && cy < grid.y) out.push([cx, cy, z + dz]);
       }
     }
   }
@@ -91,7 +91,10 @@ export class Entities {
   private readonly traitGrazers: Layer;
   private readonly grayHunters: Layer;
 
-  constructor(meta: Meta) {
+  private readonly grid: Grid;
+
+  constructor(meta: Meta, grid: Grid) {
+    this.grid = grid;
     const box = new THREE.BoxGeometry(1, 1, 1);
     const sphere = new THREE.SphereGeometry(ANIMAL_RADIUS, 10, 6);
     this.trunks = new Layer(this.group, box, ...materials(speciesColor(meta, 'tree')));
@@ -108,12 +111,13 @@ export class Entities {
     const grazers: THREE.Vector3[] = [];
     const hunters: THREE.Vector3[] = [];
     const traits: RGB[] = [];
+    const g = this.grid;
     for (const e of snap.entities) {
       if (e.kind === 'tree') {
-        trunks.push(voxelCenter(e.x, e.y, e.z));
-        for (const [x, y, z] of canopyVoxels(e.x, e.y, e.z, e.stage)) canopies.push(voxelCenter(x, y, z));
+        trunks.push(voxelCenter(e.x, e.y, e.z, g.y));
+        for (const [x, y, z] of canopyVoxels(g, e.x, e.y, e.z, e.stage)) canopies.push(voxelCenter(x, y, z, g.y));
       } else {
-        (e.kind === 'grazer' ? grazers : hunters).push(voxelCenter(e.x, e.y, e.z));
+        (e.kind === 'grazer' ? grazers : hunters).push(voxelCenter(e.x, e.y, e.z, g.y));
         if (e.kind === 'grazer' && view.traits) traits.push(traitColor(e.energy_cost_mult));
       }
     }

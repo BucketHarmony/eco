@@ -15,7 +15,9 @@ test('fixture loads, becomes ready within 5 s, no console errors', async ({ page
 
 test('03_light: canopy shade is dark and open ground is light', async ({ page }) => {
   await open(page, `${FULL}&tick=10000&overlay=light&cam=top`);
-  const s = await viewStats(page);
+  // Measured over the world, not the letterbox around the strip (DECISIONS.md, shot 16).
+  const s = await viewStats(page, true);
+  expect(s.n).toBe(960 * 240);
   console.log(`03_light: dark ${(s.dark / s.n * 100).toFixed(1)}%, light ${(s.light / s.n * 100).toFixed(1)}%`);
   expect(s.dark / s.n).toBeGreaterThanOrEqual(0.05);
   expect(s.light / s.n).toBeGreaterThanOrEqual(0.4);

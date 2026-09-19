@@ -8,8 +8,8 @@ export const SHOTS = [
   ['06_temperature_t1000_top.png', 'tick=1000&overlay=temperature&cam=top'],
   ['07_temperature_t3000_top.png', 'tick=3000&overlay=temperature&cam=top'],
   ['08_chart_t20000.png', 'tick=20000&overlay=material&cam=iso'],
-  // 17300 is the snapshot with the most patches burning in runs/s42 (5).
-  ['09_fire_t17300_top.png', 'tick=17300&overlay=fire&cam=top'],
+  // 17100 is the snapshot with the most patches burning in the strip's runs/s42 (3), with 27 burnouts since 17000.
+  ['09_fire_t17100_top.png', 'tick=17100&overlay=fire&cam=top'],
   ['10_crowding_t20000_top.png', 'tick=20000&overlay=crowding&cam=top'],
   ['11_traits_t20000_top.png', 'tick=20000&overlay=traits&cam=top'],
 ];

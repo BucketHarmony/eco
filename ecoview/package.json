@@ -13,8 +13,8 @@
     "shot:check": "npm run build && node scripts/shot.mjs && node scripts/shot-ref.mjs check",
     "shot:accept": "npm run build && node scripts/shot.mjs && node scripts/shot-ref.mjs accept",
     "film": "npm run build && node scripts/film.mjs",
-    "film:check": "npm run film -- --run runs/s42 --overlay material --cam iso --every 100 --fps 12 --out film/s42-material.mp4 --max-seconds 180 && node scripts/film-check.mjs film/s42-material.mp4",
-    "film:tiled:check": "npm run film -- --run runs/s42 --tiles material:iso,fire:top,crowding:top,traits:top --layout 2x2 --every 100 --fps 12 --out film/s42-tiled.mp4 --max-seconds 360 && node scripts/film-check.mjs film/s42-tiled.mp4"
+    "film:check": "npm run film -- --run runs/s42 --overlay material --cam iso --every 100 --fps 12 --out film/s42-material.mp4 --max-seconds 300 && node scripts/film-check.mjs film/s42-material.mp4",
+    "film:tiled:check": "npm run film -- --run runs/s42 --tiles material:iso,fire:top,crowding:top,traits:top --layout 2x2 --every 100 --fps 12 --out film/s42-tiled.mp4 --max-seconds 700 && node scripts/film-check.mjs film/s42-tiled.mp4"
   },
   "dependencies": {
     "three": "0.169.0"

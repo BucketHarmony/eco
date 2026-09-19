@@ -1,5 +1,6 @@
 // Scenario tests: controls, URL state, error states and degenerate series, driven through the real page.
 import { expect, test, type Page } from '@playwright/test';
+import { PNG } from 'pngjs';
 import { FULL, open, trackErrors, viewStats } from './helpers';
 
 const snapDir = (tick: number) => `snap_${String(tick).padStart(6, '0')}`;
@@ -95,7 +96,8 @@ test('a format_version 2 fixture loads, ignores state.bin and shows forked_from'
   expect(errors).toEqual([]);
 });
 
-test('a format_version 3 fixture shows the error state and never sets __ecoviewReady', async ({ page }) => {
+/** Traps every write to __ecoviewReady, so a test can tell whether it was ever set true. */
+async function trapReady(page: Page): Promise<void> {
   await page.addInitScript(() => {
     let v = false;
     const w = window as unknown as { __readyEverTrue: boolean };
@@ -109,16 +111,66 @@ test('a format_version 3 fixture shows the error state and never sets __ecoviewR
       },
     });
   });
+}
+
+/** Serves the mini fixture's meta.json through `f`, loads the page and waits for the error state. */
+async function openWithMeta(page: Page, f: (meta: Record<string, unknown>) => Record<string, unknown>): Promise<void> {
+  await trapReady(page);
   await page.route('**/fixtures/s42-mini/meta.json', async (route) => {
     const res = await route.fetch();
-    await route.fulfill({ response: res, json: { ...(await res.json()), format_version: 3 } });
+    await route.fulfill({ response: res, json: f(await res.json()) });
   });
   await page.goto('/');
   await page.waitForFunction(() => !!window.__ecoviewError, null, { timeout: 5_000 });
   await expect(page.locator('#status')).toHaveClass(/error/);
-  await expect(page.locator('#status')).toContainText('unsupported format_version 3');
+}
+
+async function readyEverTrue(page: Page): Promise<boolean> {
   await page.waitForTimeout(500);
-  expect(await page.evaluate(() => (window as unknown as { __readyEverTrue: boolean }).__readyEverTrue)).toBe(false);
+  return page.evaluate(() => (window as unknown as { __readyEverTrue: boolean }).__readyEverTrue);
+}
+
+test('a format_version 4 fixture shows the error state and never sets __ecoviewReady', async ({ page }) => {
+  await openWithMeta(page, (m) => ({ ...m, format_version: 4 }));
+  await expect(page.locator('#status')).toContainText('unsupported format_version 4');
+  expect(await readyEverTrue(page)).toBe(false);
+});
+
+test('meta.json dims that disagree with the .bin sizes show the error state', async ({ page }) => {
+  // The fixture is 64×64×32; claim the 256×64 strip.
+  await openWithMeta(page, (m) => ({ ...m, dims: { x: 256, y: 64, z: 32, patch: 8 } }));
+  await expect(page.locator('#status')).toContainText(/Error: .*snap_000000\/\w+\.bin: expected (524288|16384) bytes, got (131072|4096)/);
+  expect(await readyEverTrue(page)).toBe(false);
+});
+
+test('a format 3 run with no events.csv shows the error state', async ({ page }) => {
+  await page.route('**/fixtures/s42-mini/events.csv', (route) => route.fulfill({ status: 404 }));
+  await openWithMeta(page, (m) => ({ ...m, format_version: 3 }));
+  await expect(page.locator('#status')).toContainText('events.csv: HTTP 404');
+  expect(await readyEverTrue(page)).toBe(false);
+});
+
+test('the 256×64 strip fixture loads at format 3 and the top camera letterboxes it', async ({ page }) => {
+  const errors = trackErrors(page);
+  await open(page, '/?run=fixtures/s42-strip-mini&tick=100&overlay=moisture&cam=top');
+  await expect(page.locator('#status')).toContainText('fixtures/s42-strip-mini · seed 42');
+  const { width: w, height: h, data } = PNG.sync.read(await page.locator('#view').screenshot());
+  // Rows with any pixel that isn't the background #e8ecf0.
+  const rows: number[] = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = 4 * (y * w + x);
+      if (data[i] !== 0xe8 || data[i + 1] !== 0xec || data[i + 2] !== 0xf0) {
+        rows.push(y);
+        break;
+      }
+    }
+  }
+  // 256 columns fill the 960 px width at 3.75 px each, so the 64 rows are 240 px, centred: 280..519.
+  expect(rows[0]).toBe(280);
+  expect(rows.at(-1)).toBe(519);
+  expect(rows.length).toBe(240);
+  expect(errors).toEqual([]);
 });
 
 test('a missing snapshot file shows the error and keeps the last good frame', async ({ page }) => {

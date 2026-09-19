@@ -49,22 +49,33 @@ async function pixels(page: Page): Promise<{ at(x: number, y: number): number[];
 const columnPixel = (x: number, y: number): [number, number] => [Math.floor(80 + (x + 0.5) * 12.5), Math.floor(800 - (y + 0.5) * 12.5)];
 
 // Patches 2–5 and 10, 11, 13 of the mini fixture are all soil with no trees at tick 0.
-test('fire overlay: burning patches orange by ticks left, burnt patches charcoal, the rest material', async ({ page }) => {
+// Burnt ground comes from burnout events since the last snapshot (shot 16): the fixture is served as format 3 with
+// an events.csv whose only burnout is patch 4's. Patches 4 and 5 are both bare, so only the event tells them apart.
+test('fire overlay: burning patches orange by ticks left, burnt-out patches charcoal, the rest material', async ({ page }) => {
   const errors = trackErrors(page);
+  await page.route('**/fixtures/s42-mini/meta.json', async (route) => {
+    const res = await route.fetch();
+    await route.fulfill({ response: res, json: { ...(await res.json()), format_version: 3 } });
+  });
+  await page.route('**/fixtures/s42-mini/events.csv', (route) => route.fulfill({
+    contentType: 'text/csv',
+    body: 'tick,kind,species,patch_x,patch_y,x,y,cause,detail\n0,ignition,,4,0,,,,\n0,burnout,,4,0,,,,\n',
+  }));
   await rewrite(page, 'entities.json', withAnimals([]));
   await rewrite(page, 'patches.json', (ps) => ps.map((p, i) => {
     if (i === 2) return { ...p, burning_ticks_left: 3 };
     if (i === 3) return { ...p, burning_ticks_left: 1 };
-    if (i === 4) return { ...p, grass: 0, shrub: 0, burning_ticks_left: 0 };
+    if (i === 4 || i === 5) return { ...p, grass: 0, shrub: 0, burning_ticks_left: 0 };
     return { ...p, burning_ticks_left: 0 };
   }));
   await open(page, '/?tick=0&overlay=fire&cam=top');
   const px = await pixels(page);
   expect(px.patchShare(2, hex('#ffb020')), 'patch 2, 3 ticks left').toBeGreaterThan(0.95);
   expect(px.patchShare(3, hex('#b3300a')), 'patch 3, 1 tick left').toBeGreaterThan(0.95);
-  expect(px.patchShare(4, hex('#2b2b2b')), 'patch 4, burnt').toBeGreaterThan(0.95);
+  expect(px.patchShare(4, hex('#2b2b2b')), 'patch 4, burnt out').toBeGreaterThan(0.95);
+  expect(px.patchShare(5, hex('#8b6b47')), 'patch 5, bare soil').toBeGreaterThan(0.95);
   for (const c of ['#ffb020', '#b3300a', '#2b2b2b']) {
-    expect(px.patchShare(5, hex(c)), `patch 5 (not burning, grass 0.1) has no ${c}`).toBe(0);
+    expect(px.patchShare(5, hex(c)), `patch 5 (bare, no burnout) has no ${c}`).toBe(0);
     expect(px.count(hex(c)), `${c} stays inside its patch`).toBeLessThanOrEqual(10000);
   }
   expect(errors).toEqual([]);

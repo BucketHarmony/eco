@@ -1,7 +1,7 @@
 // Entry point: wires loader, world, entities and ui together. Renders on demand only.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { loadRun, loadSnapshot, pickSnapshot, speciesColor, type Run, type Snapshot } from './loader';
+import { loadRun, loadSnapshot, pickSnapshot, speciesColor, type Grid, type Run, type Snapshot } from './loader';
 import { World } from './world';
 import { Entities } from './entities';
 import {
@@ -23,7 +23,6 @@ declare global {
 const VIEW_W = 960;
 const VIEW_H = 800;
 const BG = 0xe8ecf0;
-const TARGET = new THREE.Vector3(32, 12, 32);
 const PLAY_MS = 150;
 const CACHE_SIZE = 8;
 
@@ -41,44 +40,61 @@ const scene = new THREE.Scene();
 // Lambert diffuse by pi, so scale by pi to get the intended 0.6 + 1.0*cos(theta) of albedo.
 const ambient = new THREE.AmbientLight(0xffffff, 0.6 * Math.PI);
 const sun = new THREE.DirectionalLight(0xffffff, 1.0 * Math.PI);
-sun.position.set(32 + 40, 100, 32 + 60);
-sun.target.position.copy(TARGET);
 scene.add(ambient, sun, sun.target);
 
-const world = new World();
-scene.add(world.mesh);
+let world: World | null = null;
 let entities: Entities | null = null;
 
-function makeCamera(cam: Cam): THREE.Camera {
+/** Where the perspective cameras look: the world's centre at 3/8 of its height (12 of 32). */
+const target = (g: Grid) => new THREE.Vector3(g.x / 2, (g.z * 3) / 8, g.y / 2);
+
+/**
+ * Cameras frame the world's bounding box (DECISIONS.md, shot 16). Perspective offsets are the 64×64 world's
+ * scaled by longest side / 64, so the square world is framed exactly as before.
+ */
+function makeCamera(cam: Cam, g: Grid): THREE.Camera {
+  const cx = g.x / 2;
+  const cz = g.y / 2;
   if (cam === 'top') {
-    // Frame exactly the 64 world rows to the view height: 12.5 px per column.
-    const halfH = 32;
-    const halfW = (halfH * VIEW_W) / VIEW_H;
-    const c = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 1, 200);
-    c.position.set(32, 100, 32);
+    // Fit width × depth into the view, letterboxed: the 64×64 world fills the height at 12.5 px per column.
+    const aspect = VIEW_W / VIEW_H;
+    const halfH = g.x / g.y > aspect ? g.x / 2 / aspect : g.y / 2;
+    const halfW = halfH * aspect;
+    const c = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 1, g.z + 168);
+    c.position.set(cx, g.z + 68, cz);
     c.up.set(0, 0, -1); // sim +y points up the screen
-    c.lookAt(32, 0, 32);
+    c.lookAt(cx, 0, cz);
     return c;
   }
-  const c = new THREE.PerspectiveCamera(45, VIEW_W / VIEW_H, 0.5, 500);
-  if (cam === 'iso') c.position.set(32 + 70, 16 + 75, 32 + 70);
-  else c.position.set(32, 30, -60);
-  c.lookAt(TARGET);
+  const k = g.longest / 64;
+  const c = new THREE.PerspectiveCamera(45, VIEW_W / VIEW_H, 0.5 * k, 500 * k);
+  const t = target(g);
+  if (cam === 'iso') {
+    c.position.set(cx + 70 * k, g.z / 2 + 75 * k, cz + 70 * k); // down the diagonal from the south-east
+  } else {
+    // From beyond the south edge looking north, so sim +x (the long axis on the strip) runs left to right as in
+    // top. The distance fits the x extent into 90% of the view width, 25 degrees above the horizon.
+    const tanHalfW = c.getFilmWidth() / (2 * c.getFocalLength());
+    const d = g.x / 2 / (0.9 * tanHalfW);
+    const tilt = (25 * Math.PI) / 180;
+    c.position.set(cx, t.y + d * Math.sin(tilt), cz + g.y / 2 + d * Math.cos(tilt));
+  }
+  c.lookAt(t);
   return c;
 }
 
-let camera = makeCamera('iso');
+let camera: THREE.Camera = new THREE.PerspectiveCamera();
 let orbit: OrbitControls | null = null;
 
-function setCamera(cam: Cam): void {
+function setCamera(cam: Cam, g: Grid): void {
   orbit?.dispose();
-  camera = makeCamera(cam);
+  camera = makeCamera(cam, g);
   orbit = new OrbitControls(camera, canvas);
   if (cam === 'top') {
-    orbit.target.set(32, 0, 32);
+    orbit.target.set(g.x / 2, 0, g.y / 2);
     orbit.enableRotate = false;
   } else {
-    orbit.target.copy(TARGET);
+    orbit.target.copy(target(g));
   }
   orbit.update();
   orbit.addEventListener('change', render);
@@ -143,9 +159,16 @@ async function apply(next: ViewState): Promise<void> {
       if (token !== seq) return;
       run = r;
       cache.clear();
+      world?.mesh.removeFromParent();
+      world = new World(r.grid);
+      scene.add(world.mesh);
       entities?.group.removeFromParent();
-      entities = new Entities(r.meta);
+      entities = new Entities(r.meta, r.grid);
       scene.add(entities.group);
+      const t = target(r.grid);
+      sun.target.position.copy(t);
+      sun.position.set(t.x + 40, t.y + 88, t.z + 60);
+      cam = null; // the cameras frame this run's world
     }
     const r = run;
     const tick = pickSnapshot(r.meta.snapshots, state.tick);
@@ -153,12 +176,12 @@ async function apply(next: ViewState): Promise<void> {
     if (token !== seq) return;
     snapTick = tick;
     if (cam !== state.cam) {
-      setCamera(state.cam);
+      setCamera(state.cam, r.grid);
       cam = state.cam;
     }
     const top = state.cam === 'top';
-    world.setLit(!top);
-    world.build(snap, state.overlay);
+    world!.setLit(!top);
+    world!.build(snap, state.overlay);
     entities!.build(snap, { fieldOverlay: state.overlay !== 'material', top, traits: state.overlay === 'traits' });
     const m = r.meta;
     drawChart(ui.chart, r.series, {

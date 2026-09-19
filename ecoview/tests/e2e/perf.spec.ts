@@ -3,7 +3,9 @@ import { expect, test } from '@playwright/test';
 import { FULL, open, trackErrors } from './helpers';
 
 // Coarse gates on SwiftShader, a software GPU: they catch gross regressions, not real-world fps (DECISIONS.md, Shot 28).
-const MAX_DRAW_MEDIAN_MS = 250;
+// The draw gate is per surface column, so it means the same thing on any world size (DECISIONS.md, shot 16):
+// shot 28's 250 ms over the 64x64 world's 4096 columns, which is 1000 ms on the 256x64 strip.
+const MAX_DRAW_MS_PER_COLUMN = 250 / (64 * 64);
 const MAX_STEP_MEDIAN_MS = 1000;
 const OVERLAYS = ['material', 'light', 'moisture', 'fertility', 'temperature', 'fire', 'crowding', 'traits'];
 const CAMS = ['iso', 'top'];
@@ -24,13 +26,16 @@ test('perf: draw rate per overlay and camera, step rate and first load', async (
   test.setTimeout(300_000);
   const errors = trackErrors(page);
 
+  const dims = await page.request.get('/runs/s42/meta.json').then(async (r) => (await r.json()).dims as { x: number; y: number; z: number });
+  const maxDrawMs = Math.round(MAX_DRAW_MS_PER_COLUMN * dims.x * dims.y);
+
   const t0 = Date.now();
   await open(page, `${FULL}&tick=10000&overlay=material&cam=iso`);
   const firstLoadMs = Date.now() - t0;
 
   // A pair over the gate ends the measurement there, so a gross regression fails on the gate, not on the test timeout.
   const draw: Record<string, Summary> = {};
-  const slow = () => Object.values(draw).some((s) => s.median_ms > MAX_DRAW_MEDIAN_MS);
+  const slow = () => Object.values(draw).some((s) => s.median_ms > maxDrawMs);
   measure: for (const cam of CAMS) {
     for (const overlay of OVERLAYS) {
       if (slow()) break measure;
@@ -68,12 +73,12 @@ test('perf: draw rate per overlay and camera, step rate and first load', async (
   const step = stepMs.length ? summarize(stepMs) : null;
   const report = {
     run: 'runs/s42',
-    world: '64x64x32',
+    world: `${dims.x}x${dims.y}x${dims.z}`,
     platform: `${process.platform}-${process.arch}`,
     chromium: browser.version(),
     gl_renderer: gl,
     frames_per_draw: FRAMES,
-    thresholds: { draw_median_ms: MAX_DRAW_MEDIAN_MS, step_median_ms: MAX_STEP_MEDIAN_MS },
+    thresholds: { draw_median_ms: maxDrawMs, step_median_ms: MAX_STEP_MEDIAN_MS },
     first_load_ms: firstLoadMs,
     step: step && { ticks: `${STEP_TICKS[0]}-${STEP_TICKS.at(-1)}`, ...step },
     draw,
@@ -83,7 +88,7 @@ test('perf: draw rate per overlay and camera, step rate and first load', async (
   console.log(JSON.stringify(report));
 
   expect(errors).toEqual([]);
-  for (const [k, s] of Object.entries(draw)) expect(s.median_ms, `draw ${k}`).toBeLessThanOrEqual(MAX_DRAW_MEDIAN_MS);
+  for (const [k, s] of Object.entries(draw)) expect(s.median_ms, `draw ${k}`).toBeLessThanOrEqual(maxDrawMs);
   expect(Object.keys(draw)).toHaveLength(OVERLAYS.length * CAMS.length);
   expect(step?.median_ms, 'step').toBeLessThanOrEqual(MAX_STEP_MEDIAN_MS);
 });

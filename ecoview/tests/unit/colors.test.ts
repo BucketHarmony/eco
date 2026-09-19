@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  burningColor, crowdingColor, fertilityColor, grazersPerPatch, hexToRgb, isBurnt, lightColor, moistureColor,
+  burningColor, crowdingColor, fertilityColor, grazersPerPatch, hexToRgb, lightColor, moistureColor,
   soilColor, temperatureColor, traitColor,
 } from '../../src/world';
-import type { Entity, Snapshot } from '../../src/loader';
+import { Grid, type Entity, type Snapshot } from '../../src/loader';
 import { canopyVoxels } from '../../src/entities';
 import { parseParams, toSearch } from '../../src/ui';
 
@@ -12,13 +12,6 @@ describe('fire, crowding and traits colors', () => {
     expect(burningColor(1)).toEqual(hexToRgb('#b3300a'));
     expect(burningColor(3)).toEqual(hexToRgb('#ffb020'));
     expect(burningColor(10)).toEqual(hexToRgb('#ffb020'));
-  });
-  it('a patch is burnt when not burning and nearly bare', () => {
-    const p = { grass: 0.01, shrub: 0.02, detritus: 0, temperature: 10 };
-    expect(isBurnt(p)).toBe(true);
-    expect(isBurnt({ ...p, burning_ticks_left: 0 })).toBe(true);
-    expect(isBurnt({ ...p, burning_ticks_left: 2 })).toBe(false);
-    expect(isBurnt({ ...p, grass: 0.1 })).toBe(false);
   });
   it('crowding goes white at 0 to #d81b9c at 32, clamped', () => {
     expect(crowdingColor(0)).toEqual([255, 255, 255]);
@@ -39,10 +32,14 @@ describe('fire, crowding and traits colors', () => {
     const a = (kind: string, x: number, y: number) => ({ id: 0, kind, x, y, z: 12, energy: 1, age: 1, state: 'wander' });
     const entities = [a('grazer', 7.0, 0.0), a('grazer', 8.0, 0.0), a('grazer', 63.0, 63.0), a('hunter', 7, 0),
       { id: 9, kind: 'tree', x: 0, y: 0, z: 12, age: 1, stage: 'young' }] as Entity[];
-    const n = grazersPerPatch({ entities } as Snapshot);
+    const n = grazersPerPatch({ entities, grid: new Grid({ x: 64, y: 64, z: 32 }) } as Snapshot);
     expect(n.length).toBe(64);
     expect([n[0], n[1], n[63]]).toEqual([1, 1, 1]);
     expect(n.reduce((s, v) => s + v, 0)).toBe(3);
+    // On the 256×64 strip there are 32 patches per row, so (63, 63) is patch 7 + 32·7.
+    const strip = grazersPerPatch({ entities, grid: new Grid({ x: 256, y: 64, z: 32, patch: 8 }) } as Snapshot);
+    expect(strip.length).toBe(256);
+    expect([strip[0], strip[1], strip[7 + 32 * 7]]).toEqual([1, 1, 1]);
   });
 });
 
@@ -78,10 +75,15 @@ describe('overlay colors', () => {
 
 describe('canopy geometry', () => {
   it('follows the stage rules and clips to the world', () => {
-    expect(canopyVoxels(5, 5, 12, 'sapling')).toEqual([]);
-    expect(canopyVoxels(5, 5, 12, 'young')).toEqual([[5, 5, 13]]);
-    expect(canopyVoxels(5, 5, 12, 'mature').length).toBe(18);
-    expect(canopyVoxels(0, 63, 12, 'mature').length).toBe(8);
+    const sq = new Grid({ x: 64, y: 64, z: 32 });
+    const strip = new Grid({ x: 256, y: 64, z: 32, patch: 8 });
+    expect(canopyVoxels(sq, 5, 5, 12, 'sapling')).toEqual([]);
+    expect(canopyVoxels(sq, 5, 5, 12, 'young')).toEqual([[5, 5, 13]]);
+    expect(canopyVoxels(sq, 5, 5, 12, 'mature').length).toBe(18);
+    expect(canopyVoxels(sq, 0, 63, 12, 'mature').length).toBe(8);
+    expect(canopyVoxels(sq, 63, 5, 12, 'mature').length).toBe(12);
+    expect(canopyVoxels(strip, 63, 5, 12, 'mature').length).toBe(18);
+    expect(canopyVoxels(strip, 255, 63, 12, 'mature').length).toBe(8);
   });
 });
 

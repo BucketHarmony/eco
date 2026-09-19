@@ -30,6 +30,8 @@ pub struct Params {
     pub hunter: HunterParams,
     /// `[fire]`
     pub fire: FireParams,
+    /// `[disease]`
+    pub disease: DiseaseParams,
 }
 
 /// Terrain generation and world-level settings.
@@ -244,8 +246,9 @@ pub struct HunterParams {
     pub repro_energy: f32,
     /// Energy a parent gives up to reproduce.
     pub repro_cost: f32,
-    /// Ticks between births.
-    pub cooldown: u32,
+    /// Short refractory period after a birth (and a newborn's wait before its first). Births are
+    /// otherwise gated by `repro_energy` alone, so kills set the hunter birth rate.
+    pub refractory: u32,
     /// Energy of a newborn.
     pub newborn_energy: f32,
     /// Detritus a dead hunter adds to its patch.
@@ -298,6 +301,21 @@ pub struct FireParams {
     pub ash: f32,
     /// Energy an animal in a burning patch loses per tick.
     pub animal_damage: f32,
+}
+
+/// Density-dependent ("crowded") mortality. Per animal update, an animal in a patch holding n of
+/// its species dies with p = rate · max(0, n − threshold) / threshold. A rate of 0 switches it off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiseaseParams {
+    /// Grazer death chance per tick per threshold's worth of grazers above the threshold.
+    pub grazer_rate: f32,
+    /// Grazers a patch holds before crowding kills any.
+    pub grazer_threshold: u32,
+    /// Hunter death chance per tick per threshold's worth of hunters above the threshold.
+    pub hunter_rate: f32,
+    /// Hunters a patch holds before crowding kills any.
+    pub hunter_threshold: u32,
 }
 
 impl Params {

@@ -108,7 +108,7 @@ energy_cost = 0.04
 max_age = 8000
 repro_energy = 75.0
 repro_cost = 40.0
-cooldown = 5000
+refractory = 2750
 newborn_energy = 40.0
 corpse_detritus = 25.0
 satiation = 85.0
@@ -135,3 +135,10 @@ tree_kill = 0.5
 detritus_yield = 10.0
 ash = 5.0
 animal_damage = 2.0
+
+[disease]
+# Density-dependent mortality (shot 10). A rate of 0 switches that species' crowding deaths off.
+grazer_rate = 0.001
+grazer_threshold = 16
+hunter_rate = 0.001
+hunter_threshold = 4

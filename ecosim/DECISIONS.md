@@ -473,3 +473,47 @@ Burn-out:
 - `runs/s42` (gitignored)
 - `fixtures/s42-mini` (v1) is unchanged.
 - ecoview's copy in `ecoview/public/` is now stale: it lacks the fire columns and field, and an ecosim shot doesn't edit ecoview. A renderer shot has to rerun `scripts/sync-data.sh`.
+
+
+## Density-dependent mortality and hunter regulation (shot 10)
+
+**Crowding mortality (`[disease]`)**
+- **The rule.** Each animal update, after the starvation, burn and old-age check, an animal in a patch holding n of its own species (itself included) dies with p = `rate · max(0, n − threshold) / threshold` (`animals::crowding_death_p`), clamped to [0, 1]. Grazers use `disease.grazer_rate` and `grazer_threshold`, hunters `hunter_rate` and `hunter_threshold`.
+- **Which n.** The count is taken after the animal's move this update, so it is the patch the animal ends up in. Grazers already had `grazers_in_patch`, kept current through moves, births and deaths.
+- **Hunters get `hunters_in_patch`.** It is rebuilt with the hunter grid at the start of the animal phase and kept current as hunters move, die, give birth and immigrate. It is derived state: `state.bin` doesn't store it, restore recomputes it, and `prop_restore_steps_identically` compares it. The death-cause property checks it against a recount after every tick.
+- **Death.** A crowding death records `crowded` and adds the species' corpse detritus, through `kill_grazer` or the new `kill_hunter`. A crowded animal doesn't reproduce that tick.
+- **Draws.** `update_animals` checks each species' rate once, before its loop. At rate 0 the per-animal check is skipped entirely, so there are no draws and no writes. At a positive rate there is one `gen_bool` draw per animal in a patch above the threshold, and none at or below it, where p is 0.
+- **Threshold 0** divides by 1 rather than 0, so any count above 0 dies with p = rate. `params.toml` never uses 0; the rule only needs a defined value for `--set`.
+- **Series.** No new columns. The `grazer_crowded` and `hunter_crowded` columns from shot 5 now fill. Shot 5's death-cause property asserted `crowded` was always 0; that assertion is gone.
+- **Why "disease".** The section name comes from the shot prompt. The model is only "too many in one patch raises the death rate"; nothing is transmitted between animals.
+
+**Hunter refractory**
+- **`hunter.cooldown` is renamed to `hunter.refractory`.** It keeps the same meaning: a parent waits `refractory` ticks after a birth, a newborn waits `refractory` ticks before its first, and the initial hunters draw a cooldown in 0..=refractory. Births are otherwise gated only by the existing `repro_energy` (75). So `refractory=5000` is exactly the pre-shot rule, which the rate-0 identity test relies on.
+- **The prompt's 300 breaks the anchor, so the default is 2750.** At 300, hunters boom and eat every grazer on all four anchor seeds. The smallest value on a 250-tick grid that keeps seeds 1, 2, 3 and 42 passing is 2750. The rounds are in `TUNING.md`.
+- **2750 depends on hunter crowding.** The search ran at the hunter crowding default (0.001, threshold 4). With `disease.hunter_rate=0`, refractory 2750 and 3500 fail all four seeds and only about 5000 holds. At the defaults, 81–86% of hunter deaths are `crowded`, so crowding, not hunting success, sets hunter numbers. The prompt's aim is reported in `sweeps/shot10/FINDINGS.md`, not achieved. Making the energy gate bind would need `repro_cost`, `kill_energy` or `repro_energy` to move, which is outside this shot's mechanism.
+- **Hunter crowding at 0.05 with threshold 2 also keeps the anchor at refractory 300** (hunters at 1–26). It was not adopted: the anchor rule moves the new mechanism's default by the smallest step, and that would have made crowding dominate even harder.
+- **`grazer.cooldown` is unchanged.** The prompt only replaces the hunter's.
+
+**Defaults**
+- `disease.grazer_rate` 0.001 with `grazer_threshold` 16, and `disease.hunter_rate` 0.001 with `hunter_threshold` 4. These are the smallest grid values that keep the anchor at refractory 2750: `grazer_rate` 0 fails seed 3 (grazers eaten at tick 11451), and `hunter_rate` 0.0005 fails 2 of the 4 seeds. There is no grazer target. At these values the grazer peak per patch falls from 50 (rate 0) to about 14 (`sweeps/shot10/FINDINGS.md`).
+- 16 is the middle of the prompt's threshold grid (4–32). Grazers average about 10–25 per patch at their pre-shot peaks, so 16 bites at peaks and seldom in troughs.
+- Hunters are at most a few per patch, so a hunter threshold of 4 bites only where hunters bunch on prey.
+
+**Tests**
+- `prop_crowding_zero_below_threshold_and_monotone` states the prompt's property: p is 0 at or below the threshold and above 0 above it (for a positive rate), lies in [0, 1], and never falls as n rises. Its sibling `crowding_regression_threshold_edge_and_clamp` pins n = threshold, the clamp, and threshold 0.
+- `crowding_thins_a_patch_to_its_threshold`: 20 grazers and 6 hunters in one patch each, at a rate that makes any excess certain death, are thinned to exactly 10 and 2, every death `crowded`.
+- `crowding_at_rate_zero_kills_nothing_and_draws_nothing` compares the RNG word position with a run where crowding can't fire.
+- `hunter_births_are_energy_gated_with_a_refractory` checks the birth gate and the refractory on parent and newborn.
+- **Rate-0 identity:** `crowding_off_reproduces_the_pre_shot_10_manifest` runs seed 42 with both rates 0 and `refractory=5000`, and compares it with the pre-shot manifest, kept as `tests/data/s42-manifest-preshot10.sha256`. All 1609 hashes match with nothing cut, because the shot adds no columns or fields. The prompt limits rate-0 identity to disease; the refractory is set to the old cooldown only so that the one comparison covers both changes.
+- `fire_off_reproduces_the_pre_fire_manifest` and `format_2_and_fire_only_add_to_version_1_files` switch shot 10 off the same way, since they compare with pre-shot data. The v1 meta comparison maps `cooldown` to `refractory` and drops `[disease]`.
+- **Forced extinction:** `forced_hunter_extinction_by_refractory_runs_to_the_end` sets `hunter.refractory=1000000`. Hunters almost never breed and die out of old age at tick 7986 on seed 1. The run goes to 20000 with valid snapshots, and the last snapshot restores. `ecosim stats` names `old_age`, and the hunter-free grazers keep dying of crowding to the end (4861 crowded deaths, 100 of them after tick 15000). Crowding alone can't force an extinction: it stops at the threshold, and never removes the last animals of a patch.
+- **`forced_grazer_extinction…` now uses `grazer.energy_cost=1.0` with grazer crowding off** (it was 0.5). At 0.5, crowding thins grazers enough for the survivors to feed. With crowding off as well, the faster-breeding hunters ate the last starving grazers, so `eaten` became the window's dominant cause. At 1.0 the grazers starve out by tick 4447, and the test still forces only starvation.
+
+**Regenerated artifacts (both changes alter behaviour at the defaults)**
+These were regenerated in their own commit:
+- `tests/data/s42-manifest.sha256`: 1609 lines, same file set.
+- `tests/data/s42-check.txt`: seed 42 passes every invariant, with 58 mature trees at tick 10000.
+- `fixtures/s42-mini-v2`
+- `runs/s42` (gitignored)
+
+`fixtures/s42-mini` (v1) is unchanged. ecoview's copy in `ecoview/public/` is stale again, and the renderer's shot 12 re-syncs it.

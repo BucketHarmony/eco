@@ -217,14 +217,18 @@ fn assert_valid_run(dir: &Path) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// Forced extinction: `grazer.energy_cost=0.5` starves the grazers out on seed 1, and the hunters
-/// follow. Fire is off (`fire.base_rate=0`) so starvation is the only thing forced. The run still
+/// Forced extinction: `grazer.energy_cost=1.0` starves the grazers out on seed 1, and the hunters
+/// follow. Fire and grazer crowding are off (`fire.base_rate=0`, `disease.grazer_rate=0`) so
+/// starvation is the only thing forced: crowding thins grazers enough that the survivors can feed. The run still
 /// completes 20000 ticks with valid snapshots, and `ecosim stats` names `starved` as the dominant
 /// cause of the grazer extinction.
 #[test]
 fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
     let dir = tmp("forced_extinction");
-    let last = run_with(&dir, &["grazer.energy_cost=0.5".to_string(), "fire.base_rate=0".to_string()]);
+    let last = run_with(
+        &dir,
+        &["grazer.energy_cost=1.0".to_string(), "fire.base_rate=0".to_string(), "disease.grazer_rate=0".to_string()],
+    );
     assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species extinct by the end");
     assert!(last.trees > 0);
     let text = assert_valid_run(&dir);
@@ -265,20 +269,49 @@ fn forced_fire_extinction_runs_to_the_end_and_is_attributed_to_fire() {
     assert_eq!((sim.tick, sim.total_burnt), (20_000, last.total_burnt), "the last snapshot restores");
 }
 
+/// Forced extinction by the refractory: at `hunter.refractory=1000000` hunters (almost) never breed,
+/// so they die out of old age (seed 1: tick 7986). Crowding stays at its defaults. The run continues
+/// to 20000 ticks with valid snapshots, `ecosim stats` names `old_age` as the dominant cause of the
+/// hunter extinction, the hunter-free grazers keep dying of crowding to the end, and the last
+/// snapshot restores.
+#[test]
+fn forced_hunter_extinction_by_refractory_runs_to_the_end() {
+    let dir = tmp("forced_refractory_extinction");
+    let set = ["hunter.refractory=1000000".to_string()];
+    let last = run_with(&dir, &set);
+    assert_eq!(last.hunters, 0, "hunters extinct by the end");
+    assert!(last.grazers > 0 && last.trees > 0);
+    let text = assert_valid_run(&dir);
+    let line = text.lines().find(|l| l.starts_with("extinction: hunters at tick")).unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("dominant cause: old_age"), "{line}");
+    assert!(!text.contains("extinction: grazers"), "{text}");
+    let series = ecosim::check::parse_series(&fs::read_to_string(dir.join("series.csv")).unwrap()).unwrap();
+    let crowded = |rows: &[ecosim::StatsRow]| rows.iter().map(|r| r.deaths[0][3]).sum::<u32>();
+    let (all, late) = (crowded(&series), crowded(&series[15_000..]));
+    assert!(all > 1000 && late > 0, "grazer crowded deaths {all}, after tick 15000 {late}");
+    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
+    assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name)
 }
 
 /// Format version 2 and fire only add files, fields and columns. A fresh seed-42 mini run with fire
-/// off, with the fire additions cut (`common::without_fire`), is the v1 fixture byte for byte apart
-/// from `meta.json` (the version, `forked_from` and the `[fire]` params) and the new `state.bin`
-/// files. The committed v2 fixture is the same command at the defaults, and is current.
+/// and crowding off and the hunter refractory at the old cooldown, with the fire additions cut
+/// (`common::without_fire`), is the v1 fixture byte for byte apart from `meta.json` (the version,
+/// `forked_from`, the `[fire]` and `[disease]` params and the cooldown's new name) and the new
+/// `state.bin` files. The committed v2 fixture is the same command at the defaults, and is current.
 #[test]
 fn format_2_and_fire_only_add_to_version_1_files() {
     let v1 = fixture("s42-mini");
     let fresh = tmp("mini_fire_off");
     let mut p = Params::load_default();
     p.fire.base_rate = 0.0;
+    p.disease.grazer_rate = 0.0;
+    p.disease.hunter_rate = 0.0;
+    p.hunter.refractory = 5000;
     run(p, 42, 100, 100, &[], &fresh).unwrap();
     let cut = |rel: &str| common::without_fire(Path::new(rel), fs::read(fresh.join(rel)).unwrap());
     assert!(cut("series.csv") == fs::read(v1.join("series.csv")).unwrap(), "series.csv");
@@ -294,11 +327,18 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     let (mut a, mut b) = (read_json(&v1.join("meta.json")), read_json(&fresh.join("meta.json")));
     assert_eq!((a["format_version"].as_u64(), b["format_version"].as_u64()), (Some(1), Some(FORMAT_VERSION as u64)));
     assert!(b["forked_from"].is_null() && b["params"]["fire"].is_object());
-    for m in [&mut a, &mut b] {
+    assert_eq!(
+        (&a["params"]["hunter"]["cooldown"], &b["params"]["hunter"]["refractory"]),
+        (&5000.into(), &5000.into())
+    );
+    for (m, key) in [(&mut a, "cooldown"), (&mut b, "refractory")] {
         let o = m.as_object_mut().unwrap();
         o.remove("format_version");
         o.remove("forked_from");
-        o["params"].as_object_mut().unwrap().remove("fire");
+        let params = o["params"].as_object_mut().unwrap();
+        params.remove("fire");
+        params.remove("disease");
+        params["hunter"].as_object_mut().unwrap().remove(key);
     }
     assert_eq!(a, b);
 

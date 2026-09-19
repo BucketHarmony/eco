@@ -310,6 +310,7 @@ impl Sim {
             grazers_in_patch: vec![0; PATCHES],
             grazer_grid: d.grazer_grid,
             hunter_grid: vec![Vec::new(); COLS],
+            hunters_in_patch: vec![0; PATCHES],
             tick: d.tick,
             next_id: d.next_id,
             hunter_immigrants: d.hunter_immigrants,
@@ -381,6 +382,7 @@ mod tests {
         prop_assert!(a.trunk_at == b.trunk_at, "trunk_at");
         prop_assert!(a.canopy_cover == b.canopy_cover, "canopy_cover");
         prop_assert!(a.grazers_in_patch == b.grazers_in_patch, "grazers_in_patch");
+        prop_assert!(a.hunters_in_patch == b.hunters_in_patch, "hunters_in_patch");
         prop_assert!(a.seek_offsets == b.seek_offsets && a.flee_offsets == b.flee_offsets);
         let (mut ah, mut bh) = (a.hunter_grid.clone(), b.hunter_grid.clone());
         crate::sim::rebuild_grid(&mut ah, &a.hunters);

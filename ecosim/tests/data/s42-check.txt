@@ -1,9 +1,9 @@
-PASS no species reaches 0: min grazers=613 min hunters=28 min trees=97
-PASS no species exceeds 10x its anchor count (animals: tick 2000, trees: tick 5000): grazers max=2604 limit=17200 hunters max=61 limit=280 trees max=569 limit=3840
-PASS grazer cycle (2 maxima >= 1500 ticks apart): 11 maxima at [3345, 4864, 6416, 7677, 9795, 11719, 12532, 13912, 15288, 16671, 19678], span 16333
-PASS fertility_mean in [40, 220]: [105.37, 199.31]
-PASS grass_mean in [0.05, 0.95]: [0.2727, 0.8684]
-PASS trees at end >= 1.5x trees at tick 0: 280 vs 12 (need 18.0)
-PASS run time < 30 s: 7233 ms
-PASS mature trees at tick 10000 >= 35: 61
-PASS at tick 10000 grazers >= 10 and hunters >= 2: grazers=894 hunters=43
+PASS no species reaches 0: min grazers=449 min hunters=27 min trees=104
+PASS no species exceeds 10x its anchor count (animals: tick 2000, trees: tick 5000): grazers max=849 limit=7920 hunters max=51 limit=340 trees max=566 limit=3870
+PASS grazer cycle (2 maxima >= 1500 ticks apart): 12 maxima at [2958, 3857, 6633, 8501, 10117, 11465, 12847, 13710, 15000, 17688, 18555, 19421], span 16463
+PASS fertility_mean in [40, 220]: [110.20, 214.97]
+PASS grass_mean in [0.05, 0.95]: [0.3385, 0.8813]
+PASS trees at end >= 1.5x trees at tick 0: 289 vs 12 (need 18.0)
+PASS run time < 30 s: 3951 ms
+PASS mature trees at tick 10000 >= 35: 58
+PASS at tick 10000 grazers >= 10 and hunters >= 2: grazers=712 hunters=36

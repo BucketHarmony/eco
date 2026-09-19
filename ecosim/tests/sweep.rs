@@ -118,15 +118,39 @@ fn fresh_s42_matches_committed_manifest() {
     assert_same_manifest(&want, &got);
 }
 
-/// Rate-0 identity for fire: with `fire.base_rate=0`, seed 42 hashes to the manifest as it stood
-/// before fire (`s42-manifest-prefire.sha256`, shot 8) once the fire columns, the `burning_ticks_left`
-/// patch field and the `state.bin` fire section are cut. So fire at rate 0 draws nothing and writes
-/// nothing: every other byte of all 201 snapshots is unchanged.
+/// Default params with shot 10 switched off: crowding rates 0, and the hunter refractory at the old
+/// fixed cooldown (5000), which it replaced with the same meaning.
+fn pre_shot_10() -> Params {
+    let mut p = Params::load_default();
+    p.disease.grazer_rate = 0.0;
+    p.disease.hunter_rate = 0.0;
+    p.hunter.refractory = 5000;
+    p
+}
+
+/// Rate-0 identity for crowding mortality: with both crowding rates at 0 and the refractory at the
+/// old cooldown, seed 42 hashes to the manifest as it stood before shot 10
+/// (`s42-manifest-preshot10.sha256`) byte for byte. The shot adds no columns (`crowded` already
+/// existed), so nothing is cut: at rate 0 crowding draws nothing and writes nothing.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn crowding_off_reproduces_the_pre_shot_10_manifest() {
+    let dir = tmp("s42_crowding_off");
+    run(pre_shot_10(), 42, 20_000, 100, &[], &dir).unwrap();
+    let got = hash_run(&dir, |_, b| b);
+    assert_eq!(got.len(), 1 + 201 * 8);
+    assert_same_manifest(&read_manifest("s42-manifest-preshot10.sha256"), &got);
+}
+
+/// Rate-0 identity for fire: with `fire.base_rate=0` (and shot 10 switched off), seed 42 hashes to
+/// the manifest as it stood before fire (`s42-manifest-prefire.sha256`, shot 8) once the fire
+/// columns, the `burning_ticks_left` patch field and the `state.bin` fire section are cut. So fire at
+/// rate 0 draws nothing and writes nothing: every other byte of all 201 snapshots is unchanged.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn fire_off_reproduces_the_pre_fire_manifest() {
     let dir = tmp("s42_fire_off");
-    let mut p = Params::load_default();
+    let mut p = pre_shot_10();
     p.fire.base_rate = 0.0;
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
     let got = hash_run(&dir, common::without_fire);

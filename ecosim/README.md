@@ -3,8 +3,8 @@
 This is a deterministic, headless voxel ecology simulator (SAD 1).
 - The spec is in `../docs/`.
 - Design calls are in `DECISIONS.md` and parameter history is in `TUNING.md`.
-- The sweep results are in `SWEEP_FINDINGS.md` (shot 4), `sweeps/shot5/FINDINGS.md` (the dynamics fixes), `sweeps/shot05/FINDINGS.md` (extinctions by cause) and `sweeps/fork-demo/FINDINGS.md` (a fork with seasonal rain off). The measured coverage is in `COVERAGE.md`.
-- `series.csv` records each tick's animal deaths by species and cause (`starved`, `eaten`, `old_age`, `crowded`, `burnt`). `ecosim stats` attributes every extinction to the dominant cause over the 500 ticks before it.
+- The sweep results are in `SWEEP_FINDINGS.md` (shot 4), `sweeps/shot5/FINDINGS.md` (the dynamics fixes), `sweeps/shot05/FINDINGS.md` (extinctions by cause), `sweeps/shot09/FINDINGS.md` (fire), `sweeps/shot10/FINDINGS.md` (crowding mortality and the hunter refractory) and `sweeps/fork-demo/FINDINGS.md` (a fork with seasonal rain off). The measured coverage is in `COVERAGE.md`.
+- `series.csv` records each tick's animal deaths by species and cause (`starved`, `eaten`, `old_age`, `crowded` from `[disease]`, `burnt`). `ecosim stats` attributes every extinction to the dominant cause over the 500 ticks before it.
 
 ## Commands
 

@@ -300,3 +300,36 @@ Cells pass out of 4 seeds (1, 2, 3, 42):
 - Values changed: `fire.duration` 10 → 3. No other parameter moved, including the four anchor values.
 - Seeds 1, 2, 3 and 42 pass `ecosim check` at 20000 ticks with the defaults.
 - `fire.spread` has a fragile safe band, [0.0, 0.1], with the default at its upper edge: the percolation threshold lies between 0.1 and 0.2 (`sweeps/shot09/FINDINGS.md`). Spread was not lowered, because the default passes on every seed and the sim-shot rule moves a default only when the anchor fails.
+
+## Density-dependent mortality (shot 10)
+
+### Starting values
+- `[disease]` is new: grazer_rate 0.001 with grazer_threshold 16, and hunter_rate 0.001 with hunter_threshold 4.
+- `hunter.cooldown` 5000 is replaced by `hunter.refractory`, and the prompt's value is 300.
+
+### Round 1: refractory 300 breaks the anchor
+At the disease defaults, all four anchor seeds (1, 2, 3, 42) fail. Hunters boom and eat every grazer. The committed sweep `sweeps/shot10/hunter_refractory` confirms this: every cell from 100 to 1000 is a grazer extinction, `eaten`.
+
+### Round 2: smallest refractory that keeps the anchor
+Run on a 250-tick grid, at the disease defaults:
+
+| refractory | seeds passing (1, 2, 3, 42) |
+|---|---|
+| 1000, 2000, 2250 | fail |
+| 2500 | 3/4 (seed 3 fails) |
+| **2750** | **4/4** |
+| 3000, 4000, 5000 | 4/4 |
+
+**refractory 300 → 2750.** A 60 000-tick `check --long` on seed 1 at 2750 also passes, with margin +0.77.
+
+### Round 3: is 2750 carried by hunter crowding?
+- With hunter_rate 0, refractory 2750 and 3500 fail, and 5000 passes.
+- At refractory 2750, hunter_rate 0.0005 fails 2 seeds, and 0.0002 fails too.
+- hunter_rate 0.05 with threshold 2 passes at refractory 300, but was not adopted (`DECISIONS.md`).
+- **Result:** the disease defaults stay at the smallest grid values that keep the anchor. With grazer_rate 0 at refractory 2750, seed 3 fails (`sweeps/shot10/disease_grazer_rate`).
+
+### Final
+- Values changed: `hunter.refractory` = 2750, which replaces `hunter.cooldown` 5000.
+- `[disease]` is at its starting values. None of the four anchor values moved.
+- Seeds 1, 2, 3 and 42 pass `ecosim check` at 20000 ticks with the defaults.
+- `disease.grazer_rate` has a fragile safe band, [0.001, 0.002] (`sweeps/shot10/FINDINGS.md`).

@@ -1,0 +1,10 @@
+# shot 10 sweeps, release binary, 24-core build machine (2026-09-19)
+ecosim sweep --param disease.grazer_rate --range 0:0.01:0.001 --seeds 1,2,3 --jobs 22 --out sweeps/shot10/disease_grazer_rate
+disease_grazer_rate rc=0 wall=11s
+ecosim sweep --param disease.grazer_threshold --range 4:32:4 --seeds 1,2,3 --jobs 22 --out sweeps/shot10/disease_grazer_threshold
+disease_grazer_threshold rc=0 wall=7s
+ecosim sweep --param hunter.refractory --range 100:1000:150 --seeds 1,2,3 --jobs 22 --out sweeps/shot10/hunter_refractory
+hunter_refractory rc=0 wall=2s
+ecosim sweep --set season.amplitude=0 --param disease.grazer_rate --range 0:0.01:0.001 --seeds 1,2,3 --jobs 22 --out sweeps/shot10/grazer_rate_amp0
+grazer_rate_amp0 rc=0 wall=8s
+done

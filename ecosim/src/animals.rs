@@ -42,7 +42,7 @@ pub enum Cause {
     Eaten = 1,
     /// Reached the species' `max_age`.
     OldAge = 2,
-    /// Density-dependent mortality (reserved; no rule records it yet).
+    /// Density-dependent mortality: too many of its species in its patch (`[disease]`).
     Crowded = 3,
     /// Energy reached 0 in a burning patch (fire damage took part). Takes precedence over `Starved`.
     Burnt = 4,
@@ -117,6 +117,16 @@ pub fn grazing_intake(grass: f32, intake_max: f32, intake_k: f32) -> f32 {
 pub fn attack_success(kill_prob: f64, shrub: f32, refugium_k: f32) -> f64 {
     let cover = (1.0 - shrub as f64).clamp(0.0, 1.0);
     (kill_prob * libm::pow(cover, refugium_k as f64)).clamp(0.0, 1.0)
+}
+
+/// Density-dependent mortality: the extra death chance, per update, of an animal in a patch holding
+/// `n` of its species (itself included): `rate · max(0, n − threshold) / threshold`, clamped to
+/// [0, 1]. It is 0 at or below the threshold. A threshold of 0 divides by 1.
+pub fn crowding_death_p(rate: f32, n: u32, threshold: u32) -> f64 {
+    if n <= threshold {
+        return 0.0;
+    }
+    (rate as f64 * (n - threshold) as f64 / threshold.max(1) as f64).clamp(0.0, 1.0)
 }
 
 /// Why an animal that died this update died: `Burnt` if its energy ran out in a burning patch,
@@ -242,20 +252,30 @@ impl Sim {
     }
 
     /// Animals phase: grazers in Vec order, then hunters. Newborns act from the next tick.
+    /// Crowding mortality is checked per species here, once, so a rate of 0 never reaches a draw.
     pub fn update_animals(&mut self) {
         self.rebuild_hunter_grid();
+        let d = &self.params.disease;
+        let (grazer_crowding, hunter_crowding) = (d.grazer_rate > 0.0, d.hunter_rate > 0.0);
         let n = self.grazers.len();
         for i in 0..n {
             if self.grazers[i].alive {
-                self.update_grazer(i);
+                self.update_grazer(i, grazer_crowding);
             }
         }
         let n = self.hunters.len();
         for i in 0..n {
             if self.hunters[i].alive {
-                self.update_hunter(i);
+                self.update_hunter(i, hunter_crowding);
             }
         }
+    }
+
+    /// One crowding draw for an animal in a patch holding `n` of its species. No draw when the
+    /// chance is 0 (at or below the threshold).
+    fn crowded_out(&mut self, rate: f32, n: u32, threshold: u32) -> bool {
+        let p = crowding_death_p(rate, n, threshold);
+        p > 0.0 && self.rng.gen_bool(p)
     }
 
     /// Nearest live hunter within the flee radius of column (x, y); lowest index wins ties.
@@ -307,7 +327,7 @@ impl Sim {
         self.greedy_step(x, y, cx, cy, -1.0)
     }
 
-    fn update_grazer(&mut self, i: usize) {
+    fn update_grazer(&mut self, i: usize, crowding: bool) {
         let gp = self.params.grazer.clone();
         let p = self.grazers[i].patch();
         let (energy, burning) = self.scorch(p, self.grazers[i].energy);
@@ -358,6 +378,12 @@ impl Sim {
             return;
         }
         let p = g.patch();
+        let d = &self.params.disease;
+        if crowding && self.crowded_out(d.grazer_rate, self.grazers_in_patch[p], d.grazer_threshold) {
+            self.kill_grazer(i, Cause::Crowded);
+            return;
+        }
+        let g = &self.grazers[i];
         if g.energy > gp.repro_energy && g.cooldown == 0 && self.grazers_in_patch[p] < gp.max_grazers_per_patch {
             let (cx, cy) = (g.x as usize, g.y as usize);
             let g = &mut self.grazers[i];
@@ -411,6 +437,7 @@ impl Sim {
             if let Some((x, y)) = self.random_edge_soil_column() {
                 let id = self.alloc_id();
                 self.hunters.push(Animal::new(id, Kind::Hunter, x, y, hp.start_energy, 0, 0));
+                self.hunters_in_patch[patch_of(x, y)] += 1;
                 self.hunter_immigrants += 1;
             }
         }
@@ -450,8 +477,9 @@ impl Sim {
         }
     }
 
-    /// One hunter update: rest when satiated, else attack, approach or wander; then energy, death and birth.
-    pub fn update_hunter(&mut self, i: usize) {
+    /// One hunter update: rest when satiated, else attack, approach or wander; then energy, death
+    /// (starved, burnt, old age, then crowded when `crowding` is on) and birth.
+    pub fn update_hunter(&mut self, i: usize, crowding: bool) {
         let hp = self.params.hunter.clone();
         let p = self.hunters[i].patch();
         let (energy, burning) = self.scorch(p, self.hunters[i].energy);
@@ -492,24 +520,40 @@ impl Sim {
         if let Some((nx, ny)) = step {
             h.x = nx as f32;
             h.y = ny as f32;
+            self.hunters_in_patch[p] -= 1;
+            self.hunters_in_patch[h.patch()] += 1;
         }
         h.state = state;
         h.energy -= cost;
+        let p = h.patch();
         if h.energy <= 0.0 || h.age >= hp.max_age {
-            h.alive = false;
             let cause = death_cause(h.energy, burning);
-            let p = h.patch();
-            self.deaths[Kind::Hunter as usize][cause as usize] += 1;
-            self.patches[p].detritus += hp.corpse_detritus;
+            self.kill_hunter(i, cause);
             return;
         }
+        let d = &self.params.disease;
+        if crowding && self.crowded_out(d.hunter_rate, self.hunters_in_patch[p], d.hunter_threshold) {
+            self.kill_hunter(i, Cause::Crowded);
+            return;
+        }
+        let h = &mut self.hunters[i];
         if h.energy > hp.repro_energy && h.cooldown == 0 {
             h.energy -= hp.repro_cost;
-            h.cooldown = hp.cooldown;
+            h.cooldown = hp.refractory;
             let (cx, cy) = (h.x as usize, h.y as usize);
             let id = self.alloc_id();
-            self.hunters.push(Animal::new(id, Kind::Hunter, cx, cy, hp.newborn_energy, 0, hp.cooldown));
+            self.hunters.push(Animal::new(id, Kind::Hunter, cx, cy, hp.newborn_energy, 0, hp.refractory));
+            self.hunters_in_patch[p] += 1;
         }
+    }
+
+    fn kill_hunter(&mut self, i: usize, cause: Cause) {
+        self.deaths[Kind::Hunter as usize][cause as usize] += 1;
+        let h = &mut self.hunters[i];
+        h.alive = false;
+        let p = h.patch();
+        self.hunters_in_patch[p] -= 1;
+        self.patches[p].detritus += self.params.hunter.corpse_detritus;
     }
 
     /// Column index an animal stands on.
@@ -550,7 +594,7 @@ mod tests {
         sim.hunters.push(Animal::new(1, Kind::Hunter, 11, 10, 50.0, 0, 100));
         sim.patches[patch_of(10, 10)].shrub = shrub;
         sim.rebuild_grazer_grid();
-        sim.update_hunter(0);
+        sim.update_hunter(0, false);
         (!sim.grazers[0].alive, sim.hunters[0].state, sim.hunters[0].energy)
     }
 
@@ -644,7 +688,7 @@ mod tests {
         let got = sim.nearest_prey(hx, hy);
         prop_assert_eq!(got.map(|g| g.0), want.map(|w| w.1), "prey is not the nearest grazer");
         let before = positions(&sim);
-        sim.update_hunter(0);
+        sim.update_hunter(0, false);
         let after = positions(&sim);
         for (j, (b, a)) in before.iter().zip(&after).enumerate() {
             if Some(j) != got.map(|g| g.0) {
@@ -671,7 +715,7 @@ mod tests {
         sim.params.hunter.kill_prob = 1.0;
         add_hunter(&mut sim, hunter, energy);
         let before = positions(&sim);
-        sim.update_hunter(0);
+        sim.update_hunter(0, false);
         prop_assert_eq!(before, positions(&sim), "a satiated hunter touched a grazer");
         prop_assert_eq!(sim.hunters[0].state, State::Rest);
         Ok(())
@@ -955,6 +999,125 @@ mod tests {
         nearest_matches_brute_force(&animals, &[2, 0, 1], &[false, true, true], (5, 5), 3.0).unwrap();
     }
 
+    /// Crowding mortality: the extra death chance is 0 at or below the threshold, positive above it
+    /// (for a positive rate), within [0, 1], and never falls as the patch count rises.
+    fn crowding_zero_below_threshold_and_monotone(
+        rate: f32,
+        a: u32,
+        b: u32,
+        threshold: u32,
+    ) -> Result<(), TestCaseError> {
+        let (lo, hi) = (a.min(b), a.max(b));
+        for n in [lo, hi] {
+            let p = crowding_death_p(rate, n, threshold);
+            prop_assert!((0.0..=1.0).contains(&p), "p({}) = {}", n, p);
+            prop_assert_eq!(p == 0.0, n <= threshold || rate == 0.0, "p({}) = {} at threshold {}", n, p, threshold);
+        }
+        let (at_lo, at_hi) = (crowding_death_p(rate, lo, threshold), crowding_death_p(rate, hi, threshold));
+        prop_assert!(at_lo <= at_hi, "p fell from {} to {} as n rose {} -> {}", at_lo, at_hi, lo, hi);
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(64)))]
+
+        #[test]
+        fn prop_crowding_zero_below_threshold_and_monotone(
+            rate in 0.0f32..=2.0,
+            a in 0u32..200,
+            b in 0u32..200,
+            threshold in 0u32..40,
+        ) {
+            crowding_zero_below_threshold_and_monotone(rate, a, b, threshold)?;
+        }
+    }
+
+    #[test]
+    fn crowding_regression_threshold_edge_and_clamp() {
+        // n = threshold is still 0; one above is rate / threshold; far above clamps to 1.
+        crowding_zero_below_threshold_and_monotone(0.01, 16, 17, 16).unwrap();
+        assert_eq!(crowding_death_p(0.01, 16, 16), 0.0);
+        assert!((crowding_death_p(0.01, 24, 16) - 0.005).abs() < 1e-9);
+        assert_eq!(crowding_death_p(5.0, 100, 4), 1.0);
+        // Threshold 0 divides by 1 instead of by 0.
+        crowding_zero_below_threshold_and_monotone(0.5, 0, 3, 0).unwrap();
+        assert_eq!(crowding_death_p(0.5, 1, 0), 0.5);
+    }
+
+    /// 20 grazers eating on one column and 6 hunters wandering in the middle of one patch, at a rate
+    /// high enough that any count above the threshold is certain death: each species is thinned to
+    /// exactly its threshold, every death is `crowded`, and the kept counts match.
+    #[test]
+    fn crowding_thins_a_patch_to_its_threshold() {
+        let mut sim = Sim::bare(&vec![14u8; COLS]);
+        sim.params.disease.grazer_rate = 1000.0;
+        sim.params.disease.grazer_threshold = 10;
+        sim.params.disease.hunter_rate = 1000.0;
+        sim.params.disease.hunter_threshold = 2;
+        for _ in 0..20 {
+            sim.spawn_grazer(40, 40);
+        }
+        sim.grazers.iter_mut().for_each(|g| g.energy = 50.0);
+        for _ in 0..6 {
+            let id = sim.alloc_id();
+            sim.hunters.push(Animal::new(id, Kind::Hunter, 4, 4, 50.0, 0, 100));
+        }
+        sim.update_animals();
+        assert_eq!(sim.deaths, [[0, 0, 0, 10, 0], [0, 0, 0, 4, 0]]);
+        assert_eq!((sim.grazers_in_patch[patch_of(40, 40)], sim.hunters_in_patch[0]), (10, 2));
+        assert!(sim.grazers.iter().filter(|g| g.alive).all(|g| g.state == State::Eat));
+    }
+
+    /// At rate 0 the same crowded patch loses nothing, and the RNG ends where it does with crowding
+    /// impossible (threshold above the count): the switched-off rule makes no draws.
+    #[test]
+    fn crowding_at_rate_zero_kills_nothing_and_draws_nothing() {
+        let run = |rate: f32, threshold: u32| {
+            let mut sim = Sim::bare(&vec![14u8; COLS]);
+            sim.params.disease.grazer_rate = rate;
+            sim.params.disease.grazer_threshold = threshold;
+            sim.params.disease.hunter_rate = rate;
+            sim.params.disease.hunter_threshold = threshold;
+            for _ in 0..20 {
+                sim.spawn_grazer(40, 40);
+            }
+            for _ in 0..6 {
+                let id = sim.alloc_id();
+                sim.hunters.push(Animal::new(id, Kind::Hunter, 4, 4, 50.0, 0, 100));
+            }
+            for _ in 0..50 {
+                sim.update_animals();
+            }
+            (sim.deaths, sim.count_grazers(), sim.count_hunters(), sim.rng.get_word_pos())
+        };
+        let off = run(0.0, 1);
+        assert_eq!(off, run(1.0, 1000));
+        assert_eq!(off.0[0][Cause::Crowded as usize] + off.0[1][Cause::Crowded as usize], 0);
+    }
+
+    /// Hunter births are gated by energy and a short refractory: a hunter above `repro_energy` with
+    /// its refractory run out gives birth, and parent and newborn both wait `refractory` ticks;
+    /// below `repro_energy` there is no birth whatever the refractory.
+    #[test]
+    fn hunter_births_are_energy_gated_with_a_refractory() {
+        let mut sim = Sim::bare(&vec![14u8; COLS]);
+        let hp = sim.params.hunter.clone();
+        let id = sim.alloc_id();
+        sim.hunters.push(Animal::new(id, Kind::Hunter, 20, 20, hp.repro_energy + 5.0, 0, 1));
+        sim.rebuild_hunter_grid();
+        sim.update_hunter(0, false);
+        assert_eq!(sim.hunters.len(), 2, "cooldown 1 runs out on this update");
+        assert_eq!((sim.hunters[0].cooldown, sim.hunters[1].cooldown), (hp.refractory, hp.refractory));
+        assert_eq!(sim.hunters[1].energy, hp.newborn_energy);
+        sim.hunters[0].cooldown = 0;
+        sim.hunters[0].energy = hp.repro_energy - 1.0;
+        sim.update_hunter(0, false);
+        assert_eq!(sim.hunters.len(), 2, "no birth below repro_energy");
+        sim.hunters[0].energy = hp.repro_energy + 5.0;
+        sim.update_hunter(0, false);
+        assert_eq!((sim.hunters.len(), sim.hunters_in_patch[patch_of(20, 20)]), (3, 3));
+    }
+
     /// Knobs that make every recorded cause happen within a few hundred ticks.
     #[derive(Debug, Clone)]
     struct Mortality {
@@ -967,8 +1130,8 @@ mod tests {
 
     /// With compaction off, dead animals stay in their Vec, so the deaths of a tick are the growth
     /// of each species' dead count, newborns eaten on their first tick included. The recorded causes
-    /// must sum to exactly that, per species and tick, and the stats row must carry them. The
-    /// reserved cause `crowded` is never recorded.
+    /// must sum to exactly that, per species and tick, and the stats row must carry them. The kept
+    /// per-patch hunter counts equal a recount after every tick.
     fn death_causes_sum_to_deaths(seed: u64, ticks: u32, m: &Mortality) -> Result<crate::sim::Deaths, TestCaseError> {
         let mut p = Params::load_default();
         p.world.compact_every = u32::MAX;
@@ -988,8 +1151,10 @@ mod tests {
             for k in 0..2 {
                 let recorded: u32 = sim.deaths[k].iter().sum();
                 prop_assert_eq!(recorded, after[k] - before[k], "species {} at tick {}", k, sim.tick);
-                prop_assert_eq!(sim.deaths[k][Cause::Crowded as usize], 0);
             }
+            let mut counts = vec![0u32; crate::world::PATCHES];
+            sim.hunters.iter().filter(|h| h.alive).for_each(|h| counts[h.patch()] += 1);
+            prop_assert_eq!(&sim.hunters_in_patch, &counts, "hunters_in_patch at tick {}", sim.tick);
             prop_assert_eq!(sim.deaths[Kind::Hunter as usize][Cause::Eaten as usize], 0, "hunters have no predator");
             prop_assert_eq!(sim.stats().deaths, sim.deaths);
             total.iter_mut().flatten().zip(sim.deaths.iter().flatten()).for_each(|(t, d)| *t += d);

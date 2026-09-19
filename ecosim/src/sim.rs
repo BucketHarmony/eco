@@ -110,6 +110,8 @@ pub struct Sim {
     pub grazer_grid: Vec<Vec<u32>>,
     /// Indices into `hunters` of the live hunters on each column, rebuilt before the grazers act.
     pub hunter_grid: Vec<Vec<u32>>,
+    /// Live hunter count per patch, rebuilt with the hunter grid and kept current while hunters act.
+    pub hunters_in_patch: Vec<u32>,
     /// Column offsets within the hunter seek radius, nearest first.
     pub seek_offsets: Vec<(i32, i32, i32)>,
     /// Column offsets within the grazer flee radius, nearest first.
@@ -172,6 +174,7 @@ impl Sim {
             grazers_in_patch: vec![0; PATCHES],
             grazer_grid: vec![Vec::new(); COLS],
             hunter_grid: vec![Vec::new(); COLS],
+            hunters_in_patch: vec![0; PATCHES],
             seek_offsets: Vec::new(),
             flee_offsets: Vec::new(),
             tick: 0,
@@ -199,6 +202,8 @@ impl Sim {
         p.hunter.immigration_floor = 0;
         p.grazer.immigration_floor = 0;
         p.fire.base_rate = 0.0;
+        p.disease.grazer_rate = 0.0;
+        p.disease.hunter_rate = 0.0;
         let world = World::from_heights(heights, &p);
         Sim::with_world(p, ChaCha8Rng::seed_from_u64(3), world)
     }
@@ -243,7 +248,7 @@ impl Sim {
                 }
                 Kind::Hunter => {
                     let h = &self.params.hunter;
-                    (h.start_count, h.start_energy, h.start_age_max, h.cooldown)
+                    (h.start_count, h.start_energy, h.start_age_max, h.refractory)
                 }
             };
             for _ in 0..n {
@@ -257,7 +262,10 @@ impl Sim {
                         self.grazers_in_patch[patch_of(x, y)] += 1;
                         self.grazers.push(a);
                     }
-                    Kind::Hunter => self.hunters.push(a),
+                    Kind::Hunter => {
+                        self.hunters_in_patch[patch_of(x, y)] += 1;
+                        self.hunters.push(a);
+                    }
                 }
             }
         }
@@ -306,9 +314,13 @@ impl Sim {
         rebuild_grid(&mut self.grazer_grid, &self.grazers);
     }
 
-    /// Recompute the hunter grid from scratch.
+    /// Recompute the hunter grid and the per-patch hunter counts from scratch.
     pub fn rebuild_hunter_grid(&mut self) {
         rebuild_grid(&mut self.hunter_grid, &self.hunters);
+        self.hunters_in_patch.fill(0);
+        for h in self.hunters.iter().filter(|h| h.alive) {
+            self.hunters_in_patch[h.patch()] += 1;
+        }
     }
 
     /// Live grazers.

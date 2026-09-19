@@ -222,6 +222,12 @@ These are the calls made in the shot-5 "dynamics fixes" brief. Tuning is in `TUN
 **Tuning outside the brief's listed params**
 - To get the required bands, several params outside the brief's list were changed: `grazer.start_count` 300, `hunter.fail_cost` 0.25, `hunter.cooldown` 5000 and `grazer.max_grazers_per_patch` 5. No invariant was changed. Each change is logged, with its evidence, in `TUNING.md`.
 
+**Hunter regulation: what holds hunter numbers (a finding, not a fix)**
+- **Hunters are not regulated by prey.** After the start they climb from 20 to about 35–55 and stay flat on every seed, at any season amplitude, through grazer swings of 3–9× (`sweeps/shot5/FINDINGS.md`).
+- **The ceiling is demographic.** A hunter can breed at most once per `hunter.cooldown` (5000 ticks) and lives at most `max_age` (8000). So each hunter has one or two litters in its life whatever it eats, and births cap the count.
+- **The floor is cheap predation.** Kills run at a steady low rate: continuous refugium, satiation, and a failed attack costing only `fail_cost` 0.25. A prey boom can't raise births (cooldown), and a prey bust hasn't starved hunters fast enough to show in the counts. This is inferred from the counts. The death causes shot 5 adds will show whether old age or starvation actually binds.
+- **Consequence.** Predation is a near-constant drain on grazers, not a driver of their cycle. The grazer oscillation is grazers against grass, paced by season. Direction 1 wants hunter numbers set by prey, so the backlog moves this to shot 10: energy-gated reproduction with a short `hunter.refractory` in place of the long fixed cooldown, under the anchor rule. It is not tuned here.
+
 **Platform math**
 - `clippy.toml` now also disallows `f64::{sin, cos, tan, exp, ln, powf}`. The only new sim math is `libm::pow` in `attack_success`.
 - Two test helpers in `check.rs` that built synthetic sine series moved to `libm::sin`.

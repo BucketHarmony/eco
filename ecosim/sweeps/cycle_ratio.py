@@ -71,7 +71,7 @@ def main():
     params = [k for k in rows[0] if k != 'seed' and not k.endswith(('_pass', '_value', '_margin'))
               and k not in ('first_extinction_tick', 'first_extinction_species', 'first_extinction_dominant_cause',
                             'grazer_peaks', 'hunter_extinction_tick', 'hunter_immigrants',
-                            'pp_lag', 'pp_corr', 'pp_undefined')]
+                            'pp_lag', 'pp_corr', 'pp_undefined', 'pp_period')]
     print(f"{' '.join(params)} seed | peaks>{frm} qualifying(>=1.5) | ratio min/median/max | answer | hunters@peaks")
     for r in rows:
         cid = '_'.join(f'{p}={r[p]}' for p in params) + f"_s={r['seed']}"

@@ -141,7 +141,7 @@ pub struct CellResult {
     pub hunter_extinction: Option<u32>,
     /// Hunters that immigrated over the run.
     pub hunter_immigrants: u32,
-    /// The predator–prey signature (`pp_lag`, `pp_corr`), as `ecosim stats --signature` reports it.
+    /// The predator–prey signature (`pp_lag`, `pp_corr`, `pp_period`), as `ecosim stats --signature` reports it.
     pub signature: Signature,
 }
 
@@ -322,7 +322,7 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
         let _ = write!(csv, ",{k}_pass,{k}_value,{k}_margin");
     }
     csv.push_str(",first_extinction_tick,first_extinction_species,first_extinction_dominant_cause");
-    csv.push_str(",grazer_peaks,hunter_extinction_tick,hunter_immigrants,pp_lag,pp_corr,pp_undefined\n");
+    csv.push_str(",grazer_peaks,hunter_extinction_tick,hunter_immigrants,pp_lag,pp_corr,pp_undefined,pp_period\n");
     for ((cell, (id, _, _)), r) in cells.iter().zip(&jobs).zip(&results) {
         for (p, &i) in cfg.specs.iter().zip(&cell.idx) {
             let _ = write!(csv, "{},", p.values[i]);
@@ -341,9 +341,11 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
         let cause = r.first_extinction_cause.unwrap_or("");
         let hext = r.hunter_extinction.map_or(String::new(), |t| t.to_string());
         let pp = match &r.signature {
-            Signature::Cycle { lag, corr } => format!("{lag},{corr:.4},"),
-            Signature::Extinct(e) => format!(",,{} {}", e.species, e.dominant_name()),
-            Signature::Flat => ",,flat".into(),
+            Signature::Cycle { lag, corr, period } => {
+                format!("{lag},{corr:.4},,{}", period.map_or(String::new(), |p| p.to_string()))
+            }
+            Signature::Extinct(e) => format!(",,{} {},", e.species, e.dominant_name()),
+            Signature::Flat => ",,flat,".into(),
         };
         let _ = writeln!(csv, ",{ext},{species},{cause},{},{hext},{},{pp}", r.grazer_peaks, r.hunter_immigrants);
         fs::write(out.join("cells").join(format!("{id}.csv")), &r.csv).map_err(|e| e.to_string())?;

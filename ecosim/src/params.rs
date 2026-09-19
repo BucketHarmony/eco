@@ -276,6 +276,11 @@ pub struct HunterParams {
     pub hunt_cost: f32,
     /// Energy a failed attack costs on top of `hunt_cost`.
     pub fail_cost: f32,
+    /// Ticks a hunter spends handling its prey after a kill: no attack, no move, resting energy
+    /// cost (type II functional response). 0 switches handling off; it is then left out of
+    /// `meta.json`, which reads back as 0, so runs without handling keep their exact `meta.json`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub handling_ticks: u32,
     /// Steps a grazer is pushed away by a failed attack.
     pub displace_steps: u32,
     /// Shrub refugium exponent: attack success is `kill_prob · (1 − shrub)^refugium_k` (stability rule 3).
@@ -453,6 +458,11 @@ fn coerce(old: &toml::Value, raw: &str) -> Result<toml::Value, String> {
     }
 }
 
+/// Serde skip test for keys that are left out of `meta.json` at 0.
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,7 +560,11 @@ mod tests {
         let (mut got, base) = (stored(&set), stored(&Params::load_default()));
         prop_assert_eq!(lookup(&got, key), &want, "{} = {}", key, text);
         let (section, field) = key.split_once('.').unwrap();
-        got[section][field] = base[section][field].clone();
+        // A key left out at its off value (`is_zero`) is absent from the base, not null.
+        match base[section].get(field) {
+            Some(v) => got[section][field] = v.clone(),
+            None => _ = got[section].as_object_mut().unwrap().remove(field),
+        }
         prop_assert_eq!(got, base, "setting {} changed another key", key);
         Ok(())
     }

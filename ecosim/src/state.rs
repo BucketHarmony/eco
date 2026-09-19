@@ -1,12 +1,12 @@
 //! `state.bin`: the part of a snapshot the other files don't hold exactly, and the restore path that
 //! turns a snapshot directory back into a `Sim` that steps identically to the one that wrote it.
 //!
-//! Layout (version 3), all integers and floats little-endian, no padding:
+//! Layout (version 4), all integers and floats little-endian, no padding:
 //!
 //! | field | type |
 //! |---|---|
 //! | magic | `b"ECOSTATE"` |
-//! | state version | u32 = 3 |
+//! | state version | u32 = 4 |
 //! | tick, next_id, hunter_immigrants | 3 × u32 |
 //! | RNG seed, stream, word position | [u8; 32], u64, u128 |
 //! | deaths this tick | 2 × 5 × u32 (grazers then hunters, `Cause` order) |
@@ -17,9 +17,14 @@
 //! | grazer grid | per column (4096): u32 length, then that many u32 grazer indices |
 //! | fire | total_burnt u32, then 64 × burning_ticks_left u32 (patch order) |
 //! | traits | per grazer, then per hunter (`Vec` order): energy_cost_mult, flee_distance, repro_threshold f32 |
+//! | handling | per hunter (`Vec` order): handling ticks left u32 |
 //!
-//! Version 2 is version 1 with the fire section appended, and version 3 is version 2 with the traits
-//! section appended; nothing before either moved.
+//! Version 2 is version 1 with the fire section appended, version 3 is version 2 with the traits
+//! section appended, and version 4 is version 3 with the handling section appended; nothing before
+//! any of them moved. Version 4 is written only when handling is in use (`hunter.handling_ticks` above
+//! 0, or a hunter still handling); otherwise the file is version 3, byte for byte what the ecosim
+//! before handling wrote, and it decodes with every hunter's handling 0. Animal state 6 is Handling,
+//! which only a version-4 file holds.
 //!
 //! Entities are stored in `Vec` order, dead ones included, because indices into the Vecs (the trunk
 //! index, the grids) and the update order depend on it. Everything else a `Sim` holds is recomputed
@@ -38,16 +43,21 @@ use std::path::Path;
 
 /// First bytes of every `state.bin`.
 pub const MAGIC: &[u8; 8] = b"ECOSTATE";
-/// `state.bin` layout version; `decode` rejects any other.
-pub const STATE_VERSION: u32 = 3;
+/// `state.bin` layout version with the handling section; `decode` also reads `STATE_VERSION_NO_HANDLING`.
+pub const STATE_VERSION: u32 = 4;
+/// The layout written when handling is not in use: version 4 without the handling section.
+pub const STATE_VERSION_NO_HANDLING: u32 = 3;
 
-const STATES: [State; 6] = [State::Flee, State::Eat, State::Move, State::Wander, State::Rest, State::Hunt];
+const STATES: [State; 7] =
+    [State::Flee, State::Eat, State::Move, State::Wander, State::Rest, State::Hunt, State::Handling];
 
 /// Encode the sim's non-derived state as `state.bin` bytes.
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut b = Vec::with_capacity(64 * 1024);
     b.extend_from_slice(MAGIC);
-    for v in [STATE_VERSION, sim.tick, sim.next_id, sim.hunter_immigrants] {
+    let handling = sim.params.hunter.handling_ticks > 0 || sim.hunters.iter().any(|h| h.handling > 0);
+    let version = if handling { STATE_VERSION } else { STATE_VERSION_NO_HANDLING };
+    for v in [version, sim.tick, sim.next_id, sim.hunter_immigrants] {
         b.extend_from_slice(&v.to_le_bytes());
     }
     b.extend_from_slice(&sim.rng.get_seed());
@@ -99,6 +109,11 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
     for a in sim.grazers.iter().chain(&sim.hunters) {
         for v in a.traits.as_array() {
             b.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    if handling {
+        for a in &sim.hunters {
+            b.extend_from_slice(&a.handling.to_le_bytes());
         }
     }
     b
@@ -182,7 +197,7 @@ fn decode_animals(r: &mut Reader, kind: Kind) -> Result<Vec<Animal>, String> {
             if !(0.0..WX as f32).contains(&x) || !(0.0..WY as f32).contains(&y) {
                 return Err(format!("state.bin: animal {id} off the world at ({x}, {y})"));
             }
-            Ok(Animal { id, kind, x, y, energy, age, cooldown, state, alive, traits: NO_TRAITS })
+            Ok(Animal { id, kind, x, y, energy, age, cooldown, state, alive, traits: NO_TRAITS, handling: 0 })
         })
         .collect()
 }
@@ -193,8 +208,10 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
         return Err("state.bin: bad magic (not an ecosim state file)".into());
     }
     let version = r.u32()?;
-    if version != STATE_VERSION {
-        return Err(format!("state.bin: state version {version}, this ecosim reads {STATE_VERSION}"));
+    if version != STATE_VERSION && version != STATE_VERSION_NO_HANDLING {
+        return Err(format!(
+            "state.bin: state version {version}, this ecosim reads {STATE_VERSION_NO_HANDLING} and {STATE_VERSION}"
+        ));
     }
     let (tick, next_id, hunter_immigrants) = (r.u32()?, r.u32()?, r.u32()?);
     let mut rng = ChaCha8Rng::from_seed(r.arr()?);
@@ -251,6 +268,11 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
     }
     for a in grazers.iter_mut().chain(&mut hunters) {
         a.traits = Traits::from_array([r.f32()?, r.f32()?, r.f32()?]);
+    }
+    if version == STATE_VERSION {
+        for h in &mut hunters {
+            h.handling = r.u32()?;
+        }
     }
     if r.at != bytes.len() {
         return Err(format!("state.bin: {} trailing bytes", bytes.len() - r.at));
@@ -372,7 +394,11 @@ mod tests {
     }
 
     fn stepped(seed: u64, ticks: u32) -> Sim {
-        let mut sim = Sim::new(Params::load_default(), seed);
+        stepped_with(Params::load_default(), seed, ticks)
+    }
+
+    fn stepped_with(params: Params, seed: u64, ticks: u32) -> Sim {
+        let mut sim = Sim::new(params, seed);
         while sim.tick < ticks {
             sim.step();
         }
@@ -443,6 +469,42 @@ mod tests {
         let a = stepped(7, 1234);
         assert!(a.grazers.iter().any(|g| !g.alive) || a.trees.iter().any(|t| !t.alive));
         restore_steps_identically(7, 1234).unwrap();
+    }
+
+    /// With handling on, `state.bin` is version 4 and carries each hunter's handling ticks left, so a
+    /// restore taken while hunters are mid-handling steps identically. With it off, the file is
+    /// version 3 and the same size as before handling existed.
+    #[test]
+    fn restore_regression_mid_handling() {
+        let mut p = Params::load_default();
+        p.hunter.handling_ticks = 400;
+        let mut a = stepped_with(p, 42, 300);
+        while !a.hunters.iter().any(|h| h.alive && h.handling > 0) {
+            a.step();
+        }
+        let bytes = encode(&a);
+        assert_eq!(bytes[8..12], STATE_VERSION.to_le_bytes());
+        assert_eq!(bytes.len(), encode_len_without_handling(&a) + 4 * a.hunters.len());
+        let mut b = restored(&a);
+        assert_same(&a, &b).unwrap();
+        for _ in 0..500 {
+            a.step();
+            b.step();
+            assert_eq!(a.stats(), b.stats(), "diverged at tick {}", a.tick);
+        }
+        assert_same(&a, &b).unwrap();
+        let off = stepped(42, 300);
+        let bytes = encode(&off);
+        assert_eq!(bytes[8..12], STATE_VERSION_NO_HANDLING.to_le_bytes());
+        assert_eq!(bytes.len(), encode_len_without_handling(&off));
+    }
+
+    /// Length of `state.bin` without the handling section, from the layout table.
+    fn encode_len_without_handling(sim: &Sim) -> usize {
+        let head = 8 + 4 + 12 + 32 + 8 + 16 + 40 + 2 * COLS * 4 + PATCHES * 16;
+        let animals = sim.grazers.len() + sim.hunters.len();
+        let grid: usize = sim.grazer_grid.iter().map(|c| 4 + 4 * c.len()).sum();
+        head + 4 + 19 * sim.trees.len() + 8 + 26 * animals + grid + 4 + PATCHES * 4 + 12 * animals
     }
 
     #[test]

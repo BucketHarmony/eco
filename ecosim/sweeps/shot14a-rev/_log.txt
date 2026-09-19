@@ -1,0 +1,7 @@
+# shot 14a-rev sweeps (2026-09-19T17:51:31Z), binary at 8986daa+wip, 24 jobs
+ecosim sweep --param hunter.handling_ticks --range 0:200:25 --set hunter.hunt_cost=1.0 --set disease.hunter_rate=0 --set hunter.kill_energy=60 --ticks 60000 --jobs 24 --seeds 1,2,3 --out sweeps/shot14a-rev/handling_ticks
+wrote sweeps/shot14a-rev/handling_ticks: 0/27 cells pass [wall 107 s]
+ecosim sweep --param hunter.refractory --range 300:1500:300 --set hunter.handling_ticks=200 --set hunter.hunt_cost=1.0 --set disease.hunter_rate=0 --set hunter.kill_energy=60 --ticks 60000 --jobs 24 --seeds 1,2,3 --out sweeps/shot14a-rev/refractory
+wrote sweeps/shot14a-rev/refractory: 0/15 cells pass [wall 5 s]
+ecosim sweep --param hunter.handling_ticks --values 25,50,100,150 --param hunter.hunt_cost --values 0.6,0.8,1.0,1.2 --set disease.hunter_rate=0 --set hunter.kill_energy=60 --ticks 60000 --jobs 24 --seeds 1,2,3,42 --out sweeps/shot14a-rev/handling_x_cost
+wrote sweeps/shot14a-rev/handling_x_cost: 0/64 cells pass [wall 229 s]

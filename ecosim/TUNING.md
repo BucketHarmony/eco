@@ -367,3 +367,15 @@ No parameter changed. The shot adds `[rng] stream = 0`, which leaves every defau
 
 Required sweeps (seeds 1–3, hunter_rate 0): `hunter_kill_energy` passes 7 of 21 cells, `hunter_hunt_cost` 1 of 18 and `kill_x_cost` 5 of 48. None reaches the target region.
 
+
+## Food-limited hunters, second attempt (shot 14a-rev, Blocked)
+
+**No value changed.** `hunter.handling_ticks` was added at 0, the pre-shot rule. `disease.hunter_rate` stays 0.001: change 4 asks for 0, but at 0 no cell keeps seeds 1, 2, 3 and 42 alive to 60000 ticks. The sweeps are in `sweeps/shot14a-rev/`, and the analysis is in its `FINDINGS.md`.
+
+All rounds ran with `disease.hunter_rate=0` and `kill_energy=60`, for 60000 ticks.
+
+| round | grid (seeds) | result |
+|---|---|---|
+| `handling_ticks` | 0:200:25 at hunt_cost 1.0 (1, 2, 3) | 1 of 27 cell-seeds persists (200, seed 1). Seeds 2 and 3 lose their hunters to starvation in every cell. |
+| `refractory` | 300:1500:300 at handling 200, hunt_cost 1.0 (1, 2, 3) | 0 of 15. Every cell ends with grazers `eaten` by tick 1400–7000. |
+| `handling_x_cost` | {25, 50, 100, 150} × hunt_cost {0.6, 0.8, 1.0, 1.2} (1, 2, 3, 42) | 7 of 64 cell-seeds persist, and no cell has more than 2 of 4 seeds. None shows pp_corr > 0.3 with 0 < pp_lag < pp_period/2. |

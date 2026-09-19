@@ -602,12 +602,18 @@ pub fn extinction_line(e: &Extinction) -> String {
 }
 
 /// Lag range of the predator–prey signature: −`SIG_MAX_LAG`..=`SIG_MAX_LAG` ticks in `SIG_LAG_STEP`s.
-pub const SIG_MAX_LAG: i32 = 2000;
+pub const SIG_MAX_LAG: i32 = 8000;
 /// Step between the signature's lags.
 pub const SIG_LAG_STEP: i32 = 50;
+/// First tick of the signature window, which runs to `SIG_END` (or the run's end).
+pub const SIG_START: u32 = 5000;
+/// Last tick of the signature window.
+pub const SIG_END: u32 = 60_000;
+/// Width of the centred moving average subtracted from both series before correlating.
+pub const SIG_DETREND: u32 = 4000;
 
-/// The predator–prey signature of a run: the lagged cross-correlation of hunters against grazers
-/// over ticks `WINDOW_START`..=20000 (or the run's end).
+/// The predator–prey signature of a run: the lagged cross-correlation of detrended hunters against
+/// detrended grazers over ticks `SIG_START`..=`SIG_END` (or the run's end).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Signature {
     /// The lag with the largest Pearson correlation of grazers(t) with hunters(t + lag), and that
@@ -617,6 +623,9 @@ pub enum Signature {
         lag: i32,
         /// The correlation at that lag (`pp_corr`).
         corr: f64,
+        /// Lag distance from the positive peak nearest lag 0 to the positive peak nearest it
+        /// (`pp_period`); `None` when fewer than two positive peaks lie in the lag range.
+        period: Option<i32>,
     },
     /// Grazers or hunters reach 0 inside the window, so the correlation is undefined there.
     Extinct(Extinction),
@@ -624,38 +633,91 @@ pub enum Signature {
     Flat,
 }
 
-/// The predator–prey signature (`ecosim stats --signature`, sweep columns `pp_lag`, `pp_corr`).
-/// Each lag L correlates grazers(t) with hunters(t + L) over the ticks t where both t and t + L lie
-/// in the window. Lags run from −2000 upward, and only a strictly larger correlation replaces the
-/// best, so ties go to the most negative lag.
+/// `x` minus its centred moving average over `SIG_DETREND` ticks (t − 2000..=t + 2000, cut short
+/// at the ends of the series).
+fn detrend(x: &[f64]) -> Vec<f64> {
+    let half = SIG_DETREND as usize / 2;
+    let mut sum = vec![0.0; x.len() + 1];
+    for (i, v) in x.iter().enumerate() {
+        sum[i + 1] = sum[i] + v;
+    }
+    (0..x.len())
+        .map(|t| {
+            let (lo, hi) = (t.saturating_sub(half), (t + half + 1).min(x.len()));
+            x[t] - (sum[hi] - sum[lo]) / (hi - lo) as f64
+        })
+        .collect()
+}
+
+/// The period of a cross-correlation function sampled every `SIG_LAG_STEP` from −`SIG_MAX_LAG`.
+/// A positive lobe is a maximal run of lags with correlation above 0, and its peak is the lag of its
+/// largest correlation (the first on a tie). Lobes that touch either end of the lag range are left
+/// out, since their peak may lie beyond it. The period is the lag distance from the peak nearest lag
+/// 0 (ties to the positive side) to the peak nearest that one; `None` with fewer than two peaks.
+/// Lobes rather than local maxima, so noise wiggles on one hump are not counted as cycles.
+fn cc_period(cc: &[Option<f64>]) -> Option<i32> {
+    let mut peaks = Vec::new();
+    let mut i = 0;
+    while i < cc.len() {
+        if !cc[i].is_some_and(|c| c > 0.0) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut best = i;
+        while i < cc.len() && cc[i].is_some_and(|c| c > 0.0) {
+            if cc[i] > cc[best] {
+                best = i;
+            }
+            i += 1;
+        }
+        if start > 0 && i < cc.len() {
+            peaks.push(best as i32 * SIG_LAG_STEP - SIG_MAX_LAG);
+        }
+    }
+    let near = *peaks.iter().min_by_key(|&&l| (l.abs(), l < 0))?;
+    peaks.iter().filter(|&&l| l != near).map(|l| (l - near).abs()).min()
+}
+
+/// The predator–prey signature (`ecosim stats --signature`, sweep columns `pp_lag`, `pp_corr`,
+/// `pp_period`). Both series are detrended over the whole run first (`detrend`). Each lag L then
+/// correlates grazers(t) with hunters(t + L) over the ticks t where both t and t + L lie in the
+/// window. Lags run from −8000 upward, and only a strictly larger correlation replaces the best, so
+/// ties go to the most negative lag.
 pub fn signature(rows: &[StatsRow]) -> Signature {
-    let end = rows.len().min(20_001);
-    let from = (WINDOW_START as usize).min(end);
-    let win = &rows[from..end];
+    let end = rows.len().min(SIG_END as usize + 1);
+    let from = (SIG_START as usize).min(end);
     let gone = extinctions(rows).into_iter().filter(|e| e.species != "trees");
     for e in gone {
         let count = |r: &StatsRow| if e.species == "grazers" { r.grazers } else { r.hunters };
-        if win.iter().any(|r| count(r) == 0) {
+        if rows[from..end].iter().any(|r| count(r) == 0) {
             return Signature::Extinct(e);
         }
     }
-    let g: Vec<f64> = win.iter().map(|r| r.grazers as f64).collect();
-    let h: Vec<f64> = win.iter().map(|r| r.hunters as f64).collect();
+    let g = detrend(&rows.iter().map(|r| r.grazers as f64).collect::<Vec<_>>());
+    let h = detrend(&rows.iter().map(|r| r.hunters as f64).collect::<Vec<_>>());
+    let (g, h) = (&g[from..end], &h[from..end]);
+    let cc: Vec<Option<f64>> = (-SIG_MAX_LAG..=SIG_MAX_LAG)
+        .step_by(SIG_LAG_STEP as usize)
+        .map(|lag| {
+            let shift = lag.unsigned_abs() as usize;
+            if shift + 2 > g.len() {
+                return None;
+            }
+            let n = g.len() - shift;
+            let (a, b) = if lag >= 0 { (&g[..n], &h[shift..]) } else { (&g[shift..], &h[..n]) };
+            pearson(a, b)
+        })
+        .collect();
     let mut best: Option<(i32, f64)> = None;
-    for lag in (-SIG_MAX_LAG..=SIG_MAX_LAG).step_by(SIG_LAG_STEP as usize) {
-        let shift = lag.unsigned_abs() as usize;
-        if shift + 2 > g.len() {
-            continue;
-        }
-        let n = g.len() - shift;
-        let (a, b) = if lag >= 0 { (&g[..n], &h[shift..]) } else { (&g[shift..], &h[..n]) };
-        if let Some(c) = pearson(a, b) {
+    for (i, c) in cc.iter().enumerate() {
+        if let Some(c) = *c {
             if best.is_none_or(|(_, bc)| c > bc) {
-                best = Some((lag, c));
+                best = Some((i as i32 * SIG_LAG_STEP - SIG_MAX_LAG, c));
             }
         }
     }
-    best.map_or(Signature::Flat, |(lag, corr)| Signature::Cycle { lag, corr })
+    best.map_or(Signature::Flat, |(lag, corr)| Signature::Cycle { lag, corr, period: cc_period(&cc) })
 }
 
 /// Pearson correlation of two equal-length samples; `None` when either has zero variance.
@@ -675,8 +737,9 @@ fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
 /// The printable `ecosim stats --signature` line.
 pub fn signature_line(s: &Signature) -> String {
     match s {
-        Signature::Cycle { lag, corr } => format!(
-            "signature: pp_lag {lag} pp_corr {corr:.4} (grazers(t) vs hunters(t+lag), ticks {WINDOW_START}-20000, lags -{SIG_MAX_LAG}..{SIG_MAX_LAG} step {SIG_LAG_STEP})"
+        Signature::Cycle { lag, corr, period } => format!(
+            "signature: pp_lag {lag} pp_corr {corr:.4} pp_period {} (grazers(t) vs hunters(t+lag), detrended by a {SIG_DETREND}-tick moving average, ticks {SIG_START}-{SIG_END}, lags -{SIG_MAX_LAG}..{SIG_MAX_LAG} step {SIG_LAG_STEP})",
+            period.map_or("undefined".into(), |p| p.to_string())
         ),
         Signature::Extinct(e) => {
             format!("signature: undefined, {} extinct at tick {} (dominant cause: {})", e.species, e.tick, e.dominant_name())
@@ -786,25 +849,28 @@ mod tests {
             .collect()
     }
 
-    /// A seasonal-looking grazer series and hunters that copy it `delay` ticks later.
+    /// A seasonal-looking grazer series and hunters that copy it `delay` ticks later. Four
+    /// incommensurate cycles, so no lag other than `delay` lines the two up across the ±8000 range.
     fn delayed_copy(delay: i32, phase: f64) -> Vec<StatsRow> {
         let g = |t: i32| {
-            let t = t as f64;
-            (400.0 + 150.0 * libm::sin(t / 5000.0 * std::f64::consts::TAU + phase) + 60.0 * libm::sin(t / 7300.0 * 6.3))
-                as u32
+            let w = |p: f64| t as f64 / p * std::f64::consts::TAU;
+            let s = 150.0 * libm::sin(w(5000.0) + phase) + 80.0 * libm::sin(w(3700.0) + 1.0);
+            (400.0 + s + 60.0 * libm::sin(w(2100.0) + 2.0) + 40.0 * libm::sin(w(1300.0))) as u32
         };
-        let mut rows = rows_from(|t| g(t as i32), 20_001);
+        let mut rows = rows_from(|t| g(t as i32), 40_001);
         rows.iter_mut().enumerate().for_each(|(t, r)| r.hunters = g(t as i32 - delay) / 10 + 1);
         rows
     }
 
     /// The signature finds a known delay: hunters that are the grazer series `delay` ticks later
-    /// (delay a multiple of 50 within ±2000) give pp_lag = delay and pp_corr ≈ 1.
+    /// (delay a multiple of 50 within ±8000) give pp_lag = delay and pp_corr near 1.
     fn signature_finds_the_delay(delay: i32, phase: f64) -> Result<(), TestCaseError> {
         match signature(&delayed_copy(delay, phase)) {
-            Signature::Cycle { lag, corr } => {
+            Signature::Cycle { lag, corr, .. } => {
                 prop_assert_eq!(lag, delay);
-                prop_assert!(corr > 0.999, "corr {}", corr);
+                // Not 1: the moving average is cut short over the run's last 2000 ticks, which
+                // detrends the two series differently there; the larger the delay, the more it shows.
+                prop_assert!(corr > 0.97, "corr {}", corr);
             }
             other => prop_assert!(false, "{:?}", other),
         }
@@ -815,7 +881,7 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(crate::cases(24)))]
 
         #[test]
-        fn prop_signature_finds_the_delay(k in -40i32..=40, phase in 0.0f64..std::f64::consts::TAU) {
+        fn prop_signature_finds_the_delay(k in -160i32..=160, phase in 0.0f64..std::f64::consts::TAU) {
             signature_finds_the_delay(k * SIG_LAG_STEP, phase)?;
         }
     }
@@ -826,7 +892,10 @@ mod tests {
             signature_finds_the_delay(d, 0.0).unwrap();
         }
         let line = signature_line(&signature(&delayed_copy(350, 0.0)));
-        assert!(line.starts_with("signature: pp_lag 350 pp_corr 0.99") && line.ends_with("step 50)"), "{line}");
+        assert!(
+            line.starts_with("signature: pp_lag 350 pp_corr 0.99") && line.ends_with("-8000..8000 step 50)"),
+            "{line}"
+        );
         // Hunters at 0 inside the window: undefined, reported with the extinction's cause.
         let mut rows = delayed_copy(350, 0.0);
         for r in &mut rows[12_000..] {
@@ -836,16 +905,73 @@ mod tests {
         let s = signature(&rows);
         assert!(matches!(&s, Signature::Extinct(e) if e.species == "hunters" && e.tick == 12_000), "{s:?}");
         assert_eq!(signature_line(&s), "signature: undefined, hunters extinct at tick 12000 (dominant cause: starved)");
-        // An extinction before tick 2000 leaves 0s in the window too; trees reaching 0 do not count.
+        // An extinction before tick 5000 leaves 0s in the window too; trees reaching 0 do not count.
         let mut rows = delayed_copy(0, 0.0);
         rows.iter_mut().for_each(|r| r.trees = 0);
         assert!(matches!(signature(&rows), Signature::Cycle { lag: 0, .. }));
-        rows[1500..].iter_mut().for_each(|r| r.grazers = 0);
-        assert!(matches!(signature(&rows), Signature::Extinct(e) if e.species == "grazers" && e.tick == 1500));
+        rows[4500..].iter_mut().for_each(|r| r.grazers = 0);
+        assert!(matches!(signature(&rows), Signature::Extinct(e) if e.species == "grazers" && e.tick == 4500));
+        // An extinction that ends before the window does not count: the window never sees a 0.
+        let mut rows = delayed_copy(0, 0.0);
+        rows[3000].hunters = 0;
+        assert!(matches!(signature(&rows), Signature::Cycle { lag: 0, .. }));
         // Constant hunters (the default of `rows_from`) have no variance at any lag.
         let flat = rows_from(|t| 100 + (t % 7) as u32, 20_001);
         assert_eq!(signature(&flat), Signature::Flat);
         assert!(signature_line(&Signature::Flat).starts_with("signature: undefined"));
+    }
+
+    /// Hunters trailing a pure `period`-tick grazer cycle by `delay`: `period` apart, the lobes of the
+    /// cross-correlation repeat, so pp_period is the cycle's period, whatever the delay and phase, to
+    /// within two lag steps (the series are whole numbers, which puts a little noise on flat lobe tops).
+    fn period_of_a_sine(period: f64, delay: i32, phase: f64) -> Option<i32> {
+        let g = |t: i32| 400.0 + 150.0 * libm::sin(t as f64 / period * std::f64::consts::TAU + phase);
+        let mut rows = rows_from(|t| g(t as i32) as u32, 40_001);
+        rows.iter_mut().enumerate().for_each(|(t, r)| r.hunters = (g(t as i32 - delay) / 10.0) as u32 + 1);
+        match signature(&rows) {
+            Signature::Cycle { period, .. } => period,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn near(got: Option<i32>, want: i32) -> bool {
+        got.is_some_and(|g| (g - want).abs() <= 2 * SIG_LAG_STEP)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(12)))]
+
+        #[test]
+        fn prop_signature_period_is_the_cycle(p in 60i32..=110, k in -40i32..=40, phase in 0.0f64..std::f64::consts::TAU) {
+            let got = period_of_a_sine((p * SIG_LAG_STEP) as f64, k * SIG_LAG_STEP, phase);
+            prop_assert!(near(got, p * SIG_LAG_STEP), "{:?} for {}", got, p * SIG_LAG_STEP);
+        }
+    }
+
+    /// Wiggles on one lobe are not peaks, lobes cut by the lag range are left out, and one lobe
+    /// alone has no period.
+    #[test]
+    fn signature_period_regression_lobes_edges_and_one_peak() {
+        assert!(near(period_of_a_sine(5000.0, 0, 0.0), 5000));
+        assert!(near(period_of_a_sine(3000.0, 1000, 1.0), 3000));
+        let n = (2 * SIG_MAX_LAG / SIG_LAG_STEP + 1) as usize;
+        let lag = |i: usize| (i as i32 * SIG_LAG_STEP - SIG_MAX_LAG) as f64;
+        // Two lobes 4000 apart, the one at 0 with a notch that makes two local maxima on it.
+        let cc: Vec<Option<f64>> = (0..n)
+            .map(|i| Some(libm::cos(lag(i) / 4000.0 * std::f64::consts::TAU) - if lag(i) == 100.0 { 0.2 } else { 0.0 }))
+            .collect();
+        assert_eq!(cc_period(&cc), Some(4000));
+        // A lobe running into the edge of the range is not a peak.
+        let mut edge = vec![Some(-0.1); n];
+        (0..10).for_each(|i| edge[i] = Some(0.5));
+        edge[n / 2] = Some(0.9);
+        assert_eq!(cc_period(&edge), None);
+        edge[n / 2 + 40] = Some(0.2);
+        assert_eq!(cc_period(&edge), Some(2000));
+        assert_eq!(
+            signature_line(&Signature::Cycle { lag: 50, corr: 0.5, period: None }).split(" (").next(),
+            Some("signature: pp_lag 50 pp_corr 0.5000 pp_period undefined")
+        );
     }
 
     #[test]

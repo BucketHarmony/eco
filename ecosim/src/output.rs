@@ -441,6 +441,10 @@ fn fork_params(parent: &Path, meta: &serde_json::Value, overrides: &[String]) ->
         return Err(format!("{}: meta.json params don't read back exactly", parent.display()));
     }
     let mut root = toml::Value::try_from(&base).map_err(|e| format!("params: {e}"))?;
+    // `hunter.handling_ticks` is left out of `meta.json` at 0; put it back so a fork can switch it on.
+    if let Some(h) = root.get_mut("hunter").and_then(toml::Value::as_table_mut) {
+        h.entry("handling_ticks").or_insert(toml::Value::Integer(i64::from(base.hunter.handling_ticks)));
+    }
     for o in overrides {
         crate::params::apply_override(&mut root, o)?;
     }
@@ -652,6 +656,26 @@ mod tests {
         // A fork of a fork: the chain continues from the child's own snapshots.
         let grandchild = scratch_dir();
         fork(&ForkSpec { parent: &child, at: 400, overrides: &[], ticks: 200 }, &grandchild).unwrap();
+        assert_eq!(diff_runs(&child, &grandchild).unwrap(), vec!["differs: meta.json".to_string()]);
+        for d in [parent, child, grandchild] {
+            fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    /// Handling time, left out of `meta.json` at 0, can be switched on by a fork: the fork records
+    /// it, its `state.bin` files from the fork tick on (written with the fork's params) are version
+    /// 4, and a fork of that fork continues exactly.
+    #[test]
+    fn fork_can_switch_handling_on() {
+        let (parent, child, grandchild) = (scratch_dir(), scratch_dir(), scratch_dir());
+        run(Params::load_default(), 3, 400, 100, &[], &parent).unwrap();
+        assert!(meta(&parent)["params"]["hunter"].get("handling_ticks").is_none());
+        let set = ["hunter.handling_ticks=60".to_string()];
+        fork(&ForkSpec { parent: &parent, at: 100, overrides: &set, ticks: 300 }, &child).unwrap();
+        assert_eq!(meta(&child)["params"]["hunter"]["handling_ticks"], 60);
+        let version = |d: &Path, t: &str| fs::read(d.join(t).join("state.bin")).unwrap()[8];
+        assert_eq!((version(&parent, "snap_000100"), version(&child, "snap_000100")), (3, 4));
+        fork(&ForkSpec { parent: &child, at: 200, overrides: &[], ticks: 200 }, &grandchild).unwrap();
         assert_eq!(diff_runs(&child, &grandchild).unwrap(), vec!["differs: meta.json".to_string()]);
         for d in [parent, child, grandchild] {
             fs::remove_dir_all(d).unwrap();

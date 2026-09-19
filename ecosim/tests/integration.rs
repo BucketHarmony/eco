@@ -336,6 +336,31 @@ fn forced_hunter_starvation_by_hunt_cost_runs_to_the_end() {
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
 
+/// Forced extinction by handling time: at `hunter.handling_ticks=1000000` a hunter's first kill is
+/// its last, so the hunters starve out on seed 1 (tick 2582) while grazers boom. The run continues to
+/// 20000 ticks with valid snapshots, the tick-1000 snapshot shows hunters in state
+/// `handling`, `ecosim stats` and the signature name `starved`, and the last snapshot restores.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run that reaches no line the unit tests miss; runs in `cargo test`")]
+fn forced_hunter_starvation_by_handling_time_runs_to_the_end() {
+    let dir = tmp("forced_handling_extinction");
+    let set = ["hunter.handling_ticks=1000000".to_string()];
+    let last = run_with(&dir, &set);
+    assert_eq!(last.hunters, 0, "hunters extinct by the end");
+    assert!(last.grazers > 0);
+    let text = assert_valid_run(&dir);
+    let line = text.lines().find(|l| l.starts_with("extinction: hunters at tick")).unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("dominant cause: starved"), "{line}");
+    let entities = fs::read_to_string(dir.join("snap_001000").join("entities.json")).unwrap();
+    assert!(entities.contains("\"state\":\"handling\""), "no hunter handling at tick 1000");
+    let out = Command::new(env!("CARGO_BIN_EXE_ecosim")).args(["stats", "--signature"]).arg(&dir).output().unwrap();
+    let sig = String::from_utf8(out.stdout).unwrap();
+    assert!(sig.starts_with("signature: undefined, hunters extinct at tick ") && sig.contains("starved"), "{sig}");
+    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
+    assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
+}
+
 /// Forced extinction under heredity: at `grazer.repro_energy=400` no grazer can ever breed (energy
 /// tops out at 100, and the clamp keeps `repro_threshold` at 100 or more), so with mutation 0.2 the
 /// grazers are eaten out on seed 1 (tick 2285) and the hunters starve after them. The run continues

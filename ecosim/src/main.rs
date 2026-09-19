@@ -63,8 +63,12 @@ enum Cmd {
     /// Print min/max/mean per series column and the first extinction tick.
     Stats {
         run_dir: PathBuf,
-        /// Print only the predator–prey signature: the lag of the largest hunter–grazer
-        /// cross-correlation over ticks 2000–20000, and its value.
+        /// Print only the predator–prey signature. Both series are detrended by a centred
+        /// 4000-tick moving average; pp_lag is the lag in -8000..8000 (step 50) of the largest
+        /// correlation of grazers(t) with hunters(t+lag) over ticks 5000-60000 (or the run's end),
+        /// and pp_corr its value. pp_period is the lag distance from the positive lobe peak nearest
+        /// lag 0 to the lobe peak nearest it (a lobe is a run of lags with correlation above 0;
+        /// lobes cut by the lag range don't count); undefined with fewer than two lobes.
         #[arg(long)]
         signature: bool,
     },

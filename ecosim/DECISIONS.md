@@ -663,3 +663,52 @@ The shot's code is in, but its defaults are not: **no kill_energy × hunt_cost c
 - **Temporary ecoview pin.** The renderer rejects format 3, so the ecoview CI job's s42 run is pinned to `--format-version 2` in `.github/workflows/ci.yml` only. **Shot 16 removes that pin** when the renderer learns version 3.
 - **No v3 mini fixture.** `sync-data.sh` copies the highest-versioned mini fixture, so committing `fixtures/s42-mini-v3` now would break ecoview. The shot that teaches the renderer version 3 can add it.
 - **Manifest.** `tests/data/s42-manifest.sha256` was regenerated for `events.csv` only: one line was added and every existing hash is unchanged. `manifest_regeneration_for_the_event_log_changed_no_existing_line` asserts this. The older manifests are compared with the `events.csv` line dropped.
+
+## Food-limited hunters, second attempt (shot 14a-rev, Blocked)
+
+The shot's code is in, but its defaults are not. No cell meets the acceptance, so `hunter.handling_ticks` is 0 and every other default is unchanged. Default runs are byte-identical to the manifest shot 14b left, `meta.json` included. The evidence is in `sweeps/shot14a-rev/FINDINGS.md`. The block is in `overnight/shots/14a-rev.BLOCKED.md`, outside the repo.
+
+**Handling time (`hunter.handling_ticks`)**
+- **When it starts.** A successful attack sets the hunter's `handling` counter to `handling_ticks`.
+- **What happens while it runs.** Each of the next `handling_ticks` updates is in state `Handling`, which is new and is written to `entities.json` as `"handling"`. In that state the hunter makes no attack, does not move and pays the resting cost (`energy_cost · energy_cost_mult`, ×1). The counter then drops by one.
+- **After it ends.** The update after the last Handling one is a normal update. Kills are therefore at least `handling_ticks + 1` updates apart. Over any W ticks a hunter makes at most W/`handling_ticks` + 1 kills.
+- **What handling does not stop.**
+  - **Fire.** A handling hunter does not flee fire. It stays put and takes fire damage, so the duration is exact and a fire can't cut handling short.
+  - **Displacement.** It can't be displaced, since only grazers are ever displaced.
+  - **Death and birth.** It can still starve, burn, die of old age or of crowding, and give birth. Those checks come after the behaviour, as before.
+- **No RNG.** Handling reads and writes no RNG. At `handling_ticks` 0 the counter is never set, so the update is the pre-shot one, bit for bit.
+- **`meta.json`.** `handling_ticks` is left out of `meta.json` at 0 (`skip_serializing_if`), and a missing key reads back as 0. So default runs keep their exact `meta.json`, and the fixtures and ecoview's copies don't change.
+  - `fork` puts the key back into the parent's params before applying overrides, so `fork --set hunter.handling_ticks=N` works on a parent that ran without handling.
+  - The `--set` round-trip test treats a key that is absent at its off value as absent, not null.
+- **`state.bin` version 4** appends a u32 handling counter per hunter, in `Vec` order, and adds animal state 6 (Handling).
+  - It is written only when handling is in use: `handling_ticks` > 0, or a hunter still has handling left, which can happen after a fork sets it back to 0.
+  - Otherwise the file is version 3, byte for byte what the ecosim before this shot wrote. Version 3 decodes with every hunter's handling at 0.
+  - So the manifest, the golden check output and the fixtures are unchanged, and nothing was regenerated.
+- **`disease.hunter_rate` stays 0.001, as in 14a.** Change 4 ("stays 0") assumed 14a had moved it. It hadn't, and at 0 no cell keeps the four seeds alive to 60000 ticks.
+
+**The signature, redefined** (`check::signature`, `ecosim stats --signature`)
+- **The new definition is the default. The old one is gone, with no flag to bring it back.** 14a's committed FINDINGS tables keep the old definition (±2000, ticks 2000–20000, not detrended), and their text says so.
+- **Detrending.** Each series has its centred moving average over t − 2000..=t + 2000 subtracted. The average is computed over the whole run, and near the ends it uses the ticks that exist. The right edge of a 60000-tick run is therefore detrended with a shorter average.
+- **Window and lags.** The window is ticks 5000–60000, or to the run's end. Lags run over ±8000 in steps of 50. The lag convention, the per-lag overlap sample and the tie rule (most negative lag) are 14a's.
+- **Extinction.** Grazers or hunters at 0 inside the window make the signature undefined, as before. The window now starts at 5000, so a species at 0 only before tick 5000 no longer counts.
+- **pp_period.**
+  - **Lobes and peaks.** A lobe is a maximal run of lags with correlation above 0, and its peak is its largest value (the first one on a tie). Lobes that touch either end of the lag range are left out, because their true peak may lie beyond it.
+  - **The value.** pp_period is the lag distance from the peak nearest lag 0 (ties go to the positive side) to the peak nearest that one. With fewer than two lobes it is undefined.
+  - **Why lobes.** The prompt suggests consecutive local maxima. On real runs, those include noise wiggles on a single lobe, which gave periods of 250–2000. Lobes count each positive hump once.
+- **Sweep column.** `sweep.csv` appends `pp_period` after `pp_undefined`, and it is empty when undefined. `cycle_ratio.py` skips it.
+
+**Tests**
+- **Handling property.** `prop_handling_bounds_kills` has the sibling `handling_regression_one_tick_longer_than_the_run_and_off`. It drives three always-hungry hunters in a herd of 300 through `update_hunter` and checks every update:
+  - A hunter with handling left is in Handling, kills nothing, stays put, loses exactly the resting cost (so it made no attack) and counts down by one.
+  - Kills happen only in state Hunt, and each one sets handling to `handling_ticks`.
+  - Every kill is followed by exactly `handling_ticks` Handling updates.
+  - Kill ticks are more than `handling_ticks` apart, and every window respects the W/h + 1 bound.
+  - The sibling pins handling 1 (a kill every other update while prey is in reach), a handling time longer than the run (one kill), and handling 0 (a kill on every update, never Handling).
+- **Signature.**
+  - `prop_signature_finds_the_delay` now covers ±8000. Its test series has four incommensurate cycles, because with two, a delay could alias onto a lag one period away. The correlation bound is 0.97, since the shortened moving average at the run's end detrends the two series slightly differently.
+  - `prop_signature_period_is_the_cycle`, with the sibling `signature_period_regression_lobes_edges_and_one_peak`, checks three things. A pure cycle gives its period within two lag steps, which absorbs the integer rounding of counts. A notch on one lobe is not a second peak. An edge lobe and a single lobe give no period.
+- **Restore.** `restore_regression_mid_handling` restores a sim while hunters are handling, and it must step identically for 500 ticks. It also checks that the file is version 4 only when handling is on. `fork_can_switch_handling_on` checks the fork path.
+- **Identity.** `old_hunting_economics_via_set_reproduce_the_shot_14_manifest` now also sets `hunter.handling_ticks=0`. It compares the run with `s42-manifest.sha256` (14b's manifest, with `events.csv`) and with 14a's `s42-manifest-preshot14a.sha256`. Both match.
+- **Forced extinction.** `forced_hunter_starvation_by_handling_time_runs_to_the_end` sets `handling_ticks=1000000`, so a hunter's first kill is its last. On seed 1 the hunters starve out at tick 2582.
+  - The run reaches 20000 ticks with valid snapshots, and the tick-1000 snapshot has hunters in `handling`.
+  - `stats` and the signature both name `starved`, and the last snapshot restores.

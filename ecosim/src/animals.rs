@@ -33,6 +33,8 @@ pub enum State {
     Rest,
     /// Hunter attacking prey within the attack radius.
     Hunt,
+    /// Hunter handling a kill: stays put, makes no attack, pays the resting cost.
+    Handling,
 }
 
 /// Why an animal died. The discriminant indexes the per-tick death counts (`Sim::deaths`).
@@ -86,6 +88,8 @@ pub struct Animal {
     pub alive: bool,
     /// Heritable traits, used in place of the species parameters they name.
     pub traits: Traits,
+    /// Hunter only: updates left in state Handling after a kill (0 when not handling).
+    pub handling: u32,
 }
 
 /// The 8 neighbour offsets, in a fixed order so random picks are deterministic.
@@ -102,7 +106,19 @@ impl Animal {
         cooldown: u32,
         traits: Traits,
     ) -> Animal {
-        Animal { id, kind, x: x as f32, y: y as f32, energy, age, cooldown, state: State::Wander, alive: true, traits }
+        Animal {
+            id,
+            kind,
+            x: x as f32,
+            y: y as f32,
+            energy,
+            age,
+            cooldown,
+            state: State::Wander,
+            alive: true,
+            traits,
+            handling: 0,
+        }
     }
 
     /// The column it stands on, as signed coordinates.
@@ -490,15 +506,16 @@ impl Sim {
     }
 
     /// One attack by hunter `h` on grazer `j` (stability rules 2 and 3). Every attempt costs
-    /// `hunt_cost`: a kill leaves `min(energy + kill_energy − hunt_cost, 100)`, a miss
-    /// `energy − hunt_cost − fail_cost` and displaces the grazer.
+    /// `hunt_cost`: a kill leaves `min(energy + kill_energy − hunt_cost, 100)` and starts
+    /// `handling_ticks` of handling, a miss `energy − hunt_cost − fail_cost` and displaces the grazer.
     pub(crate) fn attack(&mut self, h: usize, j: usize) {
         let hp = self.params.hunter.clone();
         let p = attack_success(hp.kill_prob, self.patches[self.grazers[j].patch()].shrub, hp.refugium_k);
         if self.rng.gen_bool(p) {
             self.kill_grazer(j, Cause::Eaten);
-            let e = &mut self.hunters[h].energy;
-            *e = (*e + hp.kill_energy - hp.hunt_cost).min(100.0);
+            let h = &mut self.hunters[h];
+            h.energy = (h.energy + hp.kill_energy - hp.hunt_cost).min(100.0);
+            h.handling = hp.handling_ticks;
         } else {
             self.hunters[h].energy = self.hunters[h].energy - hp.hunt_cost - hp.fail_cost;
             let (hx, hy) = self.hunters[h].col();
@@ -519,8 +536,10 @@ impl Sim {
         }
     }
 
-    /// One hunter update: rest when satiated, else attack, approach or wander; then energy, death
-    /// (starved, burnt, old age, then crowded when `crowding` is on) and birth.
+    /// One hunter update: handle a kill while `handling` is left (no move, even out of a fire), else
+    /// flee fire, rest when satiated, or attack, approach or wander; then energy, death (starved,
+    /// burnt, old age, then crowded when `crowding` is on) and birth. Handling reads and writes no
+    /// RNG, so at `handling_ticks` 0 the update is the pre-handling one.
     pub fn update_hunter(&mut self, i: usize, crowding: bool, mutate: bool) {
         let hp = self.params.hunter.clone();
         let p = self.hunters[i].patch();
@@ -534,7 +553,10 @@ impl Sim {
         let (x, y) = self.hunters[i].col();
         let mut step = None;
         let state;
-        if burning {
+        if self.hunters[i].handling > 0 {
+            state = State::Handling;
+            self.hunters[i].handling -= 1;
+        } else if burning {
             state = State::Flee;
             step = self.flee_fire(x, y, p);
         } else if self.hunters[i].energy > hp.satiation {
@@ -1413,5 +1435,95 @@ mod tests {
         assert_eq!(sim.stats().deaths, sim.deaths);
         sim.step();
         assert_eq!(sim.deaths, [[0; CAUSES]; 2], "counts are per tick");
+    }
+
+    /// Kill ticks per hunter from `ticks` hunter updates (grazers stand still) of three always-hungry
+    /// hunters in a herd of 300, at `handling_ticks` = `h`. Checks every update on the way: a hunter
+    /// with handling left is in state Handling, kills nothing, stays put, pays exactly the resting
+    /// cost (so it makes no attack, which would cost `hunt_cost`) and counts down by one; a kill
+    /// happens only in state Hunt and sets handling to `h`; and every kill is followed by exactly `h`
+    /// Handling updates (unless the run ends first).
+    fn handling_run(h: u32, kill_prob: f64, seed: u64, ticks: u32) -> Result<Vec<Vec<u32>>, TestCaseError> {
+        let herd: Vec<(usize, usize)> = (0..300).map(|i| (20 + i % 20, 20 + i / 20)).collect();
+        let mut sim = meadow(&herd, &[]);
+        sim.rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let hp = &mut sim.params.hunter;
+        (hp.handling_ticks, hp.kill_prob, hp.satiation, hp.repro_energy, hp.hunt_cost) =
+            (h, kill_prob, 1000.0, 1000.0, 0.5);
+        for at in [(25, 25), (30, 28), (35, 31)] {
+            add_hunter(&mut sim, at, 50.0);
+        }
+        let mut kills = vec![Vec::new(); 3];
+        let mut handled: [Option<u32>; 3] = [None; 3];
+        for t in 0..ticks {
+            sim.rebuild_hunter_grid();
+            for (i, k) in kills.iter_mut().enumerate() {
+                let b = sim.hunters[i].clone();
+                let eaten = sim.deaths[0][Cause::Eaten as usize];
+                sim.update_hunter(i, false, false);
+                let a = &sim.hunters[i];
+                let killed = sim.deaths[0][Cause::Eaten as usize] > eaten;
+                if a.state == State::Handling {
+                    handled[i] = handled[i].map(|n| n + 1);
+                } else if let Some(n) = handled[i].take() {
+                    prop_assert_eq!(n, h, "handling lasted {} updates", n);
+                }
+                if b.handling > 0 {
+                    prop_assert_eq!(a.state, State::Handling);
+                    prop_assert!(!killed && (a.x, a.y) == (b.x, b.y), "a handling hunter attacked or moved");
+                    prop_assert_eq!(a.energy, b.energy - sim.params.hunter.energy_cost * b.traits.energy_cost_mult);
+                    prop_assert_eq!(a.handling, b.handling - 1);
+                } else if killed {
+                    prop_assert_eq!((a.state, a.handling), (State::Hunt, h));
+                    k.push(t);
+                    handled[i] = Some(0);
+                } else {
+                    prop_assert!(a.state != State::Handling && a.handling == 0);
+                }
+            }
+        }
+        prop_assert!(sim.hunters.iter().all(|a| a.alive), "the test needs all three alive");
+        Ok(kills)
+    }
+
+    /// Handling lasts exactly `h` updates (checked in `handling_run`), so consecutive kills are at
+    /// least h + 1 apart, and over any window of W ticks a hunter makes at most W/h + 1 kills.
+    fn handling_bounds_kills(h: u32, kill_prob: f64, seed: u64) -> Result<(), TestCaseError> {
+        for k in handling_run(h, kill_prob, seed, 400)? {
+            for (i, &a) in k.iter().enumerate() {
+                for (j, &b) in k.iter().enumerate().skip(i + 1) {
+                    let w = b - a + 1;
+                    prop_assert!((j - i + 1) as f64 <= w as f64 / h as f64 + 1.0, "{} kills in {} ticks", j - i + 1, w);
+                }
+                if let Some(&next) = k.get(i + 1) {
+                    prop_assert!(next - a > h, "kills at {} and {}", a, next);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(16)))]
+
+        #[test]
+        fn prop_handling_bounds_kills(h in 1u32..=120, kill_prob in prop_oneof![Just(1.0), 0.05f64..1.0], seed in any::<u64>()) {
+            handling_bounds_kills(h, kill_prob, seed)?;
+        }
+    }
+
+    /// Handling 1 at kill_prob 1: a kill every other update while prey stays in reach. A handling time longer than the
+    /// run: one kill each. Handling 0 is the pre-handling rule: a kill on every update prey is in reach, never Handling.
+    #[test]
+    fn handling_regression_one_tick_longer_than_the_run_and_off() {
+        handling_bounds_kills(1, 1.0, 5).unwrap();
+        let every_other = handling_run(1, 1.0, 5, 40).unwrap();
+        let want: Vec<u32> = (0..20).step_by(2).collect();
+        assert!(every_other.iter().any(|k| k[..10] == want[..]), "{every_other:?}");
+        let once = handling_run(1000, 1.0, 5, 400).unwrap();
+        assert!(once.iter().all(|k| k.len() == 1), "{once:?}");
+        let off = handling_run(0, 1.0, 5, 40).unwrap();
+        let want: Vec<u32> = (0..10).collect();
+        assert!(off.iter().any(|k| k[..10] == want[..]), "{off:?}");
     }
 }

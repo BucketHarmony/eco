@@ -162,18 +162,23 @@ fn s42_event_log_matches_the_series_and_stays_small() {
     }
 }
 
-/// Identity case for food-limited hunters: the pre-shot hunting economics set explicitly through
-/// `--set` (hunter crowding 0.001, kill_energy 40, hunt_cost 0) reproduce the shot-14 manifest
-/// byte for byte. `hunt_cost` 0 charges nothing on a kill and leaves a miss at `fail_cost` alone.
+/// Identity case for food-limited hunters (shots 14a and 14a-rev): the pre-shot hunting economics
+/// set explicitly through `--set` (hunter crowding 0.001, kill_energy 40, hunt_cost 0, handling_ticks
+/// 0) reproduce the shot-14 manifest byte for byte, and the manifest as shot 14b left it (events.csv
+/// included). `hunt_cost` 0 charges nothing on a kill and leaves a miss at `fail_cost` alone;
+/// handling 0 never enters Handling and writes the version-3 `state.bin`.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn old_hunting_economics_via_set_reproduce_the_shot_14_manifest() {
     let dir = tmp("s42_old_hunting");
     let set: Vec<String> =
-        ["disease.hunter_rate=0.001", "hunter.kill_energy=40", "hunter.hunt_cost=0"].map(String::from).to_vec();
+        ["disease.hunter_rate=0.001", "hunter.kill_energy=40", "hunter.hunt_cost=0", "hunter.handling_ticks=0"]
+            .map(String::from)
+            .to_vec();
     run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
     let got = hash_run(&dir, |_, b| b);
     assert_eq!(got.len(), 2 + 201 * 8);
+    assert_same_manifest(&read_manifest("s42-manifest.sha256"), &got);
     assert_same_manifest(&read_manifest("s42-manifest-preshot14a.sha256"), &without_events(got));
 }
 
@@ -259,7 +264,7 @@ fn sweep_cells_equal_standalone_runs() {
     assert!(lines[0].starts_with("hunter.kill_prob,seed,run_length_pass,run_length_value,run_length_margin,"));
     assert!(lines[0].ends_with(
         ",first_extinction_tick,first_extinction_species,first_extinction_dominant_cause,grazer_peaks,\
-         hunter_extinction_tick,hunter_immigrants,pp_lag,pp_corr,pp_undefined"
+         hunter_extinction_tick,hunter_immigrants,pp_lag,pp_corr,pp_undefined,pp_period"
     ));
     assert!(!lines[0].contains("runtime"));
     assert!(lines[1].starts_with("0.2,3,false,500,"));

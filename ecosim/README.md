@@ -17,7 +17,7 @@ ecosim run --seed 1 --ticks 20000 --out runs/s1 --snapshot-every 100 [--set key=
 ecosim check runs/s1                         # invariants; exit 1 on any failure
 ecosim check --long runs/l1                  # long-run invariants for runs of >= 60000 ticks
 ecosim stats runs/s1                         # column ranges; each extinction with its death causes
-ecosim stats --signature runs/s1             # predator–prey signature: lag and value of the max hunter–grazer correlation
+ecosim stats --signature runs/s1             # predator–prey signature: lag, value and period of the detrended hunter–grazer cross-correlation
 ecosim diff runs/a runs/b                    # byte-compare two run directories
 ecosim fork runs/s1 --at 10000 --ticks 10000 --out runs/f1 [--set key=value ...]   # continue from a snapshot
 ecosim sweep --baseline --seeds 1,2,3        # margin table; see `ecosim sweep --help`

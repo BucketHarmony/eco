@@ -66,6 +66,10 @@ fn ci_workflow_runs_the_required_steps_in_order() {
         "ci.yml: no tick bench step"
     );
     assert!(yml.contains("path: ecosim/ci-runs/bench-tick.json"), "ci.yml: no upload of the bench numbers");
+    let base = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/baseline.json")).unwrap();
+    for world in ["\"64x64\"", "\"256x64\"", "GitHub CI run"] {
+        assert!(base.contains(world), "benches/baseline.json: no {world}");
+    }
 }
 
 #[test]

@@ -1,0 +1,15 @@
+{
+  "source": "GitHub CI run 35468533390, job ecosim-bench, commit 7f24a599119f3c25aed323496041996a83e19881 (artifact bench-tick)",
+  "seed": 42,
+  "ticks": 2000,
+  "worlds": {
+    "64x64": {
+      "runs": 13,
+      "ticks_per_second": 2826.752122021617
+    },
+    "256x64": {
+      "runs": 11,
+      "ticks_per_second": 857.8138663540733
+    }
+  }
+}

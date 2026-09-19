@@ -112,4 +112,6 @@ Together, the byte-identical changes should give roughly 1.6–2× on the strip.
 
 The GitHub CI job `ecosim-bench` runs it and fails when a world is more than 20% slower than `benches/baseline.json`. The baseline holds that job's numbers from a CI run, not this machine's; `DECISIONS.md` (shot 15a) says how it was taken.
 
+The baseline is 2827 ticks/s at 64×64 and 858 at 256×64 (CI run 35468533390). The runner is steady: criterion's interval on 13 samples of 64×64 was 705–708 ms. The bench step took 37 s and the whole job 1 min 36 s, well under the 3-minute limit.
+
 For reference, pinned runs on this machine give about 4000 ticks/s at 64×64 and 1200 at 256×64. Unpinned, a long bench run lands on an E-core and reads 1.5–3× lower, so a local `just bench` compared against the CI baseline doesn't mean much.

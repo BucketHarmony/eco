@@ -238,14 +238,14 @@ Top on a field overlay is cheaper because canopies are not drawn there (see "Can
   - Local result: 0.000%.
   - **Mutation check.** Swapping the first two tiles in `frames.json`, so the check reads the fire tile, failed at 69.6%.
 
-**Measured on this machine** (win32-x64, SwiftShader):
+**Measured** locally (win32-x64, SwiftShader) and on CI:
 
-| Film | Frames | Size | Level | Time |
-| --- | --- | --- | --- | --- |
-| single view, material/iso (shot 13) | 201 | 960×832 | 3.1 | 25 s |
-| 2x2 tiled, scale 1 | 201 | 1920×1632 | 5.0 | 126 s |
-| 2x2 tiled, scale 2 (local only) | 201 | 3840×3264 | 6.0 | 305 s |
+| Film | Frames | Size | Level | Local | CI (ubuntu-latest, run 35443604889) |
+| --- | --- | --- | --- | --- | --- |
+| single view, material/iso (shot 13) | 201 | 960×832 | 3.1 | 25 s | 40.4 s |
+| 2x2 tiled, scale 1 | 201 | 1920×1632 | 5.0 | 126 s | 182.3 s (budget 360 s) |
+| 2x2 tiled, scale 2 | 201 | 3840×3264 | 6.0 | 305 s | not run |
 
 At scale 2, the tiles are rendered at 2× in WebGL, not upscaled. The iso tile's voxel edges and agents are sharp at 3840×3264. CI makes only the scale-1 tiled film, as the shot allows.
 
-**CI.** After the single-view film, `npm run film:tiled:check` runs and `film/s42-tiled.mp4` is uploaded as `ecoview-film-tiled`. The ecoview job timeout went from 12 to 18 minutes. Before this shot the job took 4.5 minutes, and the tiled film is allowed 6.
+**CI.** After the single-view film, `npm run film:tiled:check` runs and `film/s42-tiled.mp4` is uploaded as `ecoview-film-tiled`. The ecoview job timeout went from 12 to 18 minutes. Before this shot the job took 4.5 minutes, and the tiled film is allowed 6. In run 35443604889 the job took 6 min 56 s: the tiled determinism test took 20.4 s, the tiled film step 3 min 7 s, and the tiled check 0.000% against the fresh shots/02 (the references are Windows).

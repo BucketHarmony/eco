@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use ecosim::check::{self, check_run, check_run_long, diff_runs, read_series_for_stats, signature_line, stats_report};
+use ecosim::check::{self, check_run, check_run_long, diff_runs, signature_line, stats_report};
 use ecosim::output::{fork, run_with, ForkSpec, RunOptions, FORMAT_VERSION};
 use ecosim::sweep::{baseline, margin_table, parse_range, parse_values, sweep, ParamSpec, SweepConfig};
 use ecosim::Params;
@@ -63,14 +63,20 @@ enum Cmd {
     /// Print min/max/mean per series column and the first extinction tick.
     Stats {
         run_dir: PathBuf,
-        /// Print only the predator–prey signature. Both series are detrended by a centred
-        /// 4000-tick moving average; pp_lag is the lag in -8000..8000 (step 50) of the largest
-        /// correlation of grazers(t) with hunters(t+lag) over ticks 5000-60000 (or the run's end),
-        /// and pp_corr its value. pp_period is the lag distance from the positive lobe peak nearest
-        /// lag 0 to the lobe peak nearest it (a lobe is a run of lags with correlation above 0;
-        /// lobes cut by the lag range don't count); undefined with fewer than two lobes.
+        /// Print only the predator–prey signature. RUN_DIR may also be a bare series.csv-format
+        /// file (a sweep's cells/*.csv), which needs --year-len. Both series are detrended by a
+        /// centred 12000-tick moving average (t-6000..=t+6000, cut short at the run's ends), then
+        /// lose their mean by season phase (tick mod climate.year_len, over the whole run).
+        /// pp_lag is the lag in -8000..8000 (step 50) of the largest correlation of grazers(t) with
+        /// hunters(t+lag) over ticks 5000-60000 (or the run's end), and pp_corr its value.
+        /// pp_period is the lag of the first positive local maximum of the hunter series'
+        /// autocorrelation (same window) after it first falls below 0, lags 50..=20000 step 50;
+        /// undefined when there is none. pp_pass: pp_lag > 0, pp_lag < pp_period/2, pp_corr > 0.3.
         #[arg(long)]
         signature: bool,
+        /// Year length for --signature, instead of meta.json's year_len.
+        #[arg(long)]
+        year_len: Option<u32>,
     },
     /// Byte-compare two run directories (ignoring timing.json); exit 1 on any difference.
     Diff { a: PathBuf, b: PathBuf },
@@ -227,8 +233,8 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Cmd::Stats { run_dir, signature } => match if signature {
-            read_series_for_stats(&run_dir).map(|rows| vec![signature_line(&check::signature(&rows))])
+        Cmd::Stats { run_dir, signature, year_len } => match if signature {
+            check::signature_of(&run_dir, year_len).map(|s| vec![signature_line(&s)])
         } else {
             stats_report(&run_dir)
         } {

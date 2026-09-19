@@ -141,13 +141,14 @@ pub struct CellResult {
     pub hunter_extinction: Option<u32>,
     /// Hunters that immigrated over the run.
     pub hunter_immigrants: u32,
-    /// The predator–prey signature (`pp_lag`, `pp_corr`, `pp_period`), as `ecosim stats --signature` reports it.
+    /// The predator–prey signature (`pp_lag`, `pp_corr`, `pp_period`, `pp_pass`), as `ecosim stats --signature` reports it.
     pub signature: Signature,
 }
 
 /// Run one cell in memory (no snapshots) and evaluate it exactly as `ecosim check` would.
 pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) -> Result<CellResult, String> {
     let params = Params::from_toml_str_with(params_text, overrides)?;
+    let year_len = params.climate.year_len;
     let mut sim = Sim::new(params, seed);
     let mut mature = None;
     let rows = simulate(&mut sim, ticks, |s| {
@@ -169,7 +170,7 @@ pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) 
     let first_extinction_cause = ext.first().map(|e| e.dominant_name());
     let hunter_extinction = rows.iter().find(|r| r.hunters == 0).map(|r| r.tick);
     let hunter_immigrants = rows[last].hunter_immigrants;
-    let signature = signature(&rows);
+    let signature = signature(&rows, year_len);
     let report = evaluate(&Series { rows, mature_at_10000: mature.map(Ok), timing: Timing::Excluded })?;
     Ok(CellResult {
         csv,
@@ -322,7 +323,9 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
         let _ = write!(csv, ",{k}_pass,{k}_value,{k}_margin");
     }
     csv.push_str(",first_extinction_tick,first_extinction_species,first_extinction_dominant_cause");
-    csv.push_str(",grazer_peaks,hunter_extinction_tick,hunter_immigrants,pp_lag,pp_corr,pp_undefined,pp_period\n");
+    csv.push_str(
+        ",grazer_peaks,hunter_extinction_tick,hunter_immigrants,pp_lag,pp_corr,pp_undefined,pp_period,pp_pass\n",
+    );
     for ((cell, (id, _, _)), r) in cells.iter().zip(&jobs).zip(&results) {
         for (p, &i) in cfg.specs.iter().zip(&cell.idx) {
             let _ = write!(csv, "{},", p.values[i]);
@@ -347,7 +350,8 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
             Signature::Extinct(e) => format!(",,{} {},", e.species, e.dominant_name()),
             Signature::Flat => ",,flat,".into(),
         };
-        let _ = writeln!(csv, ",{ext},{species},{cause},{},{hext},{},{pp}", r.grazer_peaks, r.hunter_immigrants);
+        let pass = r.signature.pass();
+        let _ = writeln!(csv, ",{ext},{species},{cause},{},{hext},{},{pp},{pass}", r.grazer_peaks, r.hunter_immigrants);
         fs::write(out.join("cells").join(format!("{id}.csv")), &r.csv).map_err(|e| e.to_string())?;
     }
     fs::write(out.join("sweep.csv"), csv).map_err(|e| e.to_string())?;

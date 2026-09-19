@@ -264,7 +264,7 @@ fn sweep_cells_equal_standalone_runs() {
     assert!(lines[0].starts_with("hunter.kill_prob,seed,run_length_pass,run_length_value,run_length_margin,"));
     assert!(lines[0].ends_with(
         ",first_extinction_tick,first_extinction_species,first_extinction_dominant_cause,grazer_peaks,\
-         hunter_extinction_tick,hunter_immigrants,pp_lag,pp_corr,pp_undefined,pp_period"
+         hunter_extinction_tick,hunter_immigrants,pp_lag,pp_corr,pp_undefined,pp_period,pp_pass"
     ));
     assert!(!lines[0].contains("runtime"));
     assert!(lines[1].starts_with("0.2,3,false,500,"));

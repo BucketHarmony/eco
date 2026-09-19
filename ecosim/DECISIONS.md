@@ -712,3 +712,31 @@ The shot's code is in, but its defaults are not. No cell meets the acceptance, s
 - **Forced extinction.** `forced_hunter_starvation_by_handling_time_runs_to_the_end` sets `handling_ticks=1000000`, so a hunter's first kill is its last. On seed 1 the hunters starve out at tick 2582.
   - The run reaches 20000 ticks with valid snapshots, and the tick-1000 snapshot has hunters in `handling`.
   - `stats` and the signature both name `starved`, and the last snapshot restores.
+
+## Signature fix (shot 14c)
+
+14a-rev's signature detrended with a one-year (4000-tick) moving average. That cancelled the seasonal cycle out of the trend, left it in the detrended series, and made pp_period measure seasons (2050–4300). This shot replaces the definition. 14a-rev's is gone, with no flag to bring it back. No sim behaviour changes, so the manifest, golden files and fixtures are untouched. The re-score is `sweeps/shot14c/RESCORE.md`.
+
+**The signature** (`check::signature(rows, year_len)`, `ecosim stats --signature`)
+- **Detrending.** Each series has its centred moving average over t − 6000..=t + 6000 subtracted. The average is cut short at the run's ends, as before.
+- **Seasonal removal.** Each detrended series then has its mean at the same phase subtracted: phase is tick mod `climate.year_len`, and each phase's mean is taken over the whole run.
+  - The year length comes from the run's `meta.json` (`year_len`) for a run directory, and from `params.climate.year_len` in a sweep.
+  - A bare series file has no meta, so it needs `--year-len` (below).
+- **Lag and correlation.** These are unchanged: ticks 5000–60000, lags ±8000 in steps of 50, and ties go to the most negative lag.
+- **pp_period.** This is now the hunter series' own autocorrelation, not the cross-correlation. It is computed after seasonal removal, over the same window.
+  - **Lags.** The prompt's "1..20000 step 50" is read as 50, 100, …, 20000. Lag 0 is trivially 1, and one extra lag, 20050, is computed so that 20000 can be a maximum.
+  - **Local maximum.** A local maximum is strictly above the lag before it and at least the lag after it, so a flat top counts once, at its first lag.
+  - **The value.** pp_period is the first positive local maximum after the first negative value. When there is none, or the series is too short, pp_period is undefined and the run fails.
+- **pp_pass** is 0 < pp_lag < pp_period / 2 with pp_corr > 0.3, where lag < period / 2 is tested as 2·lag < period. An extinction in the window, a flat series or an undefined period gives false.
+  - `stats --signature` prints `pp_pass` on every line, including the undefined ones.
+  - `sweep.csv` appends a `pp_pass` column after `pp_period`, and `cycle_ratio.py` skips it.
+- **Scoring a sweep cell.** `stats --signature` also accepts a bare `series.csv`-format file, such as a sweep's `cells/*.csv`, with `--year-len N`. For a run directory, `--year-len` overrides meta.json. This is the smallest path to re-scoring cells without rerunning them, and it needed no new subcommand. The cause for an extinction then comes from the series' own death columns.
+
+**Tests**
+- **Trailing cycle.** `prop_signature_trailing_cycle_passes` has the sibling `signature_regression_trailing_cycle_seasons_and_leading`. Hunters trail a P-tick grazer cycle (P from 6000 to 12000) by L between 0.05P and 0.45P. Both series carry a 4000-tick seasonal term (the hunters' shifted by 700 ticks) and a linear trend. The test requires pp_lag within 100 of L, pp_period within 5% of P, and pp_pass.
+  - **Why an envelope.** The synthetic cycle's amplitude swells and fades over 25000 ticks. A constant-amplitude sinusoid correlates as well at L − P and L + P as at L, so the best lag was a coin toss between lobes. The first draft failed at P = 6000 with a lag of 6300 for a delay of 300. Real cycles aren't strictly periodic.
+  - **Why not a phase random walk.** It was tried first and dropped, because it shifted the measured period by more than 5%.
+  - **Why 66001 ticks.** The synthetic series runs 6000 ticks past the window's end, so the moving average isn't cut short inside it. At a 60001-tick length, the cut average at the right edge detrends the two shifted series differently. That moved flat 11000-tick peaks by 2 lag steps (lag 1800 for a delay of 1901). Real 60000-tick runs carry this edge effect, which is on the order of 100 ticks.
+  - **Sibling cases.** The sibling pins four (P, L) cases. It checks that seasons plus independent noise on both species don't pass, and that hunters leading by less than P/4 give a negative lag and no pass (three cases). It also pins the pass rule's boundaries.
+- **Known delay.** `prop_signature_finds_the_delay` and `signature_regression_delay_edges_extinct_and_flat` are kept, now over 60001 ticks with 9000/5700/3100/1300-tick cycles. None of those periods is a whole number of years, so seasonal removal doesn't erase them. The correlation bound drops from 0.97 to 0.95, because the cut moving average at the end is now 6000 ticks.
+- **Removed.** `prop_signature_period_is_the_cycle` and `signature_period_regression_lobes_edges_and_one_peak` tested the lobe-spacing period, which no longer exists.

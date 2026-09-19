@@ -517,3 +517,63 @@ These were regenerated in their own commit:
 - `runs/s42` (gitignored)
 
 `fixtures/s42-mini` (v1) is unchanged. ecoview's copy in `ecoview/public/` is stale again, and the renderer's shot 12 re-syncs it.
+
+
+## Heritable traits and open boundaries (shot 11)
+
+**Traits (`src/heredity.rs`)**
+- **What an animal carries.** Each grazer and hunter carries `energy_cost_mult`, `flee_distance` and `repro_threshold` (`heredity::Traits`). Initial animals and immigrants get the species defaults (`Params::default_traits`): `energy_cost_mult` 1, `flee_distance` the species' `flee_radius`, and `repro_threshold` its `repro_energy`.
+- **Where they are used.** Each trait replaces the parameter it names, everywhere that parameter was read:
+  - The per-tick cost is `energy_cost · energy_cost_mult`, still doubled on a tick the animal moves.
+  - The birth gate is `energy > repro_threshold`.
+  - A grazer flees the nearest hunter within its own `flee_distance`.
+  - `repro_cost`, `newborn_energy` and the cooldowns are not traits and stay species parameters.
+- **Hunter `flee_distance` is a neutral trait, with a new param `hunter.flee_radius` (4.0) as its default.** Hunters flee fire, but the flee is one greedy step with no distance, so nothing a hunter does reads it. The prompt gives every animal all three traits, and the clamp needs a species default. A neutral trait is also a useful control: its drift shows what sampling alone does in a population of 30–60 (`sweeps/shot11/FINDINGS.md`).
+- **Inheritance.** A newborn takes its parent's value × (1 + `heredity.mutation` · u) for each trait, u uniform in [−1, 1]. There is one `gen_range(-1.0..=1.0)` f32 draw per trait, in `NAMES` order, taken at the birth after the parent pays `repro_cost`. The result is clamped to [0.25, 4] × the species default (`heredity::inherit`). Mutation is relative to the parent, not the default, so traits random-walk over generations.
+- **Rate 0.** `update_animals` checks `mutation > 0` once, before the loops, and passes the flag in, like the crowding switch. At 0 a newborn copies its parent's traits and makes no draw. Every animal is then a default animal, so the run is the pre-shot run.
+- **The flee offsets.** `Sim::flee_offsets` is now built for the largest distance the clamp allows (4 × `grazer.flee_radius`). Each grazer uses the prefix within its own distance, found with `partition_point` on the sorted list. That prefix is exactly `offsets_within(flee_distance)` (a property test checks it), so a default grazer scans the same offsets in the same order as before.
+- **Default `heredity.mutation` 0.05.** The prompt gives no default, only the sweep grid. 0.05 is low in the grid and keeps the anchor on seeds 1, 2, 3 and 42 at 20 000 ticks. The whole grid passes (`sweeps/shot11/FINDINGS.md`), so the anchor rule didn't move it.
+- **Hunters may evolve a `repro_threshold` below `repro_cost`, and grazers one above 100.** A parent below `repro_cost` goes negative when it breeds and starves on its next update. A grazer threshold above 100 can never be crossed, because energy is capped at 100. Both are left to selection. The clamp is the only bound.
+
+**Outputs**
+- **series.csv** gains 12 columns at the end: the mean and population standard deviation of each trait, per species, `grazer_energy_cost_mult_mean, grazer_energy_cost_mult_sd, …, hunter_repro_threshold_sd`. That makes 35 fields. They are computed over live animals in f64 and written with 4 decimals. A species with no live animals writes 0 for all six, never NaN.
+  - `check`, `stats` and `sweep` still read the 23-field (pre-trait) and 21-field (pre-fire) headers, with the missing columns read as 0.
+- **entities.json** animal records gain `energy_cost_mult`, `flee_distance` and `repro_threshold`, as their last three fields.
+- **`format_version` stays 2.** Both changes only append columns and fields.
+- **state.bin** goes to `STATE_VERSION` 3: layout v2 plus a traits section of 3 × f32 per animal, grazers then hunters, in `Vec` order. Restore rejects v2 files, so shot-10 run directories can no longer be forked; rerun them instead.
+
+**Open boundaries**
+- **Grazer and hunter immigration already existed** (the small-number floor from the dynamics fixes), with `immigration_floor` 0 by default. The shot's changes to it:
+  - Immigrants carry the default traits.
+  - **No edge soil means no immigrant.** The old fallback to any soil column is gone, because the rule is "at a random edge soil column". The prompt's property states it too. No generated world lacks edge soil, so no run changes.
+  - **Trees gain `tree.immigration_floor` (0) and `tree.immigration_interval` (500).** A tree immigrant is a sapling (age 0) on a random edge soil column. It is planted only if that column keeps `min_spacing`, like a seed; otherwise the draw is spent and nothing arrives.
+- **Grass and shrub get no floor.** They are continuous densities per patch with no "live count", and they already regrow from their own seeding term (`g`). "Every species" is read as every species with individuals.
+- **Order.** In `immigrate`: grazers, hunters, then trees, each drawing only when due. A floor of 0 never draws.
+
+**Tests**
+- **Properties in `src/heredity.rs`, each with a named regression sibling:**
+  - `prop_inherit_stays_in_bounds` (the clamp for any parent, mutation and draw), with `inherit_regression_clamp_at_both_ends`.
+  - `prop_traits_stay_in_bounds` (every animal in bounds after every tick of a run at mutation 0.05–1), with `traits_regression_seed_42_mutation_one`.
+  - `prop_mutation_zero_keeps_defaults` (at mutation 0 every animal, immigrants included, equals the default, and the sd columns are 0), with `mutation_zero_regression_with_immigrants`.
+  - `prop_flee_prefix_is_offsets_within`, with `flee_prefix_regression_default_and_clamp_ends`.
+- **Immigration property.** `prop_immigration_follows_the_floor` now covers trees and traits. An immigrant arrives only when due and below the floor, only on an edge soil column, with the default traits, and with no draw when nothing is due. `immigration_regression_no_edge_soil_brings_nothing` replaces the fallback regression, and `tree_immigrant_respects_min_spacing` is new.
+- **Unit tests** pin three draws per birth and none at mutation 0 (`mutation_draws_three_per_birth_and_none_when_off`), the three uses of the traits (`traits_replace_the_species_params`), and the mean and sd over live animals only.
+- **Rate-0 identity:** `heredity_off_reproduces_the_pre_shot_11_manifest` runs seed 42 at mutation 0 (floors at their default 0). It compares the run with the pre-shot manifest, kept as `tests/data/s42-manifest-preshot11.sha256`, after `tests/common::without_traits`:
+  - `without_traits` strips the 12 series columns, the three `entities.json` fields and the state.bin traits section, and sets the state version back to 2.
+  - It asserts every value it cuts is the species default (or 0 for an extinct species), with sd 0.
+  - All 1609 hashes match.
+  - The shot-10 and pre-fire identity tests and the v1 fixture test now also set mutation 0 and apply `without_traits` first.
+- **Forced extinction:** `forced_grazer_extinction_under_heredity_runs_to_the_end` sets `grazer.repro_energy=400` at mutation 0.2. The clamp keeps every grazer's threshold at 100 or more, and energy can't exceed 100, so no grazer is ever born.
+  - On seed 1 the grazers are eaten out at tick 2285 and the hunters starve at 3538.
+  - The run goes to 20 000 ticks with valid snapshots, and no NaN in the series.
+  - Grazer trait sds stay 0 throughout, hunter ones rise above 0, and both species' trait columns read 0 at the end. The last snapshot restores.
+- **`forced_fire_extinction…` now also sets `heredity.mutation=0`.** With mutation on, 709 grazers outlast the fires on seed 1. The test forces fire only.
+
+**Regenerated artifacts (mutation 0.05 changes behaviour at the defaults)**
+These were regenerated in their own commit:
+- `tests/data/s42-manifest.sha256`: 1609 lines, same file set.
+- `tests/data/s42-check.txt`: seed 42 passes every invariant, with 85 mature trees at tick 10000.
+- `fixtures/s42-mini-v2`: series, entities and state.bin change; `timing.json` is kept.
+- `runs/s42` (gitignored)
+
+`fixtures/s42-mini` (v1) is unchanged. ecoview's copy in `ecoview/public/` is stale: it lacks the trait columns and fields. The renderer's shot 12 re-syncs it.

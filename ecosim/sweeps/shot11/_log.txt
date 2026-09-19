@@ -1,0 +1,4 @@
+# shot 11 sweep, release binary (2026-09-19)
+ecosim sweep --param heredity.mutation --range 0:0.2:0.025 --seeds 1,2,3 --jobs 22 --out sweeps/shot11/heredity_mutation
+heredity_mutation rc=0 wall=17s
+done

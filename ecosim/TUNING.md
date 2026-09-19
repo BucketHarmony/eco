@@ -333,3 +333,19 @@ Run on a 250-tick grid, at the disease defaults:
 - `[disease]` is at its starting values. None of the four anchor values moved.
 - Seeds 1, 2, 3 and 42 pass `ecosim check` at 20000 ticks with the defaults.
 - `disease.grazer_rate` has a fragile safe band, [0.001, 0.002] (`sweeps/shot10/FINDINGS.md`).
+
+## Heritable traits (shot 11)
+
+### Starting values
+- `heredity.mutation` 0.05, since the prompt gives only the sweep grid (0–0.2).
+- All immigration floors stay 0, and the new `tree.immigration_interval` is 500, the same as the animals'.
+- `hunter.flee_radius` is 4.0, the grazer value. It is the default of a trait no hunter behaviour reads, so its value changes nothing.
+
+### Anchor at the default
+Seeds 1, 2, 3 and 42 pass `ecosim check` at 20000 ticks with mutation 0.05. Seed 42 now has 85 mature trees at tick 10000; it had 58 before the shot.
+
+### Sweep
+The whole grid, 0:0.2:0.025, passes on seeds 1–3 (`sweeps/shot11/FINDINGS.md`).
+
+### Final
+No value changed. Mutation stays at its starting value of 0.05, and no other parameter was touched.

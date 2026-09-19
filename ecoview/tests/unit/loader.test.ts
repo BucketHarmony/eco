@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  COLUMNS, SOIL, VOXELS, WATER, columnIndex, loadRun, loadSnapshot, parseMeta, parseSeries, pickSnapshot,
+  COLUMNS, FORMAT_VERSIONS, SOIL, VOXELS, WATER, columnIndex, loadRun, loadSnapshot, parseMeta, parseSeries, pickSnapshot,
   voxelIndex, type Fetcher,
 } from '../../src/loader';
 import { binDeaths } from '../../src/ui';
@@ -24,9 +24,14 @@ const fakeFetcher = (files: Record<string, string>): Fetcher => async (url) =>
   url in files ? new Response(files[url], { status: 200 }) : new Response('', { status: 404 });
 
 describe('loader on fixtures/s42-mini', () => {
+  it("has the fixture at the loader's newest supported format_version", async () => {
+    const meta = JSON.parse(await readFile(path.join(PUBLIC, 'fixtures/s42-mini/meta.json'), 'utf8'));
+    expect(meta.format_version).toBe(Math.max(...FORMAT_VERSIONS));
+  });
+
   it('parses meta and series', async () => {
     const run = await loadRun('/fixtures/s42-mini', fsFetcher);
-    expect(run.meta.format_version).toBe(1);
+    expect(run.meta.format_version).toBe(Math.max(...FORMAT_VERSIONS));
     expect(run.meta.snapshots).toEqual([0, 100]);
     expect(run.meta.species.map((s) => s.name)).toEqual(['grass', 'shrub', 'tree', 'grazer', 'hunter']);
     expect(run.series.tick.length).toBe(101);
@@ -94,6 +99,13 @@ describe('loader on fixtures/s42-mini', () => {
   });
 
   it('loads a format_version 2 run to the same scene data as version 1, never fetching state.bin', async () => {
+    const v1: Fetcher = async (url) => {
+      const res = await fsFetcher(url);
+      if (!url.endsWith('/meta.json')) return res;
+      const meta = { ...(await res.json()), format_version: 1 };
+      delete meta.forked_from;
+      return new Response(JSON.stringify(meta), { status: 200 });
+    };
     const fetched: string[] = [];
     const v2: Fetcher = async (url) => {
       fetched.push(url);
@@ -103,7 +115,7 @@ describe('loader on fixtures/s42-mini', () => {
       const meta = { ...(await res.json()), format_version: 2, forked_from: { run: 'runs/s42', tick: 5000 } };
       return new Response(JSON.stringify(meta), { status: 200 });
     };
-    const a = await loadRun('/fixtures/s42-mini', fsFetcher);
+    const a = await loadRun('/fixtures/s42-mini', v1);
     const b = await loadRun('/fixtures/s42-mini', v2);
     expect(a.meta.format_version).toBe(1);
     expect(b.meta.format_version).toBe(2);
@@ -111,7 +123,7 @@ describe('loader on fixtures/s42-mini', () => {
     expect({ ...b.meta, format_version: 1, forked_from: undefined }).toEqual({ ...a.meta, forked_from: undefined });
     expect(b.series).toEqual(a.series);
     for (const tick of a.meta.snapshots) {
-      const sa = await loadSnapshot(a, tick, fsFetcher);
+      const sa = await loadSnapshot(a, tick, v1);
       const sb = await loadSnapshot(b, tick, v2);
       expect(sb).toEqual(sa);
       for (const overlay of OVERLAYS) {

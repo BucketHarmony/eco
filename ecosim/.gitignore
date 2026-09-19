@@ -1,3 +1,6 @@
 runs/
 sweeps/*/cells/
 __pycache__/
+proptest-regressions/
+ci-runs/
+lcov.info

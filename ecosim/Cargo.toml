@@ -22,3 +22,16 @@ clap = { version = "=4.6.7", features = ["derive"] }
 
 [profile.release]
 debug = false
+
+# The debug profile keeps debug assertions and overflow checks but optimizes a little, so the
+# 20000-tick integration tests fit the debug test budget (DECISIONS.md, Test hardening).
+[profile.dev]
+opt-level = 1
+
+[dev-dependencies]
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+sha2 = "=0.11.0"
+
+# cargo-llvm-cov builds with `--cfg coverage`; the tests use it to trim their cost (DECISIONS.md, Test hardening).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }

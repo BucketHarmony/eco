@@ -4,54 +4,78 @@ use crate::params::Params;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 
+/// World size in x (columns).
 pub const WX: usize = 64;
+/// World size in y (columns).
 pub const WY: usize = 64;
+/// World height in voxels; z is up.
 pub const WZ: usize = 32;
+/// Number of columns.
 pub const COLS: usize = WX * WY;
+/// Number of voxels.
 pub const VOXELS: usize = WX * WY * WZ;
+/// Patch edge length in columns.
 pub const PATCH_SIZE: usize = 8;
+/// Patches along x.
 pub const PATCHES_X: usize = WX / PATCH_SIZE;
+/// Number of patches.
 pub const PATCHES: usize = PATCHES_X * (WY / PATCH_SIZE);
 
+/// Material code: air.
 pub const AIR: u8 = 0;
+/// Material code: soil.
 pub const SOIL: u8 = 1;
+/// Material code: rock.
 pub const ROCK: u8 = 2;
+/// Material code: water.
 pub const WATER: u8 = 3;
 
+/// Voxel index, x fastest: x + 64·(y + 64·z).
 #[inline]
 pub fn vidx(x: usize, y: usize, z: usize) -> usize {
     x + WX * (y + WY * z)
 }
 
+/// Column index: x + 64·y.
 #[inline]
 pub fn cidx(x: usize, y: usize) -> usize {
     x + WX * y
 }
 
+/// Patch index of a column.
 #[inline]
 pub fn patch_of(x: usize, y: usize) -> usize {
     x / PATCH_SIZE + PATCHES_X * (y / PATCH_SIZE)
 }
 
+/// Whether (x, y) is inside the world.
 #[inline]
 pub fn in_bounds(x: i32, y: i32) -> bool {
     x >= 0 && y >= 0 && (x as usize) < WX && (y as usize) < WY
 }
 
+/// What a column is topped with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColClass {
+    /// Soil on top: plants grow, animals walk.
     Soil,
+    /// Water on top (terrain below the water level).
     Water,
+    /// Rock on top (at or above `rock_top_height`).
     Rock,
 }
 
+/// Terrain, materials, light and walking distances.
 pub struct World {
+    /// Material code per voxel (`vidx` order).
     pub material: Vec<u8>,
+    /// Light per voxel, 0–255 (`vidx` order).
     pub light: Vec<u8>,
     /// z of the topmost non-Air voxel per column (water columns report the water surface).
     pub height: Vec<u8>,
     /// Terrain height (topmost solid voxel) per column.
     pub ground: Vec<u8>,
+    /// Column class per column.
     pub class: Vec<ColClass>,
     /// Soil column indices per patch, ascending.
     pub patch_soil: Vec<Vec<usize>>,
@@ -60,6 +84,7 @@ pub struct World {
     pub patch_dist: Vec<u16>,
 }
 
+/// Marks a patch that cannot be walked to from a column.
 pub const UNREACHABLE: u16 = u16::MAX;
 
 /// Multi-source BFS over soil columns (8-neighbour moves) from every patch's soil columns.
@@ -131,17 +156,15 @@ pub fn generate_heights(params: &Params, rng: &mut ChaCha8Rng) -> Vec<u8> {
     let (hmin, hmax, hw) = (wp.height_min as f32, wp.height_max as f32, wp.water_level as f32 - 0.5);
     v.iter()
         .map(|&x| {
-            let h = if x < q {
-                hmin + (x - lo) / (q - lo) * (hw - hmin)
-            } else {
-                hw + (x - q) / (hi - q) * (hmax - hw)
-            };
+            let h =
+                if x < q { hmin + (x - lo) / (q - lo) * (hw - hmin) } else { hw + (x - q) / (hi - q) * (hmax - hw) };
             h.round().clamp(hmin, hmax) as u8
         })
         .collect()
 }
 
 impl World {
+    /// Generate terrain from the seeded RNG and build the world.
     pub fn generate(params: &Params, rng: &mut ChaCha8Rng) -> World {
         let heights = generate_heights(params, rng);
         World::from_heights(&heights, params)
@@ -208,6 +231,7 @@ impl World {
         w
     }
 
+    /// Whether (x, y) is inside the world and a soil column.
     #[inline]
     pub fn is_soil(&self, x: i32, y: i32) -> bool {
         in_bounds(x, y) && self.class[cidx(x as usize, y as usize)] == ColClass::Soil
@@ -242,15 +266,12 @@ impl World {
     pub fn dist_to_patch(&self, p: usize, c: usize) -> u16 {
         self.patch_dist[p * COLS + c]
     }
-
-    pub fn count_class(&self, k: ColClass) -> usize {
-        self.class.iter().filter(|&&c| c == k).count()
-    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn flat(h: u8) -> World {
         World::from_heights(&vec![h; COLS], &Params::load_default())
@@ -308,5 +329,109 @@ mod tests {
         // then 14 back up to patch 0 (x < 8, y < 8).
         assert_eq!(w.dist_to_patch(0, cidx(13, 3)), 18 + 14);
         assert_eq!(w.dist_to_patch(0, cidx(12, 3)), UNREACHABLE, "rock column itself");
+    }
+
+    /// Mostly soil, with water (below level 10) and rock-topped (≥ 21) columns mixed in.
+    pub(crate) fn terrain() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(prop_oneof![6 => 11u8..=20, 1 => 6u8..=9, 1 => 21u8..=24], COLS)
+    }
+
+    /// Single-source BFS over soil columns (8-neighbour steps) from column `s`.
+    fn bfs_from(w: &World, s: usize) -> Vec<u16> {
+        let mut d = vec![UNREACHABLE; COLS];
+        let mut q = std::collections::VecDeque::from([s]);
+        d[s] = 0;
+        while let Some(c) = q.pop_front() {
+            let (x, y) = ((c % WX) as i32, (c / WX) as i32);
+            for (nx, ny) in (y - 1..=y + 1).flat_map(|ny| (x - 1..=x + 1).map(move |nx| (nx, ny))) {
+                if w.is_soil(nx, ny) && d[cidx(nx as usize, ny as usize)] == UNREACHABLE {
+                    d[cidx(nx as usize, ny as usize)] = d[c] + 1;
+                    q.push_back(cidx(nx as usize, ny as usize));
+                }
+            }
+        }
+        d
+    }
+
+    /// `patch_dist` equals, per patch, the minimum over its soil columns of a single-source BFS.
+    fn patch_dist_matches_brute_force(heights: &[u8]) -> Result<(), TestCaseError> {
+        let w = World::from_heights(heights, &Params::load_default());
+        let mut want = vec![UNREACHABLE; PATCHES * COLS];
+        let from: Vec<Vec<u16>> =
+            (0..COLS).map(|s| if w.class[s] == ColClass::Soil { bfs_from(&w, s) } else { Vec::new() }).collect();
+        for (p, cols) in w.patch_soil.iter().enumerate() {
+            for &s in cols {
+                for c in 0..COLS {
+                    want[p * COLS + c] = want[p * COLS + c].min(from[s][c]);
+                }
+            }
+        }
+        for p in 0..PATCHES {
+            prop_assert_eq!(&w.patch_dist[p * COLS..(p + 1) * COLS], &want[p * COLS..(p + 1) * COLS], "patch {}", p);
+        }
+        Ok(())
+    }
+
+    /// Solids are 0; air and water are 255 − absorb × (canopy voxels strictly above), clamped at 0.
+    fn column_light_formula(
+        heights: &[u8],
+        x: usize,
+        y: usize,
+        canopy: &[u8],
+        absorb: u8,
+    ) -> Result<(), TestCaseError> {
+        let mut w = World::from_heights(heights, &Params::load_default());
+        let mut zs = canopy.to_vec();
+        zs.sort_unstable();
+        zs.dedup();
+        w.set_column_light(x, y, &zs, absorb);
+        for z in 0..WZ {
+            let m = w.material[vidx(x, y, z)];
+            let above = zs.iter().filter(|&&cz| cz as usize > z).count() as i32;
+            let want = if m == SOIL || m == ROCK { 0 } else { (255 - absorb as i32 * above).max(0) as u8 };
+            prop_assert_eq!(w.light[vidx(x, y, z)], want, "z {}", z);
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(8)))]
+
+        #[test]
+        fn prop_patch_dist_matches_brute_force(heights in terrain()) {
+            patch_dist_matches_brute_force(&heights)?;
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_column_light_formula(
+            heights in terrain(),
+            (x, y) in (0..WX, 0..WY),
+            canopy in prop::collection::vec(0u8..WZ as u8, 0..6),
+            absorb in prop_oneof![Just(Params::load_default().world.canopy_absorb), any::<u8>()],
+        ) {
+            column_light_formula(&heights, x, y, &canopy, absorb)?;
+        }
+    }
+
+    #[test]
+    fn patch_dist_regression_island_and_wall() {
+        let mut h = vec![14u8; COLS];
+        for y in 0..WY {
+            h[cidx(30, y)] = 23; // a full-height rock wall cuts the world in two
+        }
+        h[cidx(5, 5)] = 7; // a pond
+        patch_dist_matches_brute_force(&h).unwrap();
+        let w = World::from_heights(&h, &Params::load_default());
+        assert_eq!(w.dist_to_patch(0, cidx(40, 0)), UNREACHABLE);
+    }
+
+    #[test]
+    fn column_light_regression_default_absorb_over_water() {
+        let mut h = vec![14u8; COLS];
+        h[cidx(3, 4)] = 7;
+        column_light_formula(&h, 3, 4, &[12, 13, 13], 100).unwrap();
+        column_light_formula(&h, 3, 4, &[20, 21, 22], 96).unwrap();
     }
 }

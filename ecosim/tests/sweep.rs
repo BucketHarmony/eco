@@ -2,11 +2,14 @@
 
 use ecosim::check::{check_run, evaluate, parse_series, CheckReport, Series};
 use ecosim::output::run;
-use ecosim::sweep::{baseline, sweep, ParamSpec, SweepConfig};
+use ecosim::sweep::{baseline, margin_table, sweep, ParamSpec, SweepConfig};
 use ecosim::Params;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn tmp(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -23,27 +26,76 @@ fn comparable(r: &CheckReport) -> Vec<(&'static str, bool, String, f64)> {
     r.lines.iter().filter(|l| l.key != "runtime").map(|l| (l.key, l.pass, l.observed.clone(), l.margin)).collect()
 }
 
+/// One fresh seed-42 run (20000 ticks, a snapshot every 100, as `runs/s42`), shared by the golden
+/// check test and the manifest test.
+fn fresh_s42() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = tmp("s42_fresh");
+        run(Params::load_default(), 42, 20_000, 100, &[], &dir).unwrap();
+        dir
+    })
+}
+
 /// `check::evaluate` on a fresh seed-42 run reproduces the committed `ecosim check runs/s42` output
-/// (captured before check moved into the library), line for line apart from wall time.
+/// (captured before check moved into the library), line for line apart from wall time. The runtime
+/// line is compared by name only: its verdict depends on the build profile and the machine.
 #[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn evaluate_matches_committed_s42_check_output() {
-    let dir = tmp("s42_eval");
-    // Snapshot interval doesn't affect the series; 10000 keeps the tick-10000 snapshot the check reads.
-    run(Params::load_default(), 42, 20_000, 10_000, &[], &dir).unwrap();
-    let series = Series::from_run_dir(&dir).unwrap();
+    let series = Series::from_run_dir(fresh_s42()).unwrap();
     let report = evaluate(&series).unwrap();
     let golden = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/s42-check.txt")).unwrap();
     let golden: Vec<&str> = golden.lines().collect();
     assert_eq!(golden.len(), report.lines.len());
     for (g, l) in golden.iter().zip(&report.lines) {
-        let line = format!("{} {}: {}", if l.pass { "PASS" } else { "FAIL" }, l.name, l.observed);
         if l.key == "runtime" {
-            assert_eq!(g.split(':').next(), line.split(':').next());
+            let name = g.split_once(' ').and_then(|(_, rest)| rest.split(':').next());
+            assert_eq!(name, Some(l.name));
         } else {
-            assert_eq!(*g, line);
+            assert_eq!(*g, format!("{} {}: {}", if l.pass { "PASS" } else { "FAIL" }, l.name, l.observed));
         }
     }
-    assert!(report.pass());
+    assert!(report.lines.iter().filter(|l| l.key != "runtime").all(|l| l.pass));
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A fresh seed-42 run hashes to `tests/data/s42-manifest.sha256` (series.csv plus every snapshot
+/// file): the guard against unintended behaviour changes. A shot that changes behaviour on purpose
+/// regenerates the manifest and says so in DECISIONS.md.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn fresh_s42_matches_committed_manifest() {
+    let dir = fresh_s42();
+    let manifest =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/s42-manifest.sha256")).unwrap();
+    let want: BTreeMap<String, String> = manifest
+        .lines()
+        .map(|l| {
+            let (hash, path) = l.split_once("  ").expect("manifest line is `sha256  path`");
+            (path.to_string(), hash.to_string())
+        })
+        .collect();
+    let mut got = BTreeMap::new();
+    got.insert("series.csv".to_string(), sha256_hex(&fs::read(dir.join("series.csv")).unwrap()));
+    for snap in fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.is_dir()) {
+        for f in fs::read_dir(&snap).unwrap().map(|e| e.unwrap().path()) {
+            let rel =
+                format!("{}/{}", snap.file_name().unwrap().to_str().unwrap(), f.file_name().unwrap().to_str().unwrap());
+            got.insert(rel, sha256_hex(&fs::read(&f).unwrap()));
+        }
+    }
+    assert_eq!(got.len(), 1 + 201 * 7);
+    let differing: Vec<&String> = want.keys().chain(got.keys()).filter(|k| want.get(*k) != got.get(*k)).collect();
+    assert!(
+        differing.is_empty(),
+        "{} manifest entries differ, first: {:?}",
+        differing.len(),
+        &differing[..differing.len().min(5)]
+    );
 }
 
 /// A 2-value × 1-seed × 500-tick sweep writes 2 rows and 2 cell CSVs, and each cell equals a
@@ -113,6 +165,10 @@ fn baseline_margins_equal_check_margins() {
     let check = check_run(&dir).unwrap();
     assert!(check.get("mature_trees_10k").is_some());
     assert_eq!(comparable(&reports[0].1), comparable(&check));
+    let table = margin_table(&reports);
+    assert!(table.starts_with("invariant") && table.lines().next().unwrap().contains("s2"), "{table}");
+    let row = table.lines().find(|l| l.starts_with("mature_trees_10k")).expect("mature_trees_10k row");
+    assert_eq!(row.split_whitespace().count(), 3, "{row}");
 }
 
 #[test]

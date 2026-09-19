@@ -46,7 +46,8 @@ enum Cmd {
     },
 }
 
-const SWEEP_USAGE: &str = "usage: ecosim sweep (--param KEY (--range START:STOP:STEP | --values A,B,C))... --out DIR [options]
+const SWEEP_USAGE: &str =
+    "usage: ecosim sweep (--param KEY (--range START:STOP:STEP | --values A,B,C))... --out DIR [options]
        ecosim sweep --baseline [options]
 options:
   --seeds 1,2,3      seeds per grid point (default 1,2,3)
@@ -156,7 +157,11 @@ fn main() -> ExitCode {
                     let verdict = if l.pass { "PASS" } else { "FAIL" };
                     println!("{verdict} {}: {} [margin {:+.4}]", l.name, l.observed, l.margin);
                 }
-                if report.pass() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+                if report.pass() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
             }
             Err(e) => {
                 eprintln!("FAIL {e}");
@@ -195,7 +200,11 @@ fn main() -> ExitCode {
             Ok(SweepCmd::Baseline(cfg)) => match baseline(&cfg) {
                 Ok(reports) => {
                     print!("{}", margin_table(&reports));
-                    if reports.iter().all(|(_, r)| r.pass()) { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+                    if reports.iter().all(|(_, r)| r.pass()) {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
                 }
                 Err(e) => {
                     eprintln!("{e}");

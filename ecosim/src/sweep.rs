@@ -5,7 +5,9 @@
 //! vary fastest of all, in the order given. Cell results are written in this order whatever order
 //! the worker threads finish in.
 
-use crate::check::{evaluate, first_extinction, grazer_maxima, parse_series, CheckReport, Series, Timing, INVARIANT_KEYS, WINDOW_START};
+use crate::check::{
+    evaluate, first_extinction, grazer_maxima, parse_series, CheckReport, Series, Timing, INVARIANT_KEYS, WINDOW_START,
+};
 use crate::output::{series_csv, simulate};
 use crate::params::Params;
 use crate::sim::Sim;
@@ -20,7 +22,9 @@ use std::time::Instant;
 /// One swept parameter: a dotted params key and its values, as the exact strings passed to `--set`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamSpec {
+    /// Dotted params key, as for `--set`.
     pub key: String,
+    /// Values in grid order, as the strings passed to `--set`.
     pub values: Vec<String>,
 }
 
@@ -49,7 +53,11 @@ pub fn parse_range(spec: &str) -> Result<Vec<String>, String> {
     Ok((0..n)
         .map(|i| {
             let s = format!("{:.*}", places, start + i as f64 * step);
-            if s.starts_with('-') && s[1..].chars().all(|c| c == '0' || c == '.') { s[1..].to_string() } else { s }
+            if s.starts_with('-') && s[1..].chars().all(|c| c == '0' || c == '.') {
+                s[1..].to_string()
+            } else {
+                s
+            }
         })
         .collect())
 }
@@ -66,7 +74,9 @@ pub fn parse_values(spec: &str) -> Result<Vec<String>, String> {
 /// One sweep cell: a value index per swept param plus a seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
+    /// Index into each swept param’s values, in `--param` order.
     pub idx: Vec<usize>,
+    /// Seed of the run.
     pub seed: u64,
 }
 
@@ -111,11 +121,15 @@ pub fn cell_overrides(specs: &[ParamSpec], fixed: &[String], cell: &Cell) -> Vec
     v
 }
 
+/// One evaluated sweep cell.
 pub struct CellResult {
     /// The series exactly as `ecosim run` would write it to `series.csv`.
     pub csv: String,
+    /// Invariant results (runtime excluded).
     pub report: CheckReport,
+    /// First tick at which any species count is 0, over the whole run.
     pub first_extinction: Option<u32>,
+    /// Grazer maxima from tick 2000, as the cycle invariant counts them.
     pub grazer_peaks: usize,
 }
 
@@ -142,7 +156,12 @@ pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) 
 }
 
 /// Run labelled cells on `jobs` threads; results come back in input order.
-fn run_all(params_text: &str, cells: &[(String, Vec<String>, u64)], ticks: u32, jobs: usize) -> Result<Vec<CellResult>, String> {
+fn run_all(
+    params_text: &str,
+    cells: &[(String, Vec<String>, u64)],
+    ticks: u32,
+    jobs: usize,
+) -> Result<Vec<CellResult>, String> {
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<Result<CellResult, String>>>> = Mutex::new((0..cells.len()).map(|_| None).collect());
@@ -170,13 +189,19 @@ fn run_all(params_text: &str, cells: &[(String, Vec<String>, u64)], ticks: u32, 
     results.into_inner().unwrap().into_iter().map(|r| r.expect("every cell ran")).collect()
 }
 
+/// Everything a sweep or baseline needs.
 pub struct SweepConfig {
+    /// Params file the overrides apply to.
     pub params_path: PathBuf,
     /// `--set` overrides applied to every cell before the swept values.
     pub fixed: Vec<String>,
+    /// Swept params, first varying slowest.
     pub specs: Vec<ParamSpec>,
+    /// Seeds per grid point, varying fastest.
     pub seeds: Vec<u64>,
+    /// Ticks per cell.
     pub ticks: u32,
+    /// Worker threads.
     pub jobs: usize,
 }
 
@@ -233,7 +258,11 @@ fn prepare_out(out: &Path) -> Result<(), String> {
 }
 
 fn num(v: f64) -> String {
-    if v.is_nan() { String::new() } else { format!("{v}") }
+    if v.is_nan() {
+        String::new()
+    } else {
+        format!("{v}")
+    }
 }
 
 /// Run the grid and write `sweep.csv`, `sweep.md` and `cells/<cell-id>.csv` into `out`.
@@ -243,10 +272,8 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
     }
     let text = params_text(cfg)?;
     let cells = grid(&cfg.specs, &cfg.seeds);
-    let jobs: Vec<_> = cells
-        .iter()
-        .map(|c| (cell_id(&cfg.specs, c), cell_overrides(&cfg.specs, &cfg.fixed, c), c.seed))
-        .collect();
+    let jobs: Vec<_> =
+        cells.iter().map(|c| (cell_id(&cfg.specs, c), cell_overrides(&cfg.specs, &cfg.fixed, c), c.seed)).collect();
     // Validate every cell's overrides before running anything.
     for (_, o, _) in &jobs {
         Params::from_toml_str_with(&text, o)?;
@@ -339,7 +366,9 @@ fn seeds_str(seeds: &[u64]) -> String {
 
 fn fail_summary(f: &[(&'static str, Vec<u64>, f64)]) -> String {
     f.iter()
-        .map(|(k, s, m)| format!("`{k}` (seed{} {}; worst margin {m:+.3})", if s.len() > 1 { "s" } else { "" }, seeds_str(s)))
+        .map(|(k, s, m)| {
+            format!("`{k}` (seed{} {}; worst margin {m:+.3})", if s.len() > 1 { "s" } else { "" }, seeds_str(s))
+        })
         .collect::<Vec<_>>()
         .join("; ")
 }
@@ -359,14 +388,29 @@ fn report_md(
     let _ = writeln!(md, "# Sweep `{name}`\n");
     let _ = writeln!(md, "- params: `{}`", cfg.params_path.display());
     if !cfg.fixed.is_empty() {
-        let _ = writeln!(md, "- fixed overrides: {}", cfg.fixed.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", "));
+        let _ = writeln!(
+            md,
+            "- fixed overrides: {}",
+            cfg.fixed.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")
+        );
     }
     for p in &cfg.specs {
         let _ = writeln!(md, "- `{}`: {}", p.key, p.values.join(", "));
     }
-    let _ = writeln!(md, "- seeds: {}; ticks: {}; cells: {}; jobs: {}", seeds_str(&cfg.seeds), cfg.ticks, cells.len(), cfg.jobs);
+    let _ = writeln!(
+        md,
+        "- seeds: {}; ticks: {}; cells: {}; jobs: {}",
+        seeds_str(&cfg.seeds),
+        cfg.ticks,
+        cells.len(),
+        cfg.jobs
+    );
     let _ = writeln!(md, "- wall time: {wall:.1} s");
-    let _ = writeln!(md, "- invariants: {} (runtime excluded)\n", keys.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", "));
+    let _ = writeln!(
+        md,
+        "- invariants: {} (runtime excluded)\n",
+        keys.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
+    );
     let _ = writeln!(
         md,
         "A value is **safe** when every invariant passes on every seed in every cell with that value \
@@ -378,7 +422,9 @@ fn report_md(
     let pairs: Vec<(&Cell, &CellResult)> = cells.iter().zip(results).collect();
     for (pi, p) in cfg.specs.iter().enumerate() {
         let default = default_value(text, &cfg.fixed, &p.key);
-        let at = |vi: usize| -> Vec<(&Cell, &CellResult)> { pairs.iter().copied().filter(|(c, _)| c.idx[pi] == vi).collect() };
+        let at = |vi: usize| -> Vec<(&Cell, &CellResult)> {
+            pairs.iter().copied().filter(|(c, _)| c.idx[pi] == vi).collect()
+        };
         let safe: Vec<bool> = (0..p.values.len()).map(|vi| at(vi).iter().all(|(_, r)| r.report.pass())).collect();
         let mut bands: Vec<(usize, usize)> = Vec::new();
         for (i, &ok) in safe.iter().enumerate() {
@@ -410,18 +456,28 @@ fn report_md(
                     if count < 3 { " — **fragile**" } else { "" }
                 );
                 if bands.len() > 1 {
-                    let others: Vec<String> =
-                        bands.iter().filter(|b| **b != (lo, hi)).map(|b| format!("[{}, {}]", p.values[b.0], p.values[b.1])).collect();
+                    let others: Vec<String> = bands
+                        .iter()
+                        .filter(|b| **b != (lo, hi))
+                        .map(|b| format!("[{}, {}]", p.values[b.0], p.values[b.1]))
+                        .collect();
                     let _ = writeln!(md, "- other safe runs: {}", others.join(", "));
                 }
-                for (label, edge) in [("lower", lo.checked_sub(1)), ("upper", Some(hi + 1).filter(|&i| i < p.values.len()))] {
+                for (label, edge) in
+                    [("lower", lo.checked_sub(1)), ("upper", Some(hi + 1).filter(|&i| i < p.values.len()))]
+                {
                     match edge {
                         None => {
                             let _ = writeln!(md, "- {label} edge: passes to the end of the grid");
                         }
                         Some(e) => {
                             let f = failures(&at(e), keys);
-                            let _ = writeln!(md, "- {label} edge: at {} first fails {}", p.values[e], fail_summary(&f[..1]));
+                            let _ = writeln!(
+                                md,
+                                "- {label} edge: at {} first fails {}",
+                                p.values[e],
+                                fail_summary(&f[..1])
+                            );
                             if f.len() > 1 {
                                 let _ = writeln!(md, "  - also failing there: {}", fail_summary(&f[1..]));
                             }
@@ -436,7 +492,12 @@ fn report_md(
             let passing = set.iter().filter(|(_, r)| r.report.pass()).count();
             let mark = if Some(vi) == def_idx { " (default)" } else { "" };
             let f = failures(&set, keys);
-            let _ = writeln!(md, "| {v}{mark} | {passing}/{} | {} |", set.len(), if f.is_empty() { "—".into() } else { fail_summary(&f) });
+            let _ = writeln!(
+                md,
+                "| {v}{mark} | {passing}/{} | {} |",
+                set.len(),
+                if f.is_empty() { "—".into() } else { fail_summary(&f) }
+            );
         }
         md.push('\n');
     }
@@ -461,6 +522,7 @@ fn report_md(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn range_is_inclusive_and_drift_free() {
@@ -498,5 +560,46 @@ mod tests {
         assert_eq!(ids[11], "a.x=2_b.y=r_s=3");
         assert_eq!(cell_overrides(&specs, &["c.z=0".into()], &g[5]), ["c.z=0", "a.x=1", "b.y=r"]);
         assert_eq!(grid(&specs, &[1]), grid(&specs, &[1]));
+    }
+
+    /// `units / 10^places` as a plain decimal string.
+    fn decimal(units: i64, places: u32) -> String {
+        let scale = 10i64.pow(places);
+        let (sign, a) = (if units < 0 { "-" } else { "" }, units.abs());
+        if places == 0 {
+            format!("{sign}{a}")
+        } else {
+            format!("{sign}{}.{:0w$}", a / scale, a % scale, w = places as usize)
+        }
+    }
+
+    /// A range written in whole units of 10^-places: start `s`, span `span`, step `step` (units).
+    /// The count is span / step + 1 (exact integer division), the values are start + i·step, and the
+    /// last never passes stop by more than 1e-9.
+    fn range_count_and_bounds(s: i64, span: i64, step: i64, places: u32) -> Result<(), TestCaseError> {
+        let spec = format!("{}:{}:{}", decimal(s, places), decimal(s + span, places), decimal(step, places));
+        let v = parse_range(&spec).map_err(TestCaseError::fail)?;
+        prop_assert_eq!(v.len() as i64, span / step + 1, "{}", spec);
+        let (scale, stop) = (10f64.powi(places as i32), (s + span) as f64 / 10f64.powi(places as i32));
+        for (i, x) in v.iter().enumerate() {
+            let want = (s + i as i64 * step) as f64 / scale;
+            prop_assert!((x.parse::<f64>().unwrap() - want).abs() < 1e-9, "{}: value {} is {}", spec, i, x);
+        }
+        prop_assert!(v.last().unwrap().parse::<f64>().unwrap() <= stop + 1e-9, "{}", spec);
+        Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn prop_range_count_and_bounds(s in -5000i64..5000, span in 0i64..5000, step in 1i64..500, places in 0u32..=3) {
+            range_count_and_bounds(s, span, step, places)?;
+        }
+    }
+
+    #[test]
+    fn range_regression_float_quotient_just_below_integer() {
+        // (0.16 − 0.04) / 0.02 is 5.999999999999999 in f64; the count must still be 7.
+        range_count_and_bounds(4, 12, 2, 2).unwrap();
+        range_count_and_bounds(-7, 0, 3, 1).unwrap();
     }
 }

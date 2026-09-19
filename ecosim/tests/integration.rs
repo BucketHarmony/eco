@@ -15,23 +15,52 @@ fn tmp(name: &str) -> PathBuf {
     d
 }
 
-#[test]
-fn determinism_two_runs_are_byte_identical() {
-    let exe = env!("CARGO_BIN_EXE_ecosim");
+/// `ecosim run --seed 7 --ticks 3000 --snapshot-every 500` with `exe` into `out`.
+fn run_binary(exe: &Path, out: &Path) {
     let params = Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml");
+    let st = Command::new(exe)
+        .args(["run", "--seed", "7", "--ticks", "3000", "--snapshot-every", "500", "--out"])
+        .arg(out)
+        .arg("--params")
+        .arg(&params)
+        .status()
+        .expect("spawn ecosim run");
+    assert!(st.success(), "ecosim run failed ({})", exe.display());
+}
+
+fn assert_same_run(exe: &Path, a: &Path, b: &Path) {
+    let st = Command::new(exe).arg("diff").arg(a).arg(b).status().expect("spawn ecosim diff");
+    assert!(st.success(), "ecosim diff reported differences between {} and {}", a.display(), b.display());
+}
+
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn determinism_two_runs_are_byte_identical() {
+    let exe = Path::new(env!("CARGO_BIN_EXE_ecosim"));
     let (a, b) = (tmp("det_a"), tmp("det_b"));
-    for out in [&a, &b] {
-        let st = Command::new(exe)
-            .args(["run", "--seed", "7", "--ticks", "3000", "--snapshot-every", "500", "--out"])
-            .arg(out)
-            .arg("--params")
-            .arg(&params)
-            .status()
-            .expect("spawn ecosim run");
-        assert!(st.success(), "ecosim run failed");
+    run_binary(exe, &a);
+    run_binary(exe, &b);
+    assert_same_run(exe, &a, &b);
+}
+
+/// The debug and release binaries produce identical run directories. The other profile's binary
+/// (`target/release/` from a debug test run, and vice versa) must already be built and current;
+/// when it is missing the test passes with a note, unless `ECOSIM_REQUIRE_CROSS=1` (set in CI).
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn determinism_debug_and_release_binaries_agree() {
+    let exe = Path::new(env!("CARGO_BIN_EXE_ecosim"));
+    let other = if cfg!(debug_assertions) { "release" } else { "debug" };
+    let sibling = exe.parent().unwrap().parent().unwrap().join(other).join(exe.file_name().unwrap());
+    if !sibling.exists() {
+        assert!(std::env::var("ECOSIM_REQUIRE_CROSS").as_deref() != Ok("1"), "{} not built", sibling.display());
+        eprintln!("skipping: {} not built", sibling.display());
+        return;
     }
-    let st = Command::new(exe).arg("diff").arg(&a).arg(&b).status().expect("spawn ecosim diff");
-    assert!(st.success(), "ecosim diff reported differences");
+    let (a, b) = (tmp("cross_self"), tmp("cross_other"));
+    run_binary(exe, &a);
+    run_binary(&sibling, &b);
+    assert_same_run(exe, &a, &b);
 }
 
 #[test]
@@ -49,6 +78,7 @@ fn drought_kills_grass_by_tick_5000() {
 }
 
 #[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn hunters_disabled_grazers_stay_within_30pct_of_capacity() {
     let mut p = Params::load_default();
     p.hunter.start_count = 0;
@@ -98,9 +128,9 @@ fn snapshot_round_trips_through_reader() {
         assert_eq!(fs::read(snap.join(f)).unwrap().len(), COLS);
     }
     let moist = fs::read(snap.join("moisture.bin")).unwrap();
-    for c in 0..COLS {
-        if moist[c] != 0 {
-            assert!((moist[c] as f32 - sim.moisture[c]).abs() <= 0.5, "moisture col {c}");
+    for (c, &m) in moist.iter().enumerate() {
+        if m != 0 {
+            assert!((m as f32 - sim.moisture[c]).abs() <= 0.5, "moisture col {c}");
         }
     }
 

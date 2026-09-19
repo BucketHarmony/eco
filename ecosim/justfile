@@ -1,0 +1,46 @@
+# Local mirror of .github/workflows/ci.yml: `just ci` runs the same numbered steps in the same order.
+# On Windows, run it from Git Bash (the recipes are bash).
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+export PROPTEST_RNG_SEED := "20260918"
+
+ecosim := "./target/release/ecosim"
+
+ci: fmt clippy docs test coverage build runs baseline cross
+
+# 1
+fmt:
+    cargo fmt --check
+
+# 2
+clippy:
+    cargo clippy --all-targets -- -D warnings
+
+# 2b
+docs:
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
+# 3
+test:
+    cargo test
+
+# 4
+coverage:
+    cargo llvm-cov --fail-under-lines 85 --ignore-filename-regex 'main\.rs|cli/' --lcov --output-path lcov.info
+
+# 5
+build:
+    cargo build --release
+
+# 6
+runs:
+    for s in 1 2 3; do {{ecosim}} run --seed "$s" --ticks 20000 --out "ci-runs/s$s" --snapshot-every 100 && {{ecosim}} check "ci-runs/s$s"; done
+
+# 7
+baseline:
+    mkdir -p ci-runs && {{ecosim}} sweep --baseline --seeds 1,2,3 | tee ci-runs/baseline-margins.txt
+
+# 8: the release half of the cross-profile determinism test (the debug half ran in step 3)
+cross:
+    ECOSIM_REQUIRE_CROSS=1 cargo test --release --test integration determinism

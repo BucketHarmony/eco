@@ -12,8 +12,10 @@ use std::io;
 use std::path::Path;
 use std::time::Instant;
 
+/// `meta.json` format version; readers reject any other value.
 pub const FORMAT_VERSION: u32 = 1;
 
+/// The first line of `series.csv`.
 pub const SERIES_HEADER: &str =
     "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature";
 
@@ -91,10 +93,12 @@ enum EntityOut {
     Animal(AnimalOut),
 }
 
+/// Snapshot directory name for a tick: `snap_NNNNNN`.
 pub fn snapshot_dir_name(tick: u32) -> String {
     format!("snap_{tick:06}")
 }
 
+/// One `series.csv` data line (no newline).
 pub fn format_row(r: &StatsRow) -> String {
     format!(
         "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
@@ -151,6 +155,7 @@ fn entities(sim: &Sim) -> Vec<EntityOut> {
     out
 }
 
+/// Write the current state as `snap_NNNNNN/` under `run_dir`.
 pub fn write_snapshot(sim: &Sim, run_dir: &Path) -> io::Result<()> {
     let dir = run_dir.join(snapshot_dir_name(sim.tick));
     fs::create_dir_all(&dir)?;
@@ -165,6 +170,7 @@ pub fn write_snapshot(sim: &Sim, run_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Write `meta.json`: format version, dimensions, run settings, species colours, params and overrides.
 pub fn write_meta(
     sim: &Sim,
     seed: u64,
@@ -205,8 +211,11 @@ fn prepare_dir(out: &Path) -> io::Result<()> {
     fs::create_dir_all(out)
 }
 
+/// What `run` returns besides the files it wrote.
 pub struct RunSummary {
+    /// Wall time of the whole run, including writing.
     pub wall_ms: u128,
+    /// Every stats row, tick 0 first.
     pub rows: Vec<StatsRow>,
 }
 
@@ -263,4 +272,137 @@ pub fn run(
     let wall_ms = start.elapsed().as_millis();
     fs::write(out.join("timing.json"), format!("{{\"wall_ms\":{wall_ms}}}"))?;
     Ok(RunSummary { wall_ms, rows })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use serde_json::Value;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    type Entity = (u32, String, f32, f32, u8, u32, String, f32);
+
+    /// Everything a snapshot records, in the snapshot's own encoding. Entity tuples are
+    /// (id, kind, x, y, z, age, stage-or-state, energy); trees have energy 0.
+    #[derive(Debug, PartialEq)]
+    struct Recorded {
+        tick: u32,
+        voxels: [Vec<u8>; 2],
+        columns: [Vec<u8>; 3],
+        patches: Vec<[f32; 4]>,
+        entities: Vec<Entity>,
+    }
+
+    fn scratch_dir() -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "ecosim-snap-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&d);
+        d
+    }
+
+    /// The test-side reader: parse a snapshot directory back.
+    fn read_snapshot(dir: &Path) -> Recorded {
+        let name = dir.file_name().unwrap().to_str().unwrap();
+        let bin = |f: &str| fs::read(dir.join(f)).unwrap();
+        let json = |f: &str| serde_json::from_slice::<Value>(&bin(f)).unwrap();
+        let f = |v: &Value| v.as_f64().unwrap() as f32;
+        let s = |v: &Value| v.as_str().unwrap().to_string();
+        let u = |v: &Value| v.as_u64().unwrap() as u32;
+        let (patches, entities) = (json("patches.json"), json("entities.json"));
+        let patches = patches
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| [f(&p["grass"]), f(&p["shrub"]), f(&p["detritus"]), f(&p["temperature"])]);
+        let entities = entities.as_array().unwrap().iter().map(|e| {
+            let tree = e["kind"] == "tree";
+            let label = if tree { &e["stage"] } else { &e["state"] };
+            let energy = if tree { 0.0 } else { f(&e["energy"]) };
+            (u(&e["id"]), s(&e["kind"]), f(&e["x"]), f(&e["y"]), u(&e["z"]) as u8, u(&e["age"]), s(label), energy)
+        });
+        Recorded {
+            tick: name.strip_prefix("snap_").unwrap().parse().unwrap(),
+            voxels: [bin("material.bin"), bin("light.bin")],
+            columns: [bin("moisture.bin"), bin("fertility.bin"), bin("height.bin")],
+            patches: patches.collect(),
+            entities: entities.collect(),
+        }
+    }
+
+    /// What the snapshot of `sim` should record, derived from the sim state independently of the
+    /// writer: live entities by id (trees, then grazers, then hunters), surface fields rounded to u8
+    /// on soil columns and 0 elsewhere.
+    fn expected(sim: &Sim) -> Recorded {
+        let surface = |field: &[f32]| -> Vec<u8> {
+            (0..COLS)
+                .map(
+                    |c| if sim.world.class[c] == ColClass::Soil { field[c].round().clamp(0.0, 255.0) as u8 } else { 0 },
+                )
+                .collect()
+        };
+        let mut entities = Vec::new();
+        let mut trees: Vec<_> = sim.trees.iter().filter(|t| t.alive).collect();
+        trees.sort_by_key(|t| t.id);
+        for t in trees {
+            let z = sim.world.height[t.col()] + 1;
+            let stage = label(&sim.tree_stage(t));
+            entities.push((t.id, "tree".into(), t.x as f32, t.y as f32, z, t.age, stage, 0.0));
+        }
+        for (kind, group) in [("grazer", &sim.grazers), ("hunter", &sim.hunters)] {
+            let mut v: Vec<_> = group.iter().filter(|a| a.alive).collect();
+            v.sort_by_key(|a| a.id);
+            for a in v {
+                let z = sim.world.height[Sim::animal_col(a)] + 1;
+                entities.push((a.id, kind.into(), a.x, a.y, z, a.age, label(&a.state), a.energy));
+            }
+        }
+        Recorded {
+            tick: sim.tick,
+            voxels: [sim.world.material.clone(), sim.world.light.clone()],
+            columns: [surface(&sim.moisture), surface(&sim.fertility), sim.world.height.clone()],
+            patches: sim.patches.iter().map(|p| [p.grass, p.shrub, p.detritus, p.temperature]).collect(),
+            entities,
+        }
+    }
+
+    /// The lowercase name a stage or state serializes to.
+    fn label(v: &impl Serialize) -> String {
+        serde_json::to_value(v).unwrap().as_str().unwrap().to_string()
+    }
+
+    /// Snapshots are lossy by design (see DECISIONS.md), so the round trip is: write, read back,
+    /// and compare with every field the format records.
+    fn snapshot_round_trips(seed: u64, ticks: u32) -> Result<(), TestCaseError> {
+        let mut sim = Sim::new(Params::load_default(), seed);
+        while sim.tick < ticks {
+            sim.step();
+        }
+        let run_dir = scratch_dir();
+        write_snapshot(&sim, &run_dir).unwrap();
+        let got = read_snapshot(&run_dir.join(snapshot_dir_name(sim.tick)));
+        fs::remove_dir_all(&run_dir).unwrap();
+        prop_assert_eq!(got.voxels[0].len(), WX * WY * WZ);
+        prop_assert!(got == expected(&sim), "snapshot at tick {} of seed {} does not read back", ticks, seed);
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(12)))]
+
+        #[test]
+        fn prop_snapshot_round_trips(seed in any::<u64>(), ticks in 0u32..400) {
+            snapshot_round_trips(seed, ticks)?;
+        }
+    }
+
+    #[test]
+    fn snapshot_regression_after_first_tree_update() {
+        snapshot_round_trips(42, 50).unwrap();
+    }
 }

@@ -5,52 +5,73 @@ use crate::world::{cidx, patch_of, PATCHES_X, UNREACHABLE};
 use rand::Rng;
 use serde::Serialize;
 
+/// Animal species.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
+    /// Eats grass, flees hunters.
     Grazer,
+    /// Hunts grazers.
     Hunter,
 }
 
+/// The behaviour an animal chose on its last update (written to snapshots).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
+    /// Grazer stepping away from the nearest hunter.
     Flee,
+    /// Grazer eating grass in its patch.
     Eat,
+    /// Walking toward a target patch (grazer) or prey (hunter).
     Move,
+    /// Random step: nothing better to do.
     Wander,
+    /// Satiated hunter; makes no attack.
     Rest,
+    /// Hunter attacking prey within the attack radius.
     Hunt,
 }
 
+/// One grazer or hunter.
 #[derive(Debug, Clone)]
 pub struct Animal {
+    /// Unique id, shared with trees (allocated from `Sim::next_id`).
     pub id: u32,
+    /// Species.
     pub kind: Kind,
     /// Column coordinates; always integer-valued.
     pub x: f32,
+    /// Row coordinate; always integer-valued.
     pub y: f32,
+    /// Energy in [0, 100]; the animal dies at 0.
     pub energy: f32,
+    /// Age in ticks.
     pub age: u32,
+    /// Ticks until it may reproduce again.
     pub cooldown: u32,
+    /// Behaviour chosen on the last update.
     pub state: State,
+    /// False once dead; removed at the next compaction.
     pub alive: bool,
 }
 
 /// The 8 neighbour offsets, in a fixed order so random picks are deterministic.
-const NEIGHBOURS: [(i32, i32); 8] =
-    [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
+const NEIGHBOURS: [(i32, i32); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
 
 impl Animal {
+    /// A live animal on column (x, y), in state Wander.
     pub fn new(id: u32, kind: Kind, x: usize, y: usize, energy: f32, age: u32, cooldown: u32) -> Animal {
         Animal { id, kind, x: x as f32, y: y as f32, energy, age, cooldown, state: State::Wander, alive: true }
     }
 
+    /// The column it stands on, as signed coordinates.
     #[inline]
     pub fn col(&self) -> (i32, i32) {
         (self.x as i32, self.y as i32)
     }
 
+    /// The patch it stands in.
     #[inline]
     pub fn patch(&self) -> usize {
         patch_of(self.x as usize, self.y as usize)
@@ -98,7 +119,7 @@ fn nearest_in_grid(
         }
         for &j in &grid[cidx(nx as usize, ny as usize)] {
             let j = j as usize;
-            if found.map_or(true, |(fj, _)| j < fj) && keep(j) {
+            if found.is_none_or(|(fj, _)| j < fj) && keep(j) {
                 found = Some((j, d2));
             }
         }
@@ -113,11 +134,7 @@ fn dist(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
 impl Sim {
     /// Valid (soil, in-world) neighbour columns of (x, y), in NEIGHBOURS order.
     fn valid_neighbours(&self, x: i32, y: i32) -> Vec<(i32, i32)> {
-        NEIGHBOURS
-            .iter()
-            .map(|&(dx, dy)| (x + dx, y + dy))
-            .filter(|&(nx, ny)| self.world.is_soil(nx, ny))
-            .collect()
+        NEIGHBOURS.iter().map(|&(dx, dy)| (x + dx, y + dy)).filter(|&(nx, ny)| self.world.is_soil(nx, ny)).collect()
     }
 
     fn random_step(&mut self, x: i32, y: i32) -> Option<(i32, i32)> {
@@ -230,11 +247,7 @@ impl Sim {
         if scored.iter().any(|&(q, s)| q == p && s >= floor) {
             return p;
         }
-        scored
-            .iter()
-            .filter(|s| s.1 >= floor)
-            .min_by_key(|s| preference(id, s.0))
-            .map_or(p, |s| s.0)
+        scored.iter().filter(|s| s.1 >= floor).min_by_key(|s| preference(id, s.0)).map_or(p, |s| s.0)
     }
 
     fn update_grazer(&mut self, i: usize) {
@@ -288,11 +301,18 @@ impl Sim {
             let g = &mut self.grazers[i];
             g.energy -= gp.repro_cost;
             g.cooldown = gp.cooldown;
-            let id = self.alloc_id();
-            self.grazer_grid[cidx(cx, cy)].push(self.grazers.len() as u32);
-            self.grazers.push(Animal::new(id, Kind::Grazer, cx, cy, gp.newborn_energy, 0, gp.cooldown));
-            self.grazers_in_patch[p] += 1;
+            self.spawn_grazer(cx, cy);
         }
+    }
+
+    /// Add a newborn grazer on column (x, y), keeping the per-patch counts and the column grid current.
+    fn spawn_grazer(&mut self, x: usize, y: usize) {
+        let gp = &self.params.grazer;
+        let (energy, cooldown) = (gp.newborn_energy, gp.cooldown);
+        let id = self.alloc_id();
+        self.grazer_grid[cidx(x, y)].push(self.grazers.len() as u32);
+        self.grazers.push(Animal::new(id, Kind::Grazer, x, y, energy, 0, cooldown));
+        self.grazers_in_patch[patch_of(x, y)] += 1;
     }
 
     /// Nearest attackable grazer within the seek radius of column (x, y): (index, distance).
@@ -328,6 +348,7 @@ impl Sim {
         }
     }
 
+    /// One hunter update: rest when satiated, else attack, approach or wander; then energy, death and birth.
     pub fn update_hunter(&mut self, i: usize) {
         let hp = self.params.hunter.clone();
         {
@@ -391,7 +412,9 @@ impl Sim {
 mod tests {
     use super::*;
     use crate::params::Params;
-    use crate::world::{World, COLS};
+    use crate::sim::offsets_within;
+    use crate::world::{World, COLS, WX, WY};
+    use proptest::prelude::*;
     use rand::SeedableRng;
 
     #[test]
@@ -425,5 +448,255 @@ mod tests {
     fn refugium_blocks_attack() {
         assert!(attack_outcome(0.4), "grazer outside refugium is killed");
         assert!(!attack_outcome(0.6), "grazer in shrub > 0.5 cannot be attacked");
+    }
+
+    fn intake_bounded_and_monotone(a: f32, b: f32, k: f32) -> Result<(), TestCaseError> {
+        let max = Params::load_default().grazer.intake_max;
+        let (lo, hi) = (grazing_intake(a.min(b), max, k), grazing_intake(a.max(b), max, k));
+        prop_assert!((0.0..=3.0).contains(&lo) && (0.0..=3.0).contains(&hi), "{lo} {hi}");
+        prop_assert!(lo <= hi, "intake fell from {lo} to {hi} as grass rose");
+        Ok(())
+    }
+
+    /// An all-soil sim with grazers at `grazers` and per-patch shrub cover `shrub`.
+    fn meadow(grazers: &[(usize, usize)], shrub: &[f32]) -> Sim {
+        let mut sim = Sim::bare(&vec![14u8; COLS]);
+        for (p, &s) in shrub.iter().enumerate() {
+            sim.patches[p].shrub = s;
+        }
+        for &(x, y) in grazers {
+            sim.spawn_grazer(x, y);
+        }
+        sim
+    }
+
+    fn add_hunter(sim: &mut Sim, (x, y): (usize, usize), energy: f32) {
+        let id = sim.alloc_id();
+        sim.hunters.push(Animal::new(id, Kind::Hunter, x, y, energy, 0, 100));
+        sim.rebuild_hunter_grid();
+    }
+
+    fn positions(sim: &Sim) -> Vec<(bool, f32, f32)> {
+        sim.grazers.iter().map(|g| (g.alive, g.x, g.y)).collect()
+    }
+
+    /// Stability rule 3: a grazer in a patch whose shrub exceeds the threshold is never chosen as
+    /// prey, and one hunter update leaves it alive and where it was.
+    fn refuge_is_never_attacked(
+        grazers: &[(usize, usize)],
+        shrub: &[f32],
+        hunter: (usize, usize),
+        energy: f32,
+        kill_prob: f64,
+    ) -> Result<(), TestCaseError> {
+        let mut sim = meadow(grazers, shrub);
+        sim.params.hunter.kill_prob = kill_prob;
+        add_hunter(&mut sim, hunter, energy);
+        let threshold = sim.params.hunter.refugium_shrub;
+        let in_refuge = |sim: &Sim, j: usize| sim.patches[sim.grazers[j].patch()].shrub > threshold;
+        if let Some((j, _)) = sim.nearest_prey(hunter.0 as i32, hunter.1 as i32) {
+            prop_assert!(!in_refuge(&sim, j), "grazer {j} in a refuge was selected as prey");
+        }
+        // Refuge membership is taken before the update: a failed attack can push a grazer into one.
+        let sheltered: Vec<bool> = (0..sim.grazers.len()).map(|j| in_refuge(&sim, j)).collect();
+        let before = positions(&sim);
+        sim.update_hunter(0);
+        for (j, (b, a)) in before.iter().zip(positions(&sim)).enumerate() {
+            if sheltered[j] {
+                prop_assert_eq!(*b, a, "refuge grazer {} was touched", j);
+            }
+        }
+        Ok(())
+    }
+
+    /// Stability rule 2: a hunter above satiation makes no attack, whatever is in reach.
+    fn satiated_hunter_rests(
+        grazers: &[(usize, usize)],
+        hunter: (usize, usize),
+        energy: f32,
+    ) -> Result<(), TestCaseError> {
+        let mut sim = meadow(grazers, &[0.0; 64]);
+        sim.params.hunter.kill_prob = 1.0;
+        add_hunter(&mut sim, hunter, energy);
+        let before = positions(&sim);
+        sim.update_hunter(0);
+        prop_assert_eq!(before, positions(&sim), "a satiated hunter touched a grazer");
+        prop_assert_eq!(sim.hunters[0].state, State::Rest);
+        Ok(())
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Move(usize, usize, usize),
+        Birth(usize),
+        Death(usize),
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            3 => (any::<usize>(), 0..WX, 0..WY).prop_map(|(i, x, y)| Op::Move(i, x, y)),
+            1 => any::<usize>().prop_map(Op::Birth),
+            1 => any::<usize>().prop_map(Op::Death),
+        ]
+    }
+
+    fn sorted_cells(grid: &[Vec<u32>]) -> Vec<Vec<u32>> {
+        grid.iter()
+            .map(|c| {
+                let mut c = c.clone();
+                c.sort_unstable();
+                c
+            })
+            .collect()
+    }
+
+    /// The incrementally kept grazer grid and patch counts equal a rebuild after every operation.
+    /// Order within a grid cell is irrelevant (queries take the lowest index), so cells compare sorted.
+    fn grids_match_rebuild(start: &[(usize, usize)], ops: &[Op]) -> Result<(), TestCaseError> {
+        let mut sim = meadow(start, &[0.0; 64]);
+        for (n, op) in ops.iter().enumerate() {
+            let live: Vec<usize> = (0..sim.grazers.len()).filter(|&i| sim.grazers[i].alive).collect();
+            match *op {
+                _ if live.is_empty() => sim.spawn_grazer(0, 0),
+                Op::Move(i, x, y) => sim.move_grazer(live[i % live.len()], x as i32, y as i32),
+                Op::Birth(i) => {
+                    let (x, y) = sim.grazers[live[i % live.len()]].col();
+                    sim.spawn_grazer(x as usize, y as usize);
+                }
+                Op::Death(i) => sim.kill_grazer(live[i % live.len()]),
+            }
+            let kept = (sorted_cells(&sim.grazer_grid), sim.grazers_in_patch.clone());
+            let mut counts = vec![0u32; crate::world::PATCHES];
+            sim.grazers.iter().filter(|g| g.alive).for_each(|g| counts[g.patch()] += 1);
+            sim.rebuild_grazer_grid();
+            prop_assert_eq!(kept, (sorted_cells(&sim.grazer_grid), counts), "after op {} ({:?})", n, op);
+        }
+        Ok(())
+    }
+
+    /// `nearest_in_grid` equals a brute-force scan: minimum (d², index) over kept animals within r.
+    fn nearest_matches_brute_force(
+        animals: &[(i32, i32)],
+        order: &[usize],
+        keep: &[bool],
+        (x, y): (i32, i32),
+        r: f32,
+    ) -> Result<(), TestCaseError> {
+        let mut grid = vec![Vec::new(); COLS];
+        for &j in order {
+            let (ax, ay) = animals[j];
+            grid[cidx(ax as usize, ay as usize)].push(j as u32);
+        }
+        let got = nearest_in_grid(&grid, &offsets_within(r), x, y, |j| keep[j]);
+        let want = animals
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| keep[j])
+            .map(|(j, &(ax, ay))| ((ax - x).pow(2) + (ay - y).pow(2), j))
+            .filter(|&(d2, _)| (d2 as f32).sqrt() <= r)
+            .min()
+            .map(|(d2, j)| (j, (d2 as f32).sqrt()));
+        prop_assert_eq!(got, want);
+        Ok(())
+    }
+
+    fn column() -> impl Strategy<Value = (usize, usize)> {
+        (0..WX, 0..WY)
+    }
+
+    type NearestCase = (Vec<(i32, i32)>, Vec<usize>, Vec<bool>, (i32, i32), f32);
+
+    fn nearest_case() -> impl Strategy<Value = NearestCase> {
+        // A 12×12 corner window keeps animals dense enough for ties and exercises the world edge.
+        (1usize..=200).prop_flat_map(|n| {
+            (
+                prop::collection::vec((0i32..12, 0i32..12), n),
+                Just((0..n).collect::<Vec<_>>()).prop_shuffle(),
+                prop::collection::vec(any::<bool>(), n),
+                (0i32..12, 0i32..12),
+                0.0f32..20.0,
+            )
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(64)))]
+
+        #[test]
+        fn prop_intake_bounded_and_monotone(a in 0.0f32..=1.0, b in 0.0f32..=1.0, k in 0.0f32..100.0) {
+            intake_bounded_and_monotone(a, b, k)?;
+        }
+
+        #[test]
+        fn prop_refuge_is_never_attacked(
+            grazers in prop::collection::vec(column(), 1..40),
+            shrub in prop::collection::vec(0.0f32..1.0, 64),
+            hunter in column(),
+            energy in 1.0f32..=85.0,
+            kill_prob in 0.0f64..=1.0,
+        ) {
+            refuge_is_never_attacked(&grazers, &shrub, hunter, energy, kill_prob)?;
+        }
+
+        #[test]
+        fn prop_satiated_hunter_rests(
+            grazers in prop::collection::vec(column(), 1..40),
+            hunter in column(),
+            energy in 85.001f32..=100.0,
+        ) {
+            satiated_hunter_rests(&grazers, hunter, energy)?;
+        }
+
+        #[test]
+        fn prop_grids_match_rebuild(
+            start in prop::collection::vec(column(), 0..30),
+            ops in prop::collection::vec(op(), 1..=500),
+        ) {
+            grids_match_rebuild(&start, &ops)?;
+        }
+
+        #[test]
+        fn prop_nearest_matches_brute_force((animals, order, keep, at, r) in nearest_case()) {
+            nearest_matches_brute_force(&animals, &order, &keep, at, r)?;
+        }
+    }
+
+    #[test]
+    fn intake_regression_saturated_vs_linear() {
+        intake_bounded_and_monotone(0.1, 0.2, 20.0).unwrap();
+    }
+
+    #[test]
+    fn refuge_regression_nearer_grazer_in_refuge() {
+        // Patch 0 is a refuge, patch 1 is not; the refuge grazer is nearer but must be skipped.
+        let mut shrub = [0.0; 64];
+        shrub[0] = 0.9;
+        refuge_is_never_attacked(&[(7, 3), (9, 3)], &shrub, (7, 4), 50.0, 1.0).unwrap();
+    }
+
+    #[test]
+    fn refuge_regression_failed_attack_pushes_grazer_into_refuge() {
+        // Found by proptest: an exposed grazer displaced by a failed attack lands in a refuge patch.
+        let mut shrub = [0.0; 64];
+        shrub[63] = 0.86;
+        refuge_is_never_attacked(&[(61, 53)], &shrub, (61, 51), 1.0, 0.0).unwrap();
+    }
+
+    #[test]
+    fn satiation_regression_grazer_in_reach() {
+        satiated_hunter_rests(&[(10, 10)], (11, 10), 90.0).unwrap();
+    }
+
+    #[test]
+    fn grids_regression_move_across_patch_then_die() {
+        let ops = [Op::Move(0, 8, 0), Op::Birth(0), Op::Move(1, 63, 63), Op::Death(0), Op::Death(0)];
+        grids_match_rebuild(&[(7, 0), (7, 0)], &ops).unwrap();
+    }
+
+    #[test]
+    fn nearest_regression_tie_goes_to_lowest_index() {
+        // Indices 2 and 1 are both at distance 1 (inserted in that order); 0 is filtered out.
+        let animals = [(5, 5), (6, 5), (4, 5)];
+        nearest_matches_brute_force(&animals, &[2, 0, 1], &[false, true, true], (5, 5), 3.0).unwrap();
     }
 }

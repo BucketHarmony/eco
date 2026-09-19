@@ -1,0 +1,96 @@
+# ecosim CI gate. The seven numbered steps run in this order here and in `just ci` (ecosim/justfile);
+# ecosim/tests/ci.rs checks both. Step 2b builds the docs warning-free; step 8 is the release half of the cross-profile determinism test.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fixed so the property tests explore the same cases on every CI run (DECISIONS.md, Test hardening).
+  PROPTEST_RNG_SEED: "20260918"
+
+defaults:
+  run:
+    working-directory: ecosim
+    shell: bash
+
+jobs:
+  ecosim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ecosim/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('ecosim/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # A cached binary from an older commit would make the cross-profile test compare stale output.
+      - name: drop cached binaries
+        run: rm -f target/debug/ecosim target/release/ecosim
+
+      - name: 1 fmt
+        run: cargo fmt --check
+
+      - name: 2 clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: 2b docs
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
+      - name: 3 test (debug)
+        run: cargo test
+
+      - name: 4 coverage
+        run: cargo llvm-cov --fail-under-lines 85 --ignore-filename-regex 'main\.rs|cli/' --lcov --output-path lcov.info
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: ecosim/lcov.info
+
+      - name: 5 build release
+        run: cargo build --release
+
+      - name: 6 runs and checks
+        run: |
+          for s in 1 2 3; do
+            ./target/release/ecosim run --seed "$s" --ticks 20000 --out "ci-runs/s$s" --snapshot-every 100
+            ./target/release/ecosim check "ci-runs/s$s"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: series
+          path: ecosim/ci-runs/*/series.csv
+
+      - name: 7 sweep baseline
+        run: ./target/release/ecosim sweep --baseline --seeds 1,2,3 | tee ci-runs/baseline-margins.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: baseline-margins
+          path: ecosim/ci-runs/baseline-margins.txt
+
+      - name: 8 determinism across profiles
+        run: ECOSIM_REQUIRE_CROSS=1 cargo test --release --test integration determinism

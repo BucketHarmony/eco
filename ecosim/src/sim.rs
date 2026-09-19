@@ -8,29 +8,45 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::Serialize;
 
+/// Per-patch state (8×8 columns).
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct Patch {
+    /// Grass density in [0, 1].
     pub grass: f32,
+    /// Shrub density in [0, 1].
     pub shrub: f32,
+    /// Detritus pool; decays into fertility.
     pub detritus: f32,
+    /// Temperature, °C.
     pub temperature: f32,
 }
 
 /// One `series.csv` row.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StatsRow {
+    /// Tick the row describes.
     pub tick: u32,
+    /// Live grazers.
     pub grazers: u32,
+    /// Live hunters.
     pub hunters: u32,
+    /// Live trees.
     pub trees: u32,
+    /// Mean grass density over patches with soil.
     pub grass_mean: f32,
+    /// Mean shrub density over patches with soil.
     pub shrub_mean: f32,
+    /// Mean surface moisture over soil columns.
     pub moisture_mean: f32,
+    /// Mean surface fertility over soil columns.
     pub fertility_mean: f32,
+    /// Total detritus over all patches.
     pub detritus_total: f32,
+    /// Mean patch temperature.
     pub temperature: f32,
 }
 
+/// Marks a column with no trunk in `Sim::trunk_at`.
 pub const NO_TREE: u32 = u32::MAX;
 
 fn rebuild_grid(grid: &mut [Vec<u32>], animals: &[Animal]) {
@@ -41,7 +57,7 @@ fn rebuild_grid(grid: &mut [Vec<u32>], animals: &[Animal]) {
 }
 
 /// All (dx, dy, dx² + dy²) with Euclidean length ≤ r, sorted nearest first (then dy, dx).
-fn offsets_within(r: f32) -> Vec<(i32, i32, i32)> {
+pub(crate) fn offsets_within(r: f32) -> Vec<(i32, i32, i32)> {
     let k = r.max(0.0) as i32;
     let mut v: Vec<(i32, i32, i32)> = (-k..=k)
         .flat_map(|dy| (-k..=k).map(move |dx| (dx, dy, dx * dx + dy * dy)))
@@ -51,17 +67,25 @@ fn offsets_within(r: f32) -> Vec<(i32, i32, i32)> {
     v
 }
 
+/// The whole simulation state.
 pub struct Sim {
+    /// Parameters the run was started with.
     pub params: Params,
+    /// The single random source for the run.
     pub rng: ChaCha8Rng,
+    /// Terrain, materials and light.
     pub world: World,
     /// Surface moisture per column (soil columns only; others stay 0).
     pub moisture: Vec<f32>,
     /// Surface fertility per column (soil columns only; others stay 0).
     pub fertility: Vec<f32>,
+    /// Per-patch state, indexed by patch.
     pub patches: Vec<Patch>,
+    /// Trees, live and dead since the last compaction.
     pub trees: Vec<Tree>,
+    /// Grazers, live and dead since the last compaction.
     pub grazers: Vec<Animal>,
+    /// Hunters, live and dead since the last compaction.
     pub hunters: Vec<Animal>,
     /// Index into `trees` of the live tree whose trunk stands on each column, or NO_TREE.
     pub trunk_at: Vec<u32>,
@@ -77,7 +101,9 @@ pub struct Sim {
     pub seek_offsets: Vec<(i32, i32, i32)>,
     /// Column offsets within the grazer flee radius, nearest first.
     pub flee_offsets: Vec<(i32, i32, i32)>,
+    /// Ticks completed.
     pub tick: u32,
+    /// Next entity id to hand out.
     pub next_id: u32,
 }
 
@@ -89,6 +115,7 @@ impl Sim {
         Sim::with_world(params, rng, world)
     }
 
+    /// A tick-0 sim on a given world, with initial trees and animals placed using `rng`.
     pub fn with_world(params: Params, rng: ChaCha8Rng, world: World) -> Sim {
         let c = &params.climate;
         let mut moisture = vec![0.0; COLS];
@@ -139,6 +166,18 @@ impl Sim {
         sim
     }
 
+    /// A sim on the given terrain with no trees or animals and a fixed RNG: the unit tests' fixture.
+    #[cfg(test)]
+    pub(crate) fn bare(heights: &[u8]) -> Sim {
+        let mut p = Params::load_default();
+        p.tree.initial_count = 0;
+        p.grazer.start_count = 0;
+        p.hunter.start_count = 0;
+        let world = World::from_heights(heights, &p);
+        Sim::with_world(p, ChaCha8Rng::seed_from_u64(3), world)
+    }
+
+    /// Hand out the next entity id.
     pub fn alloc_id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
@@ -199,16 +238,16 @@ impl Sim {
         let t = self.tick;
         self.update_animals();
         self.update_producers(t);
-        if t % self.params.tree.update_every == 0 {
+        if t.is_multiple_of(self.params.tree.update_every) {
             self.update_trees();
         }
-        if t % 10 == 0 {
+        if t.is_multiple_of(10) {
             self.update_soil(t);
         }
-        if t % 100 == 0 {
+        if t.is_multiple_of(100) {
             self.update_temperature(t);
         }
-        if t % self.params.world.compact_every == 0 {
+        if t.is_multiple_of(self.params.world.compact_every) {
             self.compact();
         }
     }
@@ -225,34 +264,37 @@ impl Sim {
         }
     }
 
+    /// Recompute the grazer grid from scratch.
     pub fn rebuild_grazer_grid(&mut self) {
         rebuild_grid(&mut self.grazer_grid, &self.grazers);
     }
 
+    /// Recompute the hunter grid from scratch.
     pub fn rebuild_hunter_grid(&mut self) {
         rebuild_grid(&mut self.hunter_grid, &self.hunters);
     }
 
+    /// Live grazers.
     pub fn count_grazers(&self) -> u32 {
         self.grazers.iter().filter(|a| a.alive).count() as u32
     }
 
+    /// Live hunters.
     pub fn count_hunters(&self) -> u32 {
         self.hunters.iter().filter(|a| a.alive).count() as u32
     }
 
+    /// Live trees.
     pub fn count_trees(&self) -> u32 {
         self.trees.iter().filter(|t| t.alive).count() as u32
     }
 
+    /// The `series.csv` row for the current state.
     pub fn stats(&self) -> StatsRow {
-        let soil_patches: Vec<&Patch> = (0..PATCHES)
-            .filter(|&p| !self.world.patch_soil[p].is_empty())
-            .map(|p| &self.patches[p])
-            .collect();
+        let soil_patches: Vec<&Patch> =
+            (0..PATCHES).filter(|&p| !self.world.patch_soil[p].is_empty()).map(|p| &self.patches[p]).collect();
         let np = soil_patches.len().max(1) as f64;
-        let soil_cols: Vec<usize> =
-            (0..COLS).filter(|&c| self.world.class[c] == ColClass::Soil).collect();
+        let soil_cols: Vec<usize> = (0..COLS).filter(|&c| self.world.class[c] == ColClass::Soil).collect();
         let nc = soil_cols.len().max(1) as f64;
         StatsRow {
             tick: self.tick,
@@ -261,13 +303,10 @@ impl Sim {
             trees: self.count_trees(),
             grass_mean: (soil_patches.iter().map(|p| p.grass as f64).sum::<f64>() / np) as f32,
             shrub_mean: (soil_patches.iter().map(|p| p.shrub as f64).sum::<f64>() / np) as f32,
-            moisture_mean: (soil_cols.iter().map(|&c| self.moisture[c] as f64).sum::<f64>() / nc)
-                as f32,
-            fertility_mean: (soil_cols.iter().map(|&c| self.fertility[c] as f64).sum::<f64>()
-                / nc) as f32,
+            moisture_mean: (soil_cols.iter().map(|&c| self.moisture[c] as f64).sum::<f64>() / nc) as f32,
+            fertility_mean: (soil_cols.iter().map(|&c| self.fertility[c] as f64).sum::<f64>() / nc) as f32,
             detritus_total: self.patches.iter().map(|p| p.detritus as f64).sum::<f64>() as f32,
-            temperature: (self.patches.iter().map(|p| p.temperature as f64).sum::<f64>()
-                / PATCHES as f64) as f32,
+            temperature: (self.patches.iter().map(|p| p.temperature as f64).sum::<f64>() / PATCHES as f64) as f32,
         }
     }
 }

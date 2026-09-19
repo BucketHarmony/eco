@@ -7,9 +7,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// First tick of the invariant window; the burn-in before it is ignored.
 pub const WINDOW_START: u32 = 2000;
+/// Runtime invariant limit for a 20000-tick run, in milliseconds.
 pub const RUNTIME_LIMIT_MS: u64 = 30_000;
 
+/// Read and parse `series.csv` from a run directory.
 pub fn read_series(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
     let path = run_dir.join("series.csv");
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -78,11 +81,11 @@ pub fn grazer_maxima(rows: &[StatsRow], from: usize, to: usize) -> Vec<usize> {
         let hi = (t + 500).min(ma.len() - 1);
         let mut ok = true;
         let mut strictly = false;
-        for s in lo..=hi {
+        for (s, u) in ma.iter().enumerate().take(hi + 1).skip(lo) {
             if s == t {
                 continue;
             }
-            if let Some(u) = ma[s] {
+            if let Some(u) = *u {
                 if u > v {
                     ok = false;
                     break;
@@ -93,7 +96,8 @@ pub fn grazer_maxima(rows: &[StatsRow], from: usize, to: usize) -> Vec<usize> {
             }
         }
         if ok && strictly {
-            let plateau_continues = out.last().is_some_and(|&p| ma[p] == Some(v) && (p + 1..t).all(|s| ma[s] == Some(v)));
+            let plateau_continues =
+                out.last().is_some_and(|&p| ma[p] == Some(v) && (p + 1..t).all(|s| ma[s] == Some(v)));
             if !plateau_continues {
                 out.push(t);
             }
@@ -104,21 +108,26 @@ pub fn grazer_maxima(rows: &[StatsRow], from: usize, to: usize) -> Vec<usize> {
 
 /// Everything the invariants look at: the series plus the two facts that live outside it.
 pub struct Series {
+    /// One row per tick, starting at tick 0.
     pub rows: Vec<StatsRow>,
     /// Mature trees in the tick-10000 snapshot; `None` when the run is shorter than 10000 ticks.
     pub mature_at_10000: Option<Result<usize, String>>,
+    /// Wall time of the run, if known and evaluated.
     pub timing: Timing,
 }
 
+/// Where the runtime invariant gets its wall time.
 pub enum Timing {
     /// Wall time from `timing.json`.
     Ms(u64),
+    /// `timing.json` absent or unreadable: the runtime invariant fails.
     Missing,
     /// Not evaluated (sweeps: wall time isn't comparable across parallel jobs).
     Excluded,
 }
 
 impl Series {
+    /// Load the series, the tick-10000 mature-tree count and `timing.json` from a run directory.
     pub fn from_run_dir(run_dir: &Path) -> Result<Series, String> {
         let rows = read_series(run_dir)?;
         let mature_at_10000 = (rows.len() > 10_000).then(|| mature_trees_at(run_dir, 10_000));
@@ -131,6 +140,9 @@ impl Series {
     }
 }
 
+/// Reads one series column from a row.
+type Column<T> = fn(&StatsRow) -> T;
+
 /// One invariant's outcome. `margin` is the signed distance from `value` to `threshold` as a fraction
 /// of the threshold, positive when passing. Invariants with several parts (species, band sides)
 /// report the part with the smallest margin in `value`/`threshold`/`margin`.
@@ -138,24 +150,34 @@ impl Series {
 pub struct CheckLine {
     /// Short column-safe id used in sweep output.
     pub key: &'static str,
+    /// Human-readable invariant, as printed by `ecosim check`.
     pub name: &'static str,
+    /// Whether the invariant holds.
     pub pass: bool,
+    /// What was measured, as printed by `ecosim check`.
     pub observed: String,
+    /// The measured value of the binding part.
     pub value: f64,
+    /// The limit that value is compared with.
     pub threshold: f64,
+    /// Signed distance from `value` to `threshold` as a fraction of the threshold; ≥ 0 passes.
     pub margin: f64,
 }
 
+/// Every invariant evaluated on one run, in report order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckReport {
+    /// One line per invariant.
     pub lines: Vec<CheckLine>,
 }
 
 impl CheckReport {
+    /// True when every invariant passes.
     pub fn pass(&self) -> bool {
         self.lines.iter().all(|l| l.pass)
     }
 
+    /// The line for an invariant key, if it was evaluated.
     pub fn get(&self, key: &str) -> Option<&CheckLine> {
         self.lines.iter().find(|l| l.key == key)
     }
@@ -217,9 +239,7 @@ fn mature_trees_at(run_dir: &Path, tick: u32) -> Result<usize, String> {
     let p: PathBuf = run_dir.join(snapshot_dir_name(tick)).join("entities.json");
     let text = fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
-    Ok(v.as_array()
-        .map(|a| a.iter().filter(|e| e["kind"] == "tree" && e["stage"] == "mature").count())
-        .unwrap_or(0))
+    Ok(v.as_array().map(|a| a.iter().filter(|e| e["kind"] == "tree" && e["stage"] == "mature").count()).unwrap_or(0))
 }
 
 /// `ecosim check` on a run directory.
@@ -246,7 +266,7 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
     }
     let from = (WINDOW_START as usize).min(last);
     let win = &rows[from..];
-    let species: [(&str, fn(&StatsRow) -> u32); 3] =
+    let species: [(&str, Column<u32>); 3] =
         [("grazers", |r| r.grazers), ("hunters", |r| r.hunters), ("trees", |r| r.trees)];
 
     // 1. No species count reaches 0 (every minimum ≥ 1).
@@ -380,7 +400,7 @@ pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
     if rows.is_empty() {
         return Err("series.csv has no rows".into());
     }
-    let cols: [(&str, fn(&StatsRow) -> f64); 9] = [
+    let cols: [(&str, Column<f64>); 9] = [
         ("grazers", |r| r.grazers as f64),
         ("hunters", |r| r.hunters as f64),
         ("trees", |r| r.trees as f64),
@@ -400,10 +420,9 @@ pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
         out.push(format!("{name:<16}{min:>12.4}{max:>12.4}{mean:>12.4}"));
     }
     out.push(match first_extinction(&rows) {
-        Some(r) => format!(
-            "first extinction: tick {} (grazers={} hunters={} trees={})",
-            r.tick, r.grazers, r.hunters, r.trees
-        ),
+        Some(r) => {
+            format!("first extinction: tick {} (grazers={} hunters={} trees={})", r.tick, r.grazers, r.hunters, r.trees)
+        }
         None => "first extinction: none".into(),
     });
     Ok(out)
@@ -449,6 +468,7 @@ pub fn diff_runs(a: &Path, b: &Path) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn rows_from(grazers: impl Fn(usize) -> u32, n: usize) -> Vec<StatsRow> {
         (0..n)
@@ -505,5 +525,181 @@ mod tests {
         for l in &r.lines {
             assert_eq!(l.pass, l.margin >= 0.0, "{l:?}");
         }
+    }
+
+    /// A synthetic 20000-tick series that meets every invariant: sine grazers (period P, base B,
+    /// amplitude A), constant hunters H, trees rising linearly from T0 to 2·T0, grass and fertility
+    /// constant inside their bands.
+    #[derive(Debug, Clone)]
+    struct Healthy {
+        period: f64,
+        base: f64,
+        amp: f64,
+        hunters: u32,
+        t0: u32,
+        grass: f32,
+        fertility: f32,
+        mature: usize,
+        ms: u64,
+    }
+
+    fn healthy() -> impl Strategy<Value = Healthy> {
+        (
+            2000.0..5000.0,
+            100.0..300.0,
+            0.2f64..0.5,
+            5u32..50,
+            10u32..50,
+            0.2f32..0.8,
+            60.0f32..200.0,
+            35usize..200,
+            0u64..30_000,
+        )
+            .prop_map(|(period, base, a, hunters, t0, grass, fertility, mature, ms)| Healthy {
+                period,
+                base,
+                amp: (base * a).max(20.0),
+                hunters,
+                t0,
+                grass,
+                fertility,
+                mature,
+                ms,
+            })
+    }
+
+    fn build(h: &Healthy) -> Series {
+        let rows = (0..=20_000u32)
+            .map(|t| StatsRow {
+                tick: t,
+                grazers: (h.base + h.amp * (t as f64 * std::f64::consts::TAU / h.period).sin()).round() as u32,
+                hunters: h.hunters,
+                trees: h.t0 + h.t0 * t / 20_000,
+                grass_mean: h.grass,
+                shrub_mean: 0.2,
+                moisture_mean: 100.0,
+                fertility_mean: h.fertility,
+                detritus_total: 10.0,
+                temperature: 12.0,
+            })
+            .collect();
+        Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms) }
+    }
+
+    /// The invariants a violation may break: all but `tick_10000`, which needs a run under 10000 ticks.
+    const VIOLABLE: [&str; 10] = [
+        "run_length",
+        "no_extinction",
+        "max_10x",
+        "grazer_cycle",
+        "fertility_band",
+        "grass_band",
+        "tree_growth",
+        "runtime",
+        "mature_trees_10k",
+        "animals_10k",
+    ];
+
+    /// Break exactly one invariant at tick `t` (in [2001, 19999], never 10000). `side` picks the band
+    /// side; `keep` is the row count for `run_length` (15001..=20000).
+    fn violate(s: &mut Series, key: &str, t: usize, side: bool, keep: usize) {
+        let rows = &mut s.rows;
+        match key {
+            "run_length" => rows.truncate(keep),
+            "no_extinction" => rows[t].hunters = 0,
+            "max_10x" => rows[t].trees = 10 * rows[2000].trees + 1,
+            "grazer_cycle" => rows.iter_mut().for_each(|r| r.grazers = 150),
+            "fertility_band" => rows[t].fertility_mean = if side { 39.9 } else { 220.1 },
+            "grass_band" => rows[t].grass_mean = if side { 0.049 } else { 0.951 },
+            "tree_growth" => rows[20_000].trees = rows[0].trees,
+            "runtime" => s.timing = Timing::Ms(30_000 + t as u64),
+            "mature_trees_10k" => s.mature_at_10000 = Some(Ok(t % 35)),
+            "animals_10k" => rows[10_000].hunters = 1,
+            _ => unreachable!("{key}"),
+        }
+    }
+
+    fn failing(s: &Series) -> Vec<&'static str> {
+        evaluate(s).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect()
+    }
+
+    fn violation_fails_only_itself(
+        h: &Healthy,
+        key: &str,
+        t: usize,
+        side: bool,
+        keep: usize,
+    ) -> Result<(), TestCaseError> {
+        let mut s = build(h);
+        prop_assert_eq!(failing(&s), Vec::<&str>::new(), "healthy series fails: {:?}", h);
+        violate(&mut s, key, t, side, keep);
+        prop_assert_eq!(failing(&s), vec![key]);
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(24)))]
+
+        #[test]
+        fn prop_one_violation_fails_exactly_that_invariant(
+            h in healthy(),
+            key in prop::sample::select(&VIOLABLE[..]),
+            t in (2001usize..=19_999).prop_filter("not tick 10000", |&t| t != 10_000),
+            side in any::<bool>(),
+            keep in 15_001usize..=20_000,
+        ) {
+            violation_fails_only_itself(&h, key, t, side, keep)?;
+        }
+    }
+
+    #[test]
+    fn evaluate_regression_each_violation_on_one_series() {
+        let h = Healthy {
+            period: 3000.0,
+            base: 150.0,
+            amp: 50.0,
+            hunters: 10,
+            t0: 20,
+            grass: 0.5,
+            fertility: 100.0,
+            mature: 40,
+            ms: 9000,
+        };
+        for key in VIOLABLE {
+            violation_fails_only_itself(&h, key, 12_345, true, 17_000).unwrap();
+        }
+    }
+
+    #[test]
+    fn stats_and_diff_on_small_run_dirs() {
+        let root = std::env::temp_dir().join(format!("ecosim-check-{}", std::process::id()));
+        let (a, b) = (root.join("a"), root.join("b"));
+        let rows = rows_from(|t| if t == 3 { 0 } else { 10 + t as u32 }, 5);
+        for d in [&a, &b] {
+            fs::create_dir_all(d.join("snap_000000")).unwrap();
+            fs::write(d.join("series.csv"), crate::output::series_csv(&rows)).unwrap();
+            fs::write(d.join("snap_000000").join("height.bin"), [1u8, 2]).unwrap();
+        }
+        let lines = stats_report(&a).unwrap();
+        assert_eq!(lines.len(), 11, "{lines:?}");
+        assert!(lines[1].starts_with("grazers") && lines[1].contains("14.0000"), "{}", lines[1]);
+        assert_eq!(lines[10], "first extinction: tick 3 (grazers=0 hunters=5 trees=20)");
+        assert_eq!(diff_runs(&a, &b).unwrap(), Vec::<String>::new());
+
+        fs::write(b.join("timing.json"), "{}").unwrap();
+        fs::write(b.join("snap_000000").join("height.bin"), [1u8, 3]).unwrap();
+        fs::write(a.join("only_a.txt"), "").unwrap();
+        fs::write(b.join("only_b.txt"), "").unwrap();
+        let d = diff_runs(&a, &b).unwrap();
+        assert_eq!(d.len(), 3, "{d:?}");
+        assert!(d.iter().any(|l| l == "differs: snap_000000/height.bin"));
+        assert!(d.iter().any(|l| l.starts_with("only in") && l.ends_with("only_a.txt")));
+        assert!(d.iter().any(|l| l.starts_with("only in") && l.ends_with("only_b.txt")));
+
+        fs::write(a.join("series.csv"), crate::output::series_csv(&[])).unwrap();
+        assert!(stats_report(&a).is_err());
+        assert!(stats_report(&root.join("missing")).is_err());
+        assert!(diff_runs(&a, &root.join("missing")).is_err());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

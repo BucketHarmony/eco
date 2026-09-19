@@ -22,13 +22,18 @@ pub fn suitability(c: &Curve, v: f32) -> f32 {
 /// Patch means over soil columns used as producer inputs.
 #[derive(Debug, Clone, Copy)]
 pub struct PatchEnv {
+    /// Mean surface light, 0–255.
     pub light: f32,
+    /// Mean surface moisture, 0–255.
     pub moisture: f32,
+    /// Mean surface fertility, 0–255.
     pub fertility: f32,
+    /// Patch temperature, °C.
     pub temperature: f32,
 }
 
 impl Sim {
+    /// A patch's producer inputs: means over its soil columns plus its temperature.
     pub fn patch_env(&self, p: usize) -> PatchEnv {
         let cols = &self.world.patch_soil[p];
         let n = cols.len().max(1) as f32;
@@ -65,6 +70,7 @@ impl Sim {
         }
     }
 
+    /// Grass and shrub density update for one patch: growth, mortality, litter, soil draw and shrub spread.
     pub fn update_patch_cover(&mut self, p: usize) {
         let n_soil = self.world.patch_soil[p].len();
         if n_soil == 0 {
@@ -116,6 +122,9 @@ impl Sim {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::params::CoverSpecies;
+    use crate::world::COLS;
+    use proptest::prelude::*;
 
     #[test]
     fn suitability_breakpoints() {
@@ -133,5 +142,128 @@ mod tests {
         assert!((suitability(&t, 32.5) - 0.5).abs() < 1e-6);
         assert_eq!(suitability(&t, -10.0), 0.0);
         assert_eq!(suitability(&t, 40.0), 0.0);
+    }
+
+    /// The curve's shape: range [0, 1], 0 outside (min, max), 1 on [low-opt, high-opt], rising then
+    /// falling. Needs strictly increasing breakpoints (see DECISIONS.md for tied ones).
+    fn suitability_shape(c: Curve, x: f32, y: f32) -> Result<(), TestCaseError> {
+        let [min, lo, hi, max] = c;
+        let f = |v| suitability(&c, v);
+        prop_assert!((0.0..=1.0).contains(&f(x)), "f({x}) = {}", f(x));
+        for v in [min, max, min - x.abs(), max + x.abs()] {
+            prop_assert_eq!(f(v), 0.0, "at {}", v);
+        }
+        for v in [lo, hi, lo + (hi - lo) * 0.5] {
+            prop_assert_eq!(f(v), 1.0, "at {}", v);
+        }
+        let (a, b) = if x <= y { (x, y) } else { (y, x) };
+        if min <= a && b <= lo {
+            prop_assert!(f(a) <= f(b), "rising side: f({a}) = {} > f({b}) = {}", f(a), f(b));
+        }
+        if hi <= a && b <= max {
+            prop_assert!(f(a) >= f(b), "falling side: f({a}) = {} < f({b}) = {}", f(a), f(b));
+        }
+        Ok(())
+    }
+
+    /// Four strictly increasing breakpoints in [-50, 300].
+    fn curve() -> impl Strategy<Value = Curve> {
+        (-50.0f32..300.0, 0.01f32..100.0, 0.0f32..100.0, 0.01f32..100.0)
+            .prop_map(|(a, d1, d2, d3)| [a, a + d1, a + d1 + d2, a + d1 + d2 + d3])
+            .prop_filter("strictly increasing after rounding", |c| c[0] < c[1] && c[1] <= c[2] && c[2] < c[3])
+    }
+
+    fn species() -> impl Strategy<Value = CoverSpecies> {
+        (0.0f32..1.0, 0.0f32..0.5, curve(), curve(), curve()).prop_map(|(r, g, light, moisture, temp)| CoverSpecies {
+            r,
+            g,
+            initial: 0.0,
+            light,
+            moisture,
+            temp,
+        })
+    }
+
+    /// Run `steps` density updates on patch 9 of an all-soil world with no grazers. Returns every
+    /// (grass, shrub) pair seen, starting with the initial one.
+    fn densities(grass: CoverSpecies, shrub: CoverSpecies, d: (f32, f32), steps: usize) -> Vec<(f32, f32)> {
+        let mut sim = Sim::bare(&vec![14u8; COLS]);
+        sim.params.grass = grass;
+        sim.params.shrub = shrub;
+        sim.patches[9].grass = d.0;
+        sim.patches[9].shrub = d.1;
+        let mut seen = vec![d];
+        for _ in 0..steps {
+            sim.update_patch_cover(9);
+            seen.push((sim.patches[9].grass, sim.patches[9].shrub));
+            assert!(sim.moisture.iter().chain(&sim.fertility).all(|&v| v >= 0.0), "soil draw went negative");
+        }
+        seen
+    }
+
+    /// Curves that are 1 everywhere the patch environment can reach.
+    fn always_suitable(mut s: CoverSpecies) -> CoverSpecies {
+        let wide = [-1.0e6, -1.0e6 + 1.0, 1.0e6, 1.0e6 + 1.0];
+        (s.light, s.moisture, s.temp, s.g) = (wide, wide, wide, 0.0);
+        s
+    }
+
+    proptest! {
+        #[test]
+        fn prop_suitability_shape(c in curve(), x in -100.0f32..450.0, y in -100.0f32..450.0) {
+            suitability_shape(c, x, y)?;
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(32)))]
+
+        #[test]
+        fn prop_density_stays_in_unit_interval(
+            g in species(), s in species(), d in (0.0f32..=1.0, 0.0f32..=1.0), steps in 1usize..=200,
+        ) {
+            for (grass, shrub) in densities(g, s, d, steps) {
+                prop_assert!((0.0..=1.0).contains(&grass) && (0.0..=1.0).contains(&shrub), "{grass} {shrub}");
+            }
+        }
+
+        #[test]
+        fn prop_density_never_falls_without_mortality(
+            g in species(), s in species(), d in (0.0f32..=1.0, 0.0f32..=1.0), steps in 1usize..=200,
+        ) {
+            let seen = densities(always_suitable(g), always_suitable(s), d, steps);
+            for w in seen.windows(2) {
+                prop_assert!(w[1].0 >= w[0].0 && w[1].1 >= w[0].1, "{:?} → {:?}", w[0], w[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn suitability_regression_narrow_curve() {
+        suitability_shape([0.0, 0.01, 0.01, 0.02], 0.005, 0.015).unwrap();
+    }
+
+    #[test]
+    fn suitability_ties_resolve_to_zero() {
+        // min == low-opt: "0 at min" and "1 at low-opt" conflict; the 0 rule wins.
+        assert_eq!(suitability(&[5.0, 5.0, 10.0, 20.0], 5.0), 0.0);
+        assert_eq!(suitability(&[5.0, 8.0, 20.0, 20.0], 20.0), 0.0);
+    }
+
+    #[test]
+    fn density_regression_full_growth_from_zero() {
+        let grass = CoverSpecies {
+            r: 0.99,
+            g: 0.49,
+            initial: 0.0,
+            light: [0.0, 1.0, 2.0, 3.0],
+            moisture: [0.0, 1.0, 2.0, 3.0],
+            temp: [0.0, 1.0, 2.0, 3.0],
+        };
+        for (a, b) in densities(grass.clone(), grass.clone(), (0.0, 1.0), 200) {
+            assert!((0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b));
+        }
+        let seen = densities(always_suitable(grass.clone()), always_suitable(grass), (0.0, 0.0), 50);
+        assert!(seen.windows(2).all(|w| w[1].0 >= w[0].0 && w[1].1 >= w[0].1));
     }
 }

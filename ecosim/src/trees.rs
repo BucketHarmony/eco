@@ -6,31 +6,44 @@ use crate::world::{cidx, in_bounds, patch_of};
 use rand::Rng;
 use serde::Serialize;
 
+/// Growth stage, from age.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
+    /// No canopy.
     Sapling,
+    /// One canopy voxel over its own column.
     Young,
+    /// Canopy over the 3×3 columns around the trunk, two voxels deep; seeds.
     Mature,
 }
 
+/// One tree.
 #[derive(Debug, Clone)]
 pub struct Tree {
+    /// Unique id, shared with animals.
     pub id: u32,
+    /// Trunk column x.
     pub x: u8,
+    /// Trunk column y.
     pub y: u8,
+    /// Age in ticks.
     pub age: u32,
+    /// Consecutive ticks spent below `dry_moisture`.
     pub dry_ticks: u32,
+    /// False once dead; removed at the next compaction.
     pub alive: bool,
 }
 
 impl Tree {
+    /// Index of the trunk column.
     #[inline]
     pub fn col(&self) -> usize {
         cidx(self.x as usize, self.y as usize)
     }
 }
 
+/// Stage for an age, given the young and mature thresholds.
 pub fn stage_of(age: u32, young_age: u32, mature_age: u32) -> Stage {
     if age < young_age {
         Stage::Sapling
@@ -42,6 +55,7 @@ pub fn stage_of(age: u32, young_age: u32, mature_age: u32) -> Stage {
 }
 
 impl Sim {
+    /// Stage of a tree under the current params.
     pub fn tree_stage(&self, t: &Tree) -> Stage {
         stage_of(t.age, self.params.tree.young_age, self.params.tree.mature_age)
     }
@@ -110,6 +124,7 @@ impl Sim {
         }
     }
 
+    /// Plant a tree on (x, y) and refresh the light of the columns its canopy covers.
     pub fn plant_tree(&mut self, x: usize, y: usize, age: u32) {
         let id = self.alloc_id();
         self.trunk_at[cidx(x, y)] = self.trees.len() as u32;
@@ -117,6 +132,7 @@ impl Sim {
         self.refresh_canopy_columns(x as u8, y as u8);
     }
 
+    /// Plant `initial_count` trees on random soil columns, respecting `min_spacing`.
     pub fn place_initial_trees(&mut self) {
         let (n, age) = (self.params.tree.initial_count, self.params.tree.initial_age);
         let mut placed = 0;
@@ -192,31 +208,95 @@ impl Sim {
                 let (x, y) = (self.trees[i].x, self.trees[i].y);
                 self.refresh_canopy_columns(x, y);
             }
-            if after == Stage::Mature && self.trees[i].age % tp.seed_every == 0 {
+            if after == Stage::Mature && self.trees[i].age.is_multiple_of(tp.seed_every) {
                 self.try_seed(i);
             }
         }
-    }
-
-    pub fn count_mature_trees(&self) -> usize {
-        self.trees.iter().filter(|t| t.alive && self.tree_stage(t) == Stage::Mature).count()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::Params;
-    use crate::world::{World, COLS};
-    use rand::SeedableRng;
+    use crate::world::tests::terrain;
+    use crate::world::{ColClass, COLS, WX, WY};
+    use proptest::prelude::*;
 
     fn bare_sim() -> Sim {
-        let mut p = Params::load_default();
-        p.tree.initial_count = 0;
-        p.grazer.start_count = 0;
-        p.hunter.start_count = 0;
-        let world = World::from_heights(&vec![14u8; COLS], &p);
-        Sim::with_world(p, rand_chacha::ChaCha8Rng::seed_from_u64(3), world)
+        Sim::bare(&vec![14u8; COLS])
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Plant(usize, usize, u32),
+        Kill(usize),
+        Update,
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            3 => (0..WX, 0..WY, 0u32..1200).prop_map(|(x, y, age)| Op::Plant(x, y, age)),
+            1 => any::<usize>().prop_map(Op::Kill),
+            2 => Just(Op::Update),
+        ]
+    }
+
+    /// Light and canopy cover kept incrementally (3×3 refreshes on plant, death and stage change,
+    /// including seedlings from `update_trees`) equal a full recompute of every column.
+    fn incremental_light_matches_full(heights: &[u8], soil_moisture: f32, ops: &[Op]) -> Result<(), TestCaseError> {
+        let mut sim = Sim::bare(heights);
+        sim.moisture.iter_mut().zip(&sim.world.class).for_each(|(m, &k)| {
+            if k == ColClass::Soil {
+                *m = soil_moisture;
+            }
+        });
+        for op in ops {
+            match *op {
+                Op::Plant(x, y, age) => {
+                    if sim.world.is_soil(x as i32, y as i32) && sim.spacing_ok(x as i32, y as i32) {
+                        sim.plant_tree(x, y, age);
+                    }
+                }
+                Op::Kill(i) => {
+                    let live: Vec<usize> = (0..sim.trees.len()).filter(|&i| sim.trees[i].alive).collect();
+                    if !live.is_empty() {
+                        sim.kill_tree(live[i % live.len()]);
+                    }
+                }
+                Op::Update => sim.update_trees(),
+            }
+        }
+        let (light, cover) = (sim.world.light.clone(), sim.canopy_cover.clone());
+        let absorb = sim.params.world.canopy_absorb;
+        for y in 0..WY {
+            for x in 0..WX {
+                let zs = sim.canopy_z(x as i32, y as i32);
+                sim.canopy_cover[cidx(x, y)] = !zs.is_empty();
+                sim.world.set_column_light(x, y, &zs, absorb);
+            }
+        }
+        prop_assert!(light == sim.world.light, "incremental light differs from a full recompute");
+        prop_assert_eq!(cover, sim.canopy_cover);
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(32)))]
+
+        #[test]
+        fn prop_incremental_light_matches_full(
+            heights in terrain(),
+            soil_moisture in 0.0f32..200.0,
+            ops in prop::collection::vec(op(), 1..80),
+        ) {
+            incremental_light_matches_full(&heights, soil_moisture, &ops)?;
+        }
+    }
+
+    #[test]
+    fn light_regression_overlapping_canopies_then_one_dies() {
+        let ops = [Op::Plant(10, 10, 950), Op::Plant(12, 10, 1000), Op::Update, Op::Kill(1), Op::Update];
+        incremental_light_matches_full(&vec![14u8; COLS], 100.0, &ops).unwrap();
     }
 
     #[test]

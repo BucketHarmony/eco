@@ -149,6 +149,14 @@ jobs:
       - name: build, unit and scenario tests
         run: npm test
 
+      # Written by tests/e2e/perf.spec.ts during npm test (ecoview/DECISIONS.md, Shot 28).
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ecoview-perf
+          path: ecoview/perf/perf.json
+          if-no-files-found: error
+
       - name: screenshots
         run: npm run shot
 

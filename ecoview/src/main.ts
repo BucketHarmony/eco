@@ -15,6 +15,8 @@ declare global {
     __ecoviewError?: string;
     /** Moves to the snapshot nearest `tick` without reloading the page (used by scripts/film.mjs). */
     __ecoviewGoto: (tick: number) => void;
+    /** Renders the current scene `n` times back to back and returns ms per frame (tests/e2e/perf.spec.ts). */
+    __ecoviewBench: (n: number) => number[];
   }
 }
 
@@ -210,5 +212,20 @@ initControls(ui, {
 });
 
 window.__ecoviewGoto = (tick) => void apply({ ...state, tick });
+
+// Runs only when called. It redraws the same scene, so the canvas and __ecoviewReady are unchanged.
+window.__ecoviewBench = (n) => {
+  const gl = renderer.getContext();
+  const px = new Uint8Array(4);
+  const ms: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const t0 = performance.now();
+    render();
+    gl.finish();
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); // finish() alone may return before the GPU process is done
+    ms.push(performance.now() - t0);
+  }
+  return ms;
+};
 
 void apply(state);

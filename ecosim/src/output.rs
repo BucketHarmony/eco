@@ -59,6 +59,10 @@ struct Meta<'a> {
     snapshot_every: u32,
     year_len: u32,
     water_level: u8,
+    /// `false` when the run left grazers and hunters out (`animals.enabled = false`); absent
+    /// otherwise, so a run with animals writes exactly the `meta.json` it always did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    animals: Option<bool>,
     snapshots: Vec<u32>,
     species: Vec<Species>,
     params: &'a Params,
@@ -259,6 +263,7 @@ fn write_meta_info(sim: &Sim, info: &RunInfo, run_dir: &Path) -> io::Result<()> 
         snapshot_every,
         year_len: sim.params.climate.year_len,
         water_level: sim.params.world.water_level,
+        animals: (!sim.params.animals.enabled).then_some(false),
         snapshots: info.snapshots.clone(),
         species: species_list(),
         params: &sim.params,

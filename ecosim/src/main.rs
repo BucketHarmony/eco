@@ -245,6 +245,10 @@ fn main() -> ExitCode {
         Cmd::Check { run_dir, long } => match if long { check_run_long(&run_dir) } else { check_run(&run_dir) } {
             Ok(report) => {
                 for l in &report.lines {
+                    if l.na {
+                        println!("N/A  {}: {}", l.name, l.observed);
+                        continue;
+                    }
                     let verdict = if l.pass { "PASS" } else { "FAIL" };
                     println!("{verdict} {}: {} [margin {:+.4}]", l.name, l.observed, l.margin);
                 }

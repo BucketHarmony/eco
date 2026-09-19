@@ -149,6 +149,7 @@ pub struct CellResult {
 pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) -> Result<CellResult, String> {
     let params = Params::from_toml_str_with(params_text, overrides)?;
     let year_len = params.climate.year_len;
+    let animals = params.animals.enabled;
     let mut sim = Sim::new(params, seed);
     let mut mature = None;
     let rows = simulate(&mut sim, ticks, |s| {
@@ -163,15 +164,15 @@ pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) 
     let rows = parse_series(&csv)?;
     let last = rows.len() - 1;
     let grazer_peaks = grazer_maxima(&rows, (WINDOW_START as usize).min(last), last).len();
-    let ext = extinctions(&rows);
+    let ext = extinctions(&rows, animals);
     let first_extinction = ext.first().map(|e| e.tick);
     let first_extinction_species =
         first_extinction.map(|t| ext.iter().filter(|e| e.tick == t).map(|e| e.species).collect::<Vec<_>>().join("+"));
     let first_extinction_cause = ext.first().map(|e| e.dominant_name());
     let hunter_extinction = rows.iter().find(|r| r.hunters == 0).map(|r| r.tick);
     let hunter_immigrants = rows[last].hunter_immigrants;
-    let signature = signature(&rows, year_len);
-    let report = evaluate(&Series { rows, mature_at_10000: mature.map(Ok), timing: Timing::Excluded })?;
+    let signature = signature(&rows, year_len, animals);
+    let report = evaluate(&Series { rows, mature_at_10000: mature.map(Ok), timing: Timing::Excluded, animals })?;
     Ok(CellResult {
         csv,
         report,
@@ -261,7 +262,9 @@ pub fn margin_table(reports: &[(u64, CheckReport)]) -> String {
     }
     let _ = writeln!(s, "{:>12}", "min");
     for key in INVARIANT_KEYS {
-        let ms: Vec<Option<f64>> = reports.iter().map(|(_, r)| r.get(key).map(|l| l.margin)).collect();
+        // An invariant that does not apply to a run (animals off) has no margin there.
+        let ms: Vec<Option<f64>> =
+            reports.iter().map(|(_, r)| r.get(key).filter(|l| !l.na).map(|l| l.margin)).collect();
         if ms.iter().all(Option::is_none) {
             continue;
         }
@@ -333,6 +336,9 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
         let _ = write!(csv, "{}", cell.seed);
         for k in &keys {
             match r.report.get(k) {
+                // `n/a` marks an invariant the cell's run does not have (an animal one with
+                // animals off); it counts towards neither pass nor fail, and has no margin.
+                Some(l) if l.na => csv.push_str(",n/a,,"),
                 Some(l) => {
                     let _ = write!(csv, ",{},{},{:.6}", l.pass, num(l.value), l.margin);
                 }
@@ -349,6 +355,7 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
             }
             Signature::Extinct(e) => format!(",,{} {},", e.species, e.dominant_name()),
             Signature::Flat => ",,flat,".into(),
+            Signature::NotApplicable => ",,animals off,".into(),
         };
         let pass = r.signature.pass();
         let _ = writeln!(csv, ",{ext},{species},{cause},{},{hext},{},{pp},{pass}", r.grazer_peaks, r.hunter_immigrants);
@@ -388,7 +395,7 @@ fn failures(set: &[(&Cell, &CellResult)], keys: &[&'static str]) -> Vec<(&'stati
         .filter_map(|&k| {
             let fails: Vec<(u64, f64)> = set
                 .iter()
-                .filter_map(|(c, r)| r.report.get(k).filter(|l| !l.pass).map(|l| (c.seed, l.margin)))
+                .filter_map(|(c, r)| r.report.get(k).filter(|l| !l.pass && !l.na).map(|l| (c.seed, l.margin)))
                 .collect();
             if fails.is_empty() {
                 return None;

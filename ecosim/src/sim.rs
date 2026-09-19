@@ -265,6 +265,9 @@ impl Sim {
     }
 
     fn place_initial_animals(&mut self) {
+        if !self.params.animals.enabled {
+            return;
+        }
         for kind in [Kind::Grazer, Kind::Hunter] {
             let (n, energy, age_max, cd) = match kind {
                 Kind::Grazer => {
@@ -299,7 +302,8 @@ impl Sim {
 
     /// Advance one tick, in the fixed order:
     /// animals → immigration → producers → trees (every `update_every`) → fire → moisture/fertility
-    /// (every 10) → temperature (every 100).
+    /// (every 10) → temperature (every 100). The animal phase is skipped outright when
+    /// `animals.enabled` is false, so it draws nothing from the RNG.
     /// Snapshots and stats rows are taken by the caller after this returns.
     pub fn step(&mut self) {
         self.step_profiled(None);
@@ -311,7 +315,9 @@ impl Sim {
         self.tick += 1;
         self.deaths = Deaths::default();
         let t = self.tick;
-        self.update_animals();
+        if self.params.animals.enabled {
+            self.update_animals();
+        }
         lap(&mut prof, Phase::Animals);
         self.immigrate(t);
         lap(&mut prof, Phase::Immigration);

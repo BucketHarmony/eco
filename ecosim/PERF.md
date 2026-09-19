@@ -2,6 +2,8 @@
 
 This file records what a tick costs at the start of the world's growth: 256×64 in shot 15, 256×256 in 17a. It measures and recommends but changes nothing; no sim code changed in this shot. The numbers come from `ecosim run --profile` (see "How it was measured").
 
+Shot G0 added the "Animals off" section below, measured the same way; nothing else in this file changed.
+
 ## How it was measured
 
 - **Machine.** Intel i9-12900KF (8 P-cores with 16 threads, plus 8 E-cores), Windows 11, Rust 1.98.1, release build.
@@ -53,6 +55,49 @@ Each cell gives the milliseconds charged to the phase and, in brackets, its shar
 - This run doesn't pass `ecosim check` and doesn't have to; it is a measurement only. The shot-15 runtime limit is capped at 90 s, so a 256×256 world will fail the runtime line at today's speed.
 
 The animal phase costs about the same per grazer on every world: 0.31 µs per grazer-tick on 64×64 (683 grazers on average), 0.42 µs on the strip (2946) and 0.38 µs over the 60000-tick strip run (2909). The model's cost is set by the grazer count, not by the terrain size.
+
+## Animals off (shot G0)
+
+`animals.enabled = false` skips the animal phase entirely. Same machine, pinning and seed as above; animals-on columns are repeated from the tables above for comparison.
+
+**Profile: 2000 ticks, seed 42, animals off**
+
+| phase | 64×64 | 256×64 | 256×256 |
+|---|---|---|---|
+| setup (world, BFS distances, initial populations, meta.json) | 6 (6.5%) | 62 (23.5%) | 875 (58.5%) |
+| **animals** | **0.1 (0.1%)** | **0.1 (0.0%)** | **0.1 (0.0%)** |
+| immigration | 0.1 (0.1%) | 0.1 (0.0%) | 0.1 (0.0%) |
+| producers (grass, shrub) | 3 (3.3%) | 11 (4.2%) | 54 (3.6%) |
+| trees | 0 (0.5%) | 1 (0.2%) | 1 (0.0%) |
+| fire | 1 (1.2%) | 4 (1.5%) | 14 (1.0%) |
+| moisture/fertility | 14 (16.0%) | 59 (22.4%) | 221 (14.8%) |
+| temperature/season | 0 (0.1%) | 0 (0.1%) | 1 (0.1%) |
+| compaction | 0 (0.2%) | 1 (0.2%) | 2 (0.2%) |
+| stats row | 18 (20.3%) | 63 (23.9%) | 226 (15.1%) |
+| snapshot write | 40 (45.0%) | 57 (21.6%) | 88 (5.9%) |
+| events | 1 (1.4%) | 1 (0.5%) | 2 (0.1%) |
+| series write | 5 (5.4%) | 4 (1.5%) | 4 (0.3%) |
+| **total** | **89 ms** (558 with animals) | **265 ms** (1806) | **1494 ms** (7859) |
+| ticks per second (whole run) | 22443 (3587) | 7561 (1107) | 1338 (254) |
+| ticks per second (`Sim::step` alone) | 104718 (4159) | 26368 (1265) | 6817 (316) |
+| grazers / hunters at tick 2000 | 0 / 0 | 0 / 0 | 0 / 0 |
+
+- **6.3×, 6.8× and 5.3×** on the three worlds. That is a little more than removing the animals share alone would give (5.9×, 5.8× and 4.2×), because the phases that remain also get cheaper: with no animals to walk, the stats row counts fewer entities and the producers phase regrows less grass per patch.
+- **The animal phase costs 0.1 ms over 2000 ticks**, i.e. the `if` in `Sim::step_profiled`. It is the branch, not a loop over an empty `Vec`.
+- **What dominates now is I/O and setup, not the model.** At 64×64 the snapshot writer is 45% of the run; at 256×256 the BFS that fills `patch_dist` is 58% of a 2000-tick run. The recommendations above are unchanged for animals-on runs, but for a garden run the ranked list would be `patch_dist` setup first, then snapshot write, then the stats row.
+
+**Full runs, animals off**
+
+| run | wall time | ticks/s | `ecosim check` |
+|---|---|---|---|
+| 256×64, 20000 ticks, seed 1 | 1.7 s | 11869 | pass (2 invariants n/a) |
+| 256×64, 20000 ticks, seed 2 | 1.8 s | 10823 | pass (2 invariants n/a) |
+| 256×64, 20000 ticks, seed 3 | 1.9 s | 10331 | pass (2 invariants n/a) |
+| 256×256, 20000 ticks, seed 42 | 7.1 s | 2804 | fails `max_10x` |
+
+- The strip's 20000 ticks go from 22–28 s to 1.7–1.9 s, **13–15×**, more than the 2000-tick profile shows, because the animals-on run's cost grows with the grazer population as the run goes on.
+- **256×256 in 7.1 s, against 170.4 s with animals and a 90 s limit.** This was the point of the shot: a 256×256 garden run now finishes in a twelfth of the budget, so the world can keep growing.
+- The 256×256 run fails one invariant, `max_10x` (trees max 3444, limit 3340, margin −0.031), exactly as the animals-on 256×256 run in shot 15a failed check. It is a speed measurement and the shot's acceptance is the wall time; nothing was retuned to make it pass, since the shot did not ask for a tuning change (`sweeps/G0/FINDINGS.md`).
 
 ## The three largest hotspots
 

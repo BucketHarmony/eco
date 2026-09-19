@@ -481,17 +481,19 @@ impl Sim {
     /// immigrant of that species arrives at a random edge soil column if fewer than
     /// `immigration_floor` are alive. Animal immigrants have the default traits, `start_energy`, age
     /// 0 and cooldown 0, and act from the next tick. A tree immigrant is a sapling (age 0), planted
-    /// only if its column keeps `min_spacing`. A floor of 0 never draws.
+    /// only if its column keeps `min_spacing`. A floor of 0 never draws, and neither animal
+    /// immigrates when `animals.enabled` is false.
     pub fn immigrate(&mut self, t: u32) {
+        let animals = self.params.animals.enabled;
         let gp = self.params.grazer.clone();
-        if t.is_multiple_of(gp.immigration_interval) && self.count_grazers() < gp.immigration_floor {
+        if animals && t.is_multiple_of(gp.immigration_interval) && self.count_grazers() < gp.immigration_floor {
             if let Some((x, y)) = self.random_edge_soil_column() {
                 let id = self.add_grazer(x, y, gp.start_energy, 0, self.params.default_traits(Kind::Grazer));
                 self.log_at(EventKind::Immigration, "grazer", (x, y), "", id);
             }
         }
         let hp = self.params.hunter.clone();
-        if t.is_multiple_of(hp.immigration_interval) && self.count_hunters() < hp.immigration_floor {
+        if animals && t.is_multiple_of(hp.immigration_interval) && self.count_hunters() < hp.immigration_floor {
             if let Some((x, y)) = self.random_edge_soil_column() {
                 let id = self.alloc_id();
                 let traits = self.params.default_traits(Kind::Hunter);
@@ -1537,5 +1539,51 @@ mod tests {
         let off = handling_run(0, 1.0, 5, 40).unwrap();
         let want: Vec<u32> = (0..10).collect();
         assert!(off.iter().any(|k| k[..10] == want[..]), "{off:?}");
+    }
+
+    /// `animals.enabled = false` against the same run with both animal species' `start_count` and
+    /// `immigration_floor` at 0: the animal tier is empty either way, so the switch must make no
+    /// draw and no write of its own. The two sims stay bit-identical (`state.bin` carries the RNG
+    /// word position), no grazer or hunter ever exists, and no animal event is logged.
+    fn animals_off_is_an_empty_animal_tier(seed: u64, ticks: u32) -> Result<(), TestCaseError> {
+        let mut off = Params::load_square();
+        off.animals.enabled = false;
+        let mut empty = off.clone();
+        empty.animals.enabled = true;
+        empty.grazer.start_count = 0;
+        empty.hunter.start_count = 0;
+        empty.grazer.immigration_floor = 0;
+        empty.hunter.immigration_floor = 0;
+        // Off must also ignore floors that would otherwise let animals in.
+        off.grazer.immigration_floor = 50;
+        off.hunter.immigration_floor = 10;
+        let (mut a, mut b) = (Sim::new(off, seed), Sim::new(empty, seed));
+        a.log_events = true;
+        for _ in 0..ticks {
+            a.step();
+            b.step();
+            prop_assert_eq!(a.stats(), b.stats(), "tick {}", a.tick);
+            prop_assert_eq!((a.count_grazers(), a.count_hunters()), (0, 0), "tick {}", a.tick);
+        }
+        prop_assert!(a.events.iter().all(|e| e.species != "grazer" && e.species != "hunter"), "animal event logged");
+        prop_assert_eq!(crate::state::encode(&a), crate::state::encode(&b));
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(4)))]
+
+        #[test]
+        fn prop_animals_off_is_an_empty_animal_tier(seed in any::<u64>()) {
+            animals_off_is_an_empty_animal_tier(seed, 400)?;
+        }
+    }
+
+    /// The reference seeds, run past the first immigration interval and the first compaction.
+    #[test]
+    fn animals_off_regression_seeds_1_to_3() {
+        for seed in 1..=3 {
+            animals_off_is_an_empty_animal_tier(seed, 1200).unwrap();
+        }
     }
 }

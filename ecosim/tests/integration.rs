@@ -128,6 +128,9 @@ fn snapshot_round_trips_through_reader() {
     assert_eq!(meta["snapshots"].as_array().unwrap().len(), 4);
     assert_eq!(meta["overrides"], serde_json::json!(["hunter.kill_prob=0.2"]));
     assert_eq!(meta["params"]["season"]["amplitude"], sim.params.season.amplitude as f64);
+    // A run with animals writes neither the `animals` key nor the `[animals]` params section.
+    assert_eq!(meta.get("animals"), None, "{meta}");
+    assert_eq!(meta["params"].get("animals"), None, "{meta}");
 
     let snap = dir.join("snap_000300");
     assert_eq!(fs::read(snap.join("material.bin")).unwrap(), sim.world.material);
@@ -242,7 +245,9 @@ fn assert_valid_run(dir: &Path) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_ecosim")).arg("stats").arg(dir).output().unwrap();
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
-    let old: Vec<String> = ecosim::check::extinctions(&rows).iter().map(ecosim::check::extinction_line).collect();
+    let animals = ecosim::check::run_has_animals(dir);
+    let old: Vec<String> =
+        ecosim::check::extinctions(&rows, animals).iter().map(ecosim::check::extinction_line).collect();
     let new: Vec<&str> = text.lines().filter(|l| l.starts_with("extinction:")).collect();
     assert_eq!(new, old, "stats from events.csv = the series method");
     text
@@ -625,4 +630,55 @@ fn profile_leaves_the_run_directory_unchanged_and_accounts_for_the_run() {
     let c = tmp("profile_inside");
     assert!(!run(&c, &[&c.join("profile.json")]));
     assert!(!c.exists());
+}
+
+/// Shot G0: `animals.enabled = false` leaves the animal tier out of a whole 20000-tick run on the
+/// reference strip. No grazer or hunter exists at any tick, `events.csv` has no animal row,
+/// `meta.json` records `"animals": false`, two runs of the same seed are byte-identical, and
+/// `ecosim check` marks exactly the animal-only invariants n/a while every other one still counts
+/// (`no_extinction` and `max_10x` keep their tree part). `ecosim stats` reports no extinction of a
+/// species that was never placed, and the signature is not applicable.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn animals_off_run_has_no_animals_and_marks_the_animal_invariants_na() {
+    let set = vec!["animals.enabled=false".to_string()];
+    let dir = tmp("animals_off");
+    let last = run_on(&dir, &set);
+    assert_eq!((last.grazers, last.hunters), (0, 0));
+    assert!(last.trees > 0, "trees died out without animals");
+
+    let rows = ecosim::check::read_series(&dir).unwrap();
+    assert!(rows.iter().all(|r| r.grazers == 0 && r.hunters == 0 && r.hunter_immigrants == 0), "an animal exists");
+    assert!(rows.iter().all(|r| r.deaths.iter().flatten().all(|&n| n == 0)), "an animal died");
+    let events = ecosim::events::parse_events(&fs::read_to_string(dir.join("events.csv")).unwrap()).unwrap();
+    assert!(!events.is_empty(), "no events at all");
+    assert!(events.iter().all(|e| e.species != "grazer" && e.species != "hunter"), "an animal event was logged");
+
+    let meta = read_json(&dir.join("meta.json"));
+    assert_eq!(meta["animals"], serde_json::json!(false));
+    assert_eq!(meta["params"]["animals"], serde_json::json!({ "enabled": false }));
+    assert_eq!(meta["format_version"], FORMAT_VERSION, "the switch is not a format change");
+
+    let again = tmp("animals_off_again");
+    run_on(&again, &set);
+    assert_eq!(ecosim::check::diff_runs(&dir, &again).unwrap(), Vec::<String>::new());
+
+    let report = ecosim::check::check_run(&dir).unwrap();
+    assert_eq!(report.not_applicable(), ecosim::check::ANIMAL_ONLY_KEYS.to_vec());
+    for l in report.lines.iter().filter(|l| l.na) {
+        assert!(l.observed.contains(ecosim::check::NA_REASON), "{l:?}");
+    }
+    let counted = report.lines.iter().filter(|l| !l.na).count();
+    assert_eq!(counted, report.lines.len() - 2);
+    let no_ext = report.get("no_extinction").unwrap();
+    assert!(no_ext.observed.starts_with("min trees=") && !no_ext.observed.contains("grazers"), "{no_ext:?}");
+    assert!(report.get("max_10x").unwrap().observed.starts_with("trees "));
+    assert!(report.pass(), "{:?}", report.lines);
+
+    let text = assert_valid_run(&dir);
+    assert!(text.contains("first extinction: none"), "{text}");
+    assert!(!text.contains("extinction: grazers") && !text.contains("extinction: hunters"), "{text}");
+    let sig = ecosim::check::signature_of(&dir, None).unwrap();
+    assert_eq!(sig, ecosim::check::Signature::NotApplicable);
+    assert!(ecosim::check::signature_line(&sig).contains("not applicable"));
 }

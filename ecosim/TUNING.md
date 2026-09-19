@@ -396,3 +396,9 @@ The shot sets the reference world, and it changed four defaults. The anchor held
   - Mature trees at tick 10000 are 424, 441, 505 and 515.
 - **Why no anchor change.** The anchor line that could have forced one is "the reference seeds persist at 20k on the strip", and it held.
 - **The sweep** (`sweeps/shot15/`) is `climate.rain_gradient` 0:1.0:0.2 on seeds 1–3. All 18 cells pass, so the default 0.6 sits inside a safe band covering the whole grid.
+
+## Animals off (shot G0)
+
+**No default changed.** The shot added one key, `animals.enabled`, and its default is `true`, which is what every run before this shot did. Every committed manifest and fixture is byte-identical, and seeds 1, 2, 3 and 42 pass `ecosim check` with the same numbers as before.
+
+The shot prompt says not to retune anything to compensate for the missing grazing pressure, and the measurements say nothing needs it: with animals off, mean grass cover rises 8–16%, while shrub cover, tree counts and mature-tree counts stay inside the seed-to-seed spread, and no seed loses a species. The sweep over `animals.enabled` (both values, seeds 1–3, 20000 ticks) passes 6 of 6 cells. Numbers and the event-log cause breakdown are in `sweeps/G0/FINDINGS.md`.

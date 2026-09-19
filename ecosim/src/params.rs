@@ -26,6 +26,9 @@ pub struct Params {
     pub shrub: CoverSpecies,
     /// `[tree]`
     pub tree: TreeParams,
+    /// `[animals]`. Left out of `meta.json` when animals are enabled, so default runs print as before.
+    #[serde(default, skip_serializing_if = "AnimalsParams::is_default")]
+    pub animals: AnimalsParams,
     /// `[grazer]`
     pub grazer: GrazerParams,
     /// `[hunter]`
@@ -219,6 +222,28 @@ pub struct TreeParams {
     pub immigration_floor: u32,
     /// Ticks between tree immigration checks.
     pub immigration_interval: u32,
+}
+
+/// Whether the two animal species take part in a run at all (shot G0). Garden runs turn them off;
+/// the species themselves are unchanged, and `enabled = true` is the default every earlier run had.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnimalsParams {
+    /// False leaves every grazer and hunter out: none are placed, none immigrate, and the animal
+    /// phase is skipped, so it draws nothing from the RNG.
+    pub enabled: bool,
+}
+
+impl Default for AnimalsParams {
+    fn default() -> Self {
+        AnimalsParams { enabled: true }
+    }
+}
+
+impl AnimalsParams {
+    fn is_default(&self) -> bool {
+        *self == AnimalsParams::default()
+    }
 }
 
 /// The grazer species.
@@ -645,11 +670,13 @@ mod tests {
         serde_json::json!(if key == "hunter.kill_prob" { v } else { v as f32 as f64 })
     }
 
-    /// `p` as JSON with every section present: `meta.json` leaves `[rng]` out at stream 0, so it is
-    /// put back here and every leaf, `rng.stream` included, is compared exactly.
+    /// `p` as JSON with every section present: `meta.json` leaves `[rng]` out at stream 0 and
+    /// `[animals]` out when they are enabled, so both are put back here and every leaf is compared
+    /// exactly.
     fn stored(p: &Params) -> serde_json::Value {
         let mut v = serde_json::to_value(p).unwrap();
         v["rng"] = serde_json::to_value(&p.rng).unwrap();
+        v["animals"] = serde_json::to_value(&p.animals).unwrap();
         v
     }
 
@@ -670,6 +697,7 @@ mod tests {
                 let f = if key == "climate.rain_gradient" { floats[0] / 1.0e4 } else { floats[0] };
                 (f.to_string(), as_stored(key, f))
             }
+            toml::Value::Boolean(b) => ((!b).to_string(), serde_json::json!(!b)),
             toml::Value::Array(a) => {
                 let xs = &floats[..a.len()];
                 let text = xs.iter().map(f64::to_string).collect::<Vec<_>>().join(", ");

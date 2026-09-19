@@ -156,7 +156,7 @@ fn s42_event_log_matches_the_series_and_stays_small() {
     }
     let from_events = read_series_for_stats(dir).unwrap();
     assert_eq!(from_events, rows);
-    assert_eq!(extinctions(&from_events), extinctions(&rows));
+    assert_eq!(extinctions(&from_events, true), extinctions(&rows, true));
     assert_eq!(unlit_burnout(&events), None);
     for c in TREE_CAUSES {
         assert!(events.iter().any(|e| e.kind == EventKind::TreeDeath && e.cause == c), "tree {c}");

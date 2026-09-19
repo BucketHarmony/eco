@@ -173,6 +173,8 @@ pub struct Series {
     pub mature_at_10000: Option<Result<usize, String>>,
     /// Wall time of the run, if known and evaluated.
     pub timing: Timing,
+    /// Whether the run placed grazers and hunters; false makes the animal invariants n/a.
+    pub animals: bool,
 }
 
 /// Where the runtime invariant gets its wall time.
@@ -195,15 +197,39 @@ impl Series {
             Some(ms) => Timing::Ms(ms, runtime_limit_ms(meta_cols(run_dir))),
             None => Timing::Missing,
         };
-        Ok(Series { rows, mature_at_10000, timing })
+        Ok(Series { rows, mature_at_10000, timing, animals: run_has_animals(run_dir) })
     }
+}
+
+/// A run directory's `meta.json`, or `Null` when it is missing or unreadable.
+fn meta_json(run_dir: &Path) -> serde_json::Value {
+    let text = fs::read_to_string(run_dir.join("meta.json")).unwrap_or_default();
+    serde_json::from_str(&text).unwrap_or_default()
 }
 
 /// Columns of the run's world from `meta.json`'s `dims`; 4096 (64×64) when absent or unreadable.
 fn meta_cols(run_dir: &Path) -> u64 {
-    let text = fs::read_to_string(run_dir.join("meta.json")).unwrap_or_default();
-    let v = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+    let v = meta_json(run_dir);
     v["dims"]["x"].as_u64().unwrap_or(64) * v["dims"]["y"].as_u64().unwrap_or(64)
+}
+
+/// Whether a run placed grazers and hunters, from `meta.json`'s `animals`. The key is written only
+/// by an animals-off run, so every other run directory — including every one written before shot
+/// G0 — reads as having animals.
+pub fn run_has_animals(run_dir: &Path) -> bool {
+    meta_json(run_dir)["animals"].as_bool().unwrap_or(true)
+}
+
+/// The series columns the invariants and reports cover, in report order: the three species with
+/// animals, trees alone without them.
+fn species_columns(animals: bool) -> Vec<(&'static str, Column<u32>)> {
+    let all: [(&'static str, Column<u32>); 3] =
+        [("grazers", |r| r.grazers), ("hunters", |r| r.hunters), ("trees", |r| r.trees)];
+    if animals {
+        all.to_vec()
+    } else {
+        vec![all[2]]
+    }
 }
 
 /// Reads one series column from a row.
@@ -218,8 +244,11 @@ pub struct CheckLine {
     pub key: &'static str,
     /// Human-readable invariant, as printed by `ecosim check`.
     pub name: &'static str,
-    /// Whether the invariant holds.
+    /// Whether the invariant holds. Always true for an invariant that does not apply (`na`).
     pub pass: bool,
+    /// The invariant does not apply to this run (an animal invariant on an animals-off run), so it
+    /// counts towards neither pass nor fail.
+    pub na: bool,
     /// What was measured, as printed by `ecosim check`.
     pub observed: String,
     /// The measured value of the binding part.
@@ -238,9 +267,14 @@ pub struct CheckReport {
 }
 
 impl CheckReport {
-    /// True when every invariant passes.
+    /// True when every invariant that applies passes.
     pub fn pass(&self) -> bool {
-        self.lines.iter().all(|l| l.pass)
+        self.lines.iter().all(|l| l.na || l.pass)
+    }
+
+    /// The keys of the invariants that do not apply to this run, in report order.
+    pub fn not_applicable(&self) -> Vec<&'static str> {
+        self.lines.iter().filter(|l| l.na).map(|l| l.key).collect()
     }
 
     /// The line for an invariant key, if it was evaluated.
@@ -296,9 +330,34 @@ struct Builder(Vec<CheckLine>);
 impl Builder {
     fn push(&mut self, key: &'static str, name: &'static str, pass: bool, observed: String, vtm: (f64, f64, f64)) {
         let (value, threshold, margin) = vtm;
-        self.0.push(CheckLine { key, name, pass, observed, value, threshold, margin });
+        self.0.push(CheckLine { key, name, pass, observed, na: false, value, threshold, margin });
+    }
+
+    /// An invariant that does not apply because the run has no animals.
+    fn push_na(&mut self, key: &'static str, name: &'static str) {
+        let observed = format!("n/a ({NA_REASON})");
+        self.0.push(CheckLine {
+            key,
+            name,
+            pass: true,
+            observed,
+            na: true,
+            value: f64::NAN,
+            threshold: f64::NAN,
+            margin: f64::NAN,
+        });
     }
 }
+
+/// Why an invariant is reported as not applicable.
+pub const NA_REASON: &str = "animals off";
+
+/// The invariants that do not apply at all to an animals-off run. `no_extinction` and `max_10x`
+/// still apply: they drop their grazer and hunter parts and keep their tree part.
+pub const ANIMAL_ONLY_KEYS: [&str; 2] = ["grazer_cycle", "animals_10k"];
+
+/// The `check --long` invariants that do not apply to an animals-off run.
+pub const ANIMAL_ONLY_LONG_KEYS: [&str; 1] = ["long_band"];
 
 /// Mature-tree count in a snapshot's entities.json.
 fn mature_trees_at(run_dir: &Path, tick: u32) -> Result<usize, String> {
@@ -332,8 +391,8 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
     }
     let from = (WINDOW_START as usize).min(last);
     let win = &rows[from..];
-    let species: [(&str, Column<u32>); 3] =
-        [("grazers", |r| r.grazers), ("hunters", |r| r.hunters), ("trees", |r| r.trees)];
+    // An animals-off run never placed a grazer or a hunter, so only the trees are counted here.
+    let species = species_columns(series.animals);
 
     // 1. No species count reaches 0 (every minimum ≥ 1).
     let mins: Vec<(&str, u32)> = species.iter().map(|(n, f)| (*n, win.iter().map(f).min().unwrap_or(0))).collect();
@@ -367,18 +426,23 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
     );
 
     // 3. Grazer cycle: ≥ 2 local maxima ≥ 1500 ticks apart (value = first-to-last span, 0 if < 2).
-    let maxima = grazer_maxima(rows, from, last);
-    let span = match (maxima.first(), maxima.last()) {
-        (Some(a), Some(b)) => b - a,
-        _ => 0,
-    };
-    out.push(
-        "grazer_cycle",
-        "grazer cycle (2 maxima >= 1500 ticks apart)",
-        maxima.len() >= 2 && span >= 1500,
-        format!("{} maxima at {:?}, span {span}", maxima.len(), maxima),
-        (span as f64, 1500.0, margin_at_least(span as f64, 1500.0)),
-    );
+    let cycle_name = "grazer cycle (2 maxima >= 1500 ticks apart)";
+    if series.animals {
+        let maxima = grazer_maxima(rows, from, last);
+        let span = match (maxima.first(), maxima.last()) {
+            (Some(a), Some(b)) => b - a,
+            _ => 0,
+        };
+        out.push(
+            "grazer_cycle",
+            cycle_name,
+            maxima.len() >= 2 && span >= 1500,
+            format!("{} maxima at {:?}, span {span}", maxima.len(), maxima),
+            (span as f64, 1500.0, margin_at_least(span as f64, 1500.0)),
+        );
+    } else {
+        out.push_na("grazer_cycle", cycle_name);
+    }
 
     // 4. fertility_mean in [40, 220].
     let (fmin, fmax) = range(win.iter().map(|r| r.fertility_mean));
@@ -438,15 +502,20 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
                 }
                 Err(e) => out.push("mature_trees_10k", name, false, e.clone(), (f64::NAN, 35.0, -1.0)),
             }
-            let r = &rows[10_000];
-            let (g, h) = (r.grazers as f64, r.hunters as f64);
-            out.push(
-                "animals_10k",
-                "at tick 10000 grazers >= 10 and hunters >= 2",
-                r.grazers >= 10 && r.hunters >= 2,
-                format!("grazers={} hunters={}", r.grazers, r.hunters),
-                tightest([(g, 10.0, margin_at_least(g, 10.0)), (h, 2.0, margin_at_least(h, 2.0))]),
-            );
+            let animals_name = "at tick 10000 grazers >= 10 and hunters >= 2";
+            if series.animals {
+                let r = &rows[10_000];
+                let (g, h) = (r.grazers as f64, r.hunters as f64);
+                out.push(
+                    "animals_10k",
+                    animals_name,
+                    r.grazers >= 10 && r.hunters >= 2,
+                    format!("grazers={} hunters={}", r.grazers, r.hunters),
+                    tightest([(g, 10.0, margin_at_least(g, 10.0)), (h, 2.0, margin_at_least(h, 2.0))]),
+                );
+            } else {
+                out.push_na("animals_10k", animals_name);
+            }
         }
         _ => out.push(
             "tick_10000",
@@ -464,13 +533,13 @@ pub const LONG_KEYS: [&str; 3] = ["long_run_length", "long_no_extinction", "long
 
 /// `ecosim check --long` on a run directory.
 pub fn check_run_long(run_dir: &Path) -> Result<CheckReport, String> {
-    evaluate_long(&read_series(run_dir)?)
+    evaluate_long(&read_series(run_dir)?, run_has_animals(run_dir))
 }
 
 /// The long-run invariants, for runs of at least `LONG_TICKS`: no species reaches 0 at any tick,
 /// and grazers and hunters stay within [0.2×, 5×] of their tick-20000 count over ticks 20000–60000.
 /// These replace, rather than extend, the 20000-tick invariants.
-pub fn evaluate_long(rows: &[StatsRow]) -> Result<CheckReport, String> {
+pub fn evaluate_long(rows: &[StatsRow], animals: bool) -> Result<CheckReport, String> {
     if rows.is_empty() {
         return Err("series.csv has no rows".into());
     }
@@ -486,8 +555,7 @@ pub fn evaluate_long(rows: &[StatsRow]) -> Result<CheckReport, String> {
         let vtm = (last as f64, long, margin_at_least(last as f64, long));
         out.push("long_run_length", "run length >= 60000 ticks", false, format!("last tick {last}"), vtm);
     }
-    let species: [(&str, Column<u32>); 3] =
-        [("grazers", |r| r.grazers), ("hunters", |r| r.hunters), ("trees", |r| r.trees)];
+    let species = species_columns(animals);
     let mins: Vec<(&str, u32)> = species.iter().map(|(n, f)| (*n, rows.iter().map(f).min().unwrap_or(0))).collect();
     out.push(
         "long_no_extinction",
@@ -496,6 +564,11 @@ pub fn evaluate_long(rows: &[StatsRow]) -> Result<CheckReport, String> {
         mins.iter().map(|(n, m)| format!("min {n}={m}")).collect::<Vec<_>>().join(" "),
         tightest(mins.iter().map(|&(_, m)| (m as f64, 1.0, margin_at_least(m as f64, 1.0)))),
     );
+    let band_name = "grazers and hunters over ticks 20000-60000 within [0.2x, 5x] of their tick-20000 count";
+    if !animals {
+        out.push_na("long_band", band_name);
+        return Ok(CheckReport { lines: out.0 });
+    }
     let from = (LONG_BAND_FROM as usize).min(last);
     let win = &rows[from..=(LONG_TICKS as usize).min(last)];
     let (mut ok, mut obs, mut parts) = (true, Vec::new(), Vec::new());
@@ -508,13 +581,7 @@ pub fn evaluate_long(rows: &[StatsRow]) -> Result<CheckReport, String> {
         obs.push(format!("{n} [{min}, {max}] vs [{lo:.1}, {hi:.1}]"));
         parts.push(band(min, max, lo, hi));
     }
-    out.push(
-        "long_band",
-        "grazers and hunters over ticks 20000-60000 within [0.2x, 5x] of their tick-20000 count",
-        ok,
-        obs.join(" "),
-        tightest(parts),
-    );
+    out.push("long_band", band_name, ok, obs.join(" "), tightest(parts));
     Ok(CheckReport { lines: out.0 })
 }
 
@@ -522,9 +589,10 @@ fn range(it: impl Iterator<Item = f32>) -> (f32, f32) {
     it.fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), v| (a.min(v), b.max(v)))
 }
 
-/// First row at which any species count is 0, over the whole run.
-pub fn first_extinction(rows: &[StatsRow]) -> Option<&StatsRow> {
-    rows.iter().find(|r| r.grazers == 0 || r.hunters == 0 || r.trees == 0)
+/// First row at which any species count is 0, over the whole run. Without `animals` only the trees
+/// are looked at: a run that never placed a grazer or a hunter has not lost one.
+pub fn first_extinction(rows: &[StatsRow], animals: bool) -> Option<&StatsRow> {
+    rows.iter().find(|r| (animals && (r.grazers == 0 || r.hunters == 0)) || r.trees == 0)
 }
 
 /// Ticks of death counts attributed to an extinction: the extinction tick and the 499 before it.
@@ -565,13 +633,15 @@ impl Extinction {
 }
 
 /// Every species that reaches 0 at some tick (whole run, burn-in included), in tick order; species
-/// reaching 0 on the same tick keep the order grazers, hunters, trees.
-pub fn extinctions(rows: &[StatsRow]) -> Vec<Extinction> {
+/// reaching 0 on the same tick keep the order grazers, hunters, trees. Without `animals` the
+/// grazers and hunters are skipped: they were never placed, so they never died out.
+pub fn extinctions(rows: &[StatsRow], animals: bool) -> Vec<Extinction> {
     let species: [(&'static str, Column<u32>); 3] =
         [("grazers", |r| r.grazers), ("hunters", |r| r.hunters), ("trees", |r| r.trees)];
     let mut out: Vec<Extinction> = species
         .iter()
         .enumerate()
+        .filter(|(k, _)| animals || *k == 2)
         .filter_map(|(k, (name, count))| {
             let at = rows.iter().position(|r| count(r) == 0)?;
             let win = &rows[at.saturating_sub(CAUSE_WINDOW as usize - 1)..=at];
@@ -648,6 +718,8 @@ pub enum Signature {
     Extinct(Extinction),
     /// No lag has two samples with non-zero variance on both sides (a flat or too-short series).
     Flat,
+    /// The run left animals out (`animals.enabled = false`), so it has no predator or prey.
+    NotApplicable,
 }
 
 impl Signature {
@@ -718,10 +790,13 @@ fn hunter_period(h: &[f64]) -> Option<i32> {
 /// correlates grazers(t) with hunters(t + L) over the ticks t where both t and t + L lie in the
 /// window. Lags run from −8000 upward, and only a strictly larger correlation replaces the best, so
 /// ties go to the most negative lag. pp_period comes from the hunters alone (`hunter_period`).
-pub fn signature(rows: &[StatsRow], year_len: u32) -> Signature {
+pub fn signature(rows: &[StatsRow], year_len: u32, animals: bool) -> Signature {
+    if !animals {
+        return Signature::NotApplicable;
+    }
     let end = rows.len().min(SIG_END as usize + 1);
     let from = (SIG_START as usize).min(end);
-    let gone = extinctions(rows).into_iter().filter(|e| e.species != "trees");
+    let gone = extinctions(rows, true).into_iter().filter(|e| e.species != "trees");
     for e in gone {
         let count = |r: &StatsRow| if e.species == "grazers" { r.grazers } else { r.hunters };
         if rows[from..end].iter().any(|r| count(r) == 0) {
@@ -772,7 +847,7 @@ pub fn signature_of(path: &Path, year_len: Option<u32>) -> Result<Signature, Str
         let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let rows = parse_series(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let year_len = year_len.ok_or_else(|| format!("{}: a series file needs --year-len", path.display()))?;
-        return Ok(signature(&rows, year_len));
+        return Ok(signature(&rows, year_len, true));
     }
     let rows = read_series_for_stats(path)?;
     let year_len = match year_len {
@@ -785,7 +860,7 @@ pub fn signature_of(path: &Path, year_len: Option<u32>) -> Result<Signature, Str
             u32::try_from(y).map_err(|e| format!("{}: {e}", p.display()))?
         }
     };
-    Ok(signature(&rows, year_len))
+    Ok(signature(&rows, year_len, run_has_animals(path)))
 }
 
 /// The printable `ecosim stats --signature` line.
@@ -803,6 +878,9 @@ pub fn signature_line(s: &Signature) -> String {
             e.dominant_name()
         ),
         Signature::Flat => "signature: undefined, no lag with variance in both series pp_pass false".into(),
+        Signature::NotApplicable => {
+            format!("signature: not applicable, the run has no animals ({NA_REASON}) pp_pass false")
+        }
     }
 }
 
@@ -810,6 +888,7 @@ pub fn signature_line(s: &Signature) -> String {
 /// come from `events.csv` when the run has one (`read_series_for_stats`).
 pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
     let rows = read_series_for_stats(run_dir)?;
+    let animals = run_has_animals(run_dir);
     if rows.is_empty() {
         return Err("series.csv has no rows".into());
     }
@@ -833,13 +912,13 @@ pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
         let mean = v.iter().sum::<f64>() / v.len() as f64;
         out.push(format!("{name:<18}{min:>12.4}{max:>12.4}{mean:>12.4}"));
     }
-    out.push(match first_extinction(&rows) {
+    out.push(match first_extinction(&rows, animals) {
         Some(r) => {
             format!("first extinction: tick {} (grazers={} hunters={} trees={})", r.tick, r.grazers, r.hunters, r.trees)
         }
         None => "first extinction: none".into(),
     });
-    out.extend(extinctions(&rows).iter().map(extinction_line));
+    out.extend(extinctions(&rows, animals).iter().map(extinction_line));
     Ok(out)
 }
 
@@ -928,7 +1007,7 @@ mod tests {
     /// The signature finds a known delay: hunters that are the grazer series `delay` ticks later
     /// (delay a multiple of 50 within ±8000) give pp_lag = delay and pp_corr near 1.
     fn signature_finds_the_delay(delay: i32, phase: f64) -> Result<(), TestCaseError> {
-        match signature(&delayed_copy(delay, phase), YEAR) {
+        match signature(&delayed_copy(delay, phase), YEAR, true) {
             Signature::Cycle { lag, corr, .. } => {
                 prop_assert_eq!(lag, delay);
                 // Not 1: the moving average is cut short over the run's last 6000 ticks, which
@@ -954,7 +1033,7 @@ mod tests {
         for d in [0, 350, -350, SIG_MAX_LAG, -SIG_MAX_LAG] {
             signature_finds_the_delay(d, 0.0).unwrap();
         }
-        let line = signature_line(&signature(&delayed_copy(350, 0.0), YEAR));
+        let line = signature_line(&signature(&delayed_copy(350, 0.0), YEAR, true));
         assert!(
             line.starts_with("signature: pp_lag 350 pp_corr 0.9") && line.ends_with("hunter autocorrelation)"),
             "{line}"
@@ -965,7 +1044,7 @@ mod tests {
             r.hunters = 0;
         }
         rows[12_000].deaths[1][Cause::Starved as usize] = 3;
-        let s = signature(&rows, YEAR);
+        let s = signature(&rows, YEAR, true);
         assert!(matches!(&s, Signature::Extinct(e) if e.species == "hunters" && e.tick == 12_000), "{s:?}");
         assert!(!s.pass());
         assert_eq!(
@@ -975,16 +1054,18 @@ mod tests {
         // An extinction before tick 5000 leaves 0s in the window too; trees reaching 0 do not count.
         let mut rows = delayed_copy(0, 0.0);
         rows.iter_mut().for_each(|r| r.trees = 0);
-        assert!(matches!(signature(&rows, YEAR), Signature::Cycle { lag: 0, .. }));
+        assert!(matches!(signature(&rows, YEAR, true), Signature::Cycle { lag: 0, .. }));
         rows[4500..].iter_mut().for_each(|r| r.grazers = 0);
-        assert!(matches!(signature(&rows, YEAR), Signature::Extinct(e) if e.species == "grazers" && e.tick == 4500));
+        assert!(
+            matches!(signature(&rows, YEAR, true), Signature::Extinct(e) if e.species == "grazers" && e.tick == 4500)
+        );
         // An extinction that ends before the window does not count: the window never sees a 0.
         let mut rows = delayed_copy(0, 0.0);
         rows[3000].hunters = 0;
-        assert!(matches!(signature(&rows, YEAR), Signature::Cycle { lag: 0, .. }));
+        assert!(matches!(signature(&rows, YEAR, true), Signature::Cycle { lag: 0, .. }));
         // Constant hunters (the default of `rows_from`) have no variance at any lag.
         let flat = rows_from(|t| 100 + (t % 7) as u32, 20_001);
-        assert_eq!(signature(&flat, YEAR), Signature::Flat);
+        assert_eq!(signature(&flat, YEAR, true), Signature::Flat);
         assert!(signature_line(&Signature::Flat).starts_with("signature: undefined"));
     }
 
@@ -1017,7 +1098,7 @@ mod tests {
     /// Hunters trailing a 6000–12000-tick grazer cycle by less than half a period, under a seasonal
     /// term and a trend: pp_lag within 100 of the delay, pp_period within 5% of the period, pass.
     fn trailing_cycle_passes(period: i32, delay: i32, seed: u64) -> Result<(), TestCaseError> {
-        let s = signature(&cycle_with_seasons(period as f64, delay, seed), YEAR);
+        let s = signature(&cycle_with_seasons(period as f64, delay, seed), YEAR, true);
         let Signature::Cycle { lag, period: Some(got), .. } = s else {
             return Err(TestCaseError::fail(format!("{s:?}")));
         };
@@ -1049,11 +1130,11 @@ mod tests {
             r.grazers = (600.0 + 120.0 * season + rng.gen_range(-40.0..40.0)) as u32;
             r.hunters = (60.0 - 15.0 * season + rng.gen_range(-8.0..8.0)) as u32;
         }
-        let s = signature(&noisy, YEAR);
+        let s = signature(&noisy, YEAR, true);
         assert!(!s.pass(), "{s:?}");
         // Hunters leading grazers by less than a quarter period: a negative lag, no pass.
         for (p, d) in [(8000, 1500), (6000, 1000), (12000, 2900)] {
-            let s = signature(&cycle_with_seasons(p as f64, -d, 5), YEAR);
+            let s = signature(&cycle_with_seasons(p as f64, -d, 5), YEAR, true);
             assert!(matches!(s, Signature::Cycle { lag, .. } if lag < 0), "{s:?}");
             assert!(!s.pass(), "{s:?}");
         }
@@ -1074,7 +1155,7 @@ mod tests {
     /// 60000 and periods 12500–14000 the estimate stays within 500.
     const ENVELOPE: f64 = 60_000.0;
     fn long_lag_recovered(period: i32, seed: u64) -> Result<(), TestCaseError> {
-        let s = signature(&cycle_under(period as f64, 6000, seed, ENVELOPE), YEAR);
+        let s = signature(&cycle_under(period as f64, 6000, seed, ENVELOPE), YEAR, true);
         let Signature::Cycle { lag, period: Some(got), .. } = s else {
             return Err(TestCaseError::fail(format!("{s:?}")));
         };
@@ -1124,7 +1205,7 @@ mod tests {
         let mut rows = rows_from(|t| 100 + (t % 3000 < 1500) as u32 * 50, 20001);
         rows[5000].fertility_mean = 210.0; // upper side: (220 − 210)/220 ≈ 0.045, tighter than (100 − 40)/40
         rows[6000].grass_mean = 0.04; // below the band: (0.04 − 0.05)/0.05 = −0.2
-        let s = Series { rows, mature_at_10000: Some(Ok(42)), timing: Timing::Excluded };
+        let s = Series { rows, mature_at_10000: Some(Ok(42)), timing: Timing::Excluded, animals: true };
         let r = evaluate(&s).unwrap();
         assert!(r.get("runtime").is_none());
         let f = r.get("fertility_band").unwrap();
@@ -1201,7 +1282,7 @@ mod tests {
                 traits: Default::default(),
             })
             .collect();
-        Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms, RUNTIME_LIMIT_MS) }
+        Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms, RUNTIME_LIMIT_MS), animals: true }
     }
 
     /// The invariants a violation may break: all but `tick_10000`, which needs a run under 10000 ticks.
@@ -1290,7 +1371,7 @@ mod tests {
 
     /// Keys failing in `evaluate_long` on these rows.
     fn failing_long(rows: &[StatsRow]) -> Vec<&'static str> {
-        evaluate_long(rows).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect()
+        evaluate_long(rows, true).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect()
     }
 
     #[test]
@@ -1298,7 +1379,7 @@ mod tests {
         let n = LONG_TICKS as usize + 1;
         let base = |t: usize| if t < 20_000 { 200 } else { 100 + (t % 7) as u32 };
         let healthy = rows_from(base, n);
-        let report = evaluate_long(&healthy).unwrap();
+        let report = evaluate_long(&healthy, true).unwrap();
         assert!(report.pass(), "{:?}", report.lines);
         assert_eq!(report.lines.iter().map(|l| l.key).collect::<Vec<_>>(), LONG_KEYS[1..]);
 
@@ -1323,17 +1404,40 @@ mod tests {
         assert!(failing_long(&rows).is_empty());
     }
 
+    /// Without animals, the long check drops its grazer and hunter parts: `long_band` is n/a and
+    /// `long_no_extinction` watches the trees alone, so the all-zero animal columns pass.
+    #[test]
+    fn long_check_without_animals_marks_the_band_na() {
+        let n = LONG_TICKS as usize + 1;
+        let mut rows = rows_from(|t| if t < 20_000 { 200 } else { 100 + (t % 7) as u32 }, n);
+        rows.iter_mut().for_each(|r| {
+            r.grazers = 0;
+            r.hunters = 0;
+        });
+        assert_eq!(failing_long(&rows), ["long_no_extinction"], "with animals, the empty columns are an extinction");
+        let report = evaluate_long(&rows, false).unwrap();
+        assert!(report.pass(), "{:?}", report.lines);
+        assert_eq!(report.not_applicable(), ANIMAL_ONLY_LONG_KEYS.to_vec());
+        assert_eq!(report.get("long_no_extinction").unwrap().observed, "min trees=20");
+        // The trees still count: a tree reaching 0 fails, animals off or not.
+        rows[30_000].trees = 0;
+        assert_eq!(
+            evaluate_long(&rows, false).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect::<Vec<_>>(),
+            ["long_no_extinction"]
+        );
+    }
+
     #[test]
     fn long_check_on_a_short_run_reports_its_length() {
         let rows = rows_from(|_| 50, 20_001);
-        let report = evaluate_long(&rows).unwrap();
+        let report = evaluate_long(&rows, true).unwrap();
         assert_eq!(report.lines.iter().map(|l| l.key).collect::<Vec<_>>(), LONG_KEYS);
         assert_eq!(failing_long(&rows), ["long_run_length"]);
-        assert!(evaluate_long(&rows_from(|_| 50, 10)).unwrap().get("long_band").unwrap().pass);
-        assert!(evaluate_long(&[]).is_err());
+        assert!(evaluate_long(&rows_from(|_| 50, 10), true).unwrap().get("long_band").unwrap().pass);
+        assert!(evaluate_long(&[], true).is_err());
         let mut gap = rows_from(|_| 50, 10);
         gap.remove(4);
-        assert!(evaluate_long(&gap).unwrap_err().contains("row 4 has tick 5"));
+        assert!(evaluate_long(&gap, true).unwrap_err().contains("row 4 has tick 5"));
     }
 
     #[test]
@@ -1347,7 +1451,7 @@ mod tests {
         rows[1500].hunters = 0;
         rows[1500].trees = 0;
         rows[1499].deaths[1] = [0, 0, 1, 0, 0];
-        let e = extinctions(&rows);
+        let e = extinctions(&rows, true);
         assert_eq!(
             e.iter().map(|x| (x.species, x.tick)).collect::<Vec<_>>(),
             [("grazers", 1200), ("hunters", 1500), ("trees", 1500)]
@@ -1361,9 +1465,9 @@ mod tests {
         assert_eq!((e[2].causes, e[2].dominant_name()), (None, "unrecorded"));
         assert_eq!(extinction_line(&e[2]), "extinction: trees at tick 1500 (tree death causes are not recorded)");
         // A species at 0 from the start has no deaths to attribute.
-        let e = extinctions(&rows_from(|_| 0, 10));
+        let e = extinctions(&rows_from(|_| 0, 10), true);
         assert_eq!((e[0].tick, e[0].dominant_name()), (0, "none"));
-        assert!(extinctions(&rows_from(|_| 5, 10)).is_empty());
+        assert!(extinctions(&rows_from(|_| 5, 10), true).is_empty());
     }
 
     #[test]

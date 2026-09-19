@@ -88,6 +88,12 @@ temp = [-3.0, 2.0, 26.0, 31.0]
 immigration_floor = 0
 immigration_interval = 500
 
+[animals]
+# The animal tier (shot G0). false leaves grazers and hunters out of the run entirely: none are
+# placed, none immigrate, and the animal phase is skipped, so it draws nothing from the RNG.
+# true is the default and is not written to meta.json.
+enabled = true
+
 [grazer]
 start_count = 300
 start_energy = 60.0

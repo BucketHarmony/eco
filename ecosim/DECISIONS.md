@@ -825,3 +825,37 @@ No sim rule, default or file format changed, and nothing was optimised. The mani
 A baseline taken on a GitHub runner carries the runner's variance. If the job flakes near 20% on unchanged code, the remedy is more samples, not a wider threshold.
 
 **Measuring on this machine.** The i9-12900KF has P- and E-cores. Windows moves a long single-threaded run onto an E-core after a few seconds, and it then runs about 2× slower. So `PERF.md`'s numbers come from runs pinned to the P-cores (`start /affinity FFFF`). Unpinned wall times from earlier shots, such as shot 15's 44–59 s strip runs, overstate the cost by up to 2×.
+
+## Animals off (shot G0)
+
+The project is moving toward a garden planner, where the animal tier is neither wanted nor affordable: shot 15a measured it at 76–93% of every run, and a 256×256 world took 170 s against a 90 s limit. `[animals] enabled` turns it off.
+
+**The switch.** `enabled = true` in `params.toml`, so every earlier run is unaffected, and `--set animals.enabled=false` turns it off for a run. When it is false:
+- `place_initial_animals` returns before placing anything, and grazer and hunter immigration are gated in `immigrate`;
+- `Sim::step_profiled` skips `update_animals` outright.
+
+Each check sits **outside** the loop it guards, so an animals-off run draws nothing from the RNG that an animals-on run would draw, and nothing else changes. `animals.enabled = false` is bit-identical to a run with the animal tier configured empty (`start_count = 0`, `immigration_floor = 0`), proved against `state::encode` — which includes the RNG's stream and word position — by the property test `prop_animals_off_is_an_empty_animal_tier` and its named regression sibling on seeds 1–3.
+
+**Nothing was retuned to compensate.** The shot prompt forbids it, and the numbers say it isn't needed: removing grazing raises mean grass cover 8–16% and leaves shrub, tree and mature-tree counts inside the seed-to-seed spread (`sweeps/G0/FINDINGS.md`).
+
+**Why the SAD's "2 ground-cover species, 1 tree species, 2 animal species" still holds.** The two animal species are still in the code, in `params.toml` and in `meta.json`'s species table, with every behaviour the SAD specifies. The switch decides only whether a run places any individuals of them, exactly as `grazer.start_count` always could for one species. It is a run setting, not a change to the species set.
+
+**`meta.json` and the format.** A run with animals off adds `"animals": false` at the top level. The field is skipped when animals are on (`skip_serializing_if`, the same pattern as `[rng]`), so a default run writes the bytes it always did — every committed manifest and fixture is unchanged. `format_version` stays 3: a reader that ignores the field sees a run with no animals in `series.csv` and in `entities.json`, which is a state the format already allowed.
+
+**Which invariants `ecosim check` marks n/a.** An animal invariant on a run with no animals is neither passed nor failed; it is not a question. `CheckLine` gained an `na` flag, `CheckReport::pass()` ignores n/a lines, and `ecosim check` prints them as `N/A  <name>: n/a (animals off)`. This does not widen anything for an animals-on run: those are evaluated exactly as before.
+
+| invariant | with animals off | why |
+|---|---|---|
+| `no_extinction` | **kept, trees only** | It asks whether a species that is in the run reaches 0. Trees are still in the run, and a garden run that loses its trees must still fail. |
+| `max_10x` | **kept, trees only** | It measures runaway growth per species, so its grazer and hunter parts are animal invariants and its tree part is not. |
+| `grazer_cycle` | **n/a** | The whole line is about grazer population dynamics. |
+| `animals_10k` | **n/a** | "At tick 10000, grazers ≥ 10 and hunters ≥ 2" is unsatisfiable by construction. |
+| `long_band` (`check --long` only) | **n/a** | It is a band on the grazer column. With all-zero animal columns it would otherwise pass vacuously, which is worse than saying nothing. |
+| `long_no_extinction` (`check --long`) | **kept, trees only** | Same reason as `no_extinction`. |
+| every plant and soil invariant | **kept unchanged** | `fertility_band`, `grass_band`, `tree_growth` and `mature_trees_10k` don't mention animals. |
+
+`ecosim stats` follows the same rule: `first_extinction` and the extinction list consider trees only, and the signature (a grazer-cycle measure) reports `signature: not applicable, the run has no animals (animals off) pp_pass false`. Sweep cells write `n/a` in the columns of n/a invariants and `animals off` in the signature column, and neither counts as a failure.
+
+**`ecosim fork --set animals.enabled=…` does not work on a parent run that had animals.** `fork` reads the parent's `meta.json` params, and an animals-on parent has no `[animals]` section there, so the key is rejected as unknown. This is the same limitation `hunter.handling_ticks` has, and it is left alone on purpose: whether a run has animals is a decision taken when the world is built, not one to change from a mid-run snapshot. Forking an animals-**off** parent does work, because its `meta.json` does carry the section; the fork starts with no animals in its state, so any that appear come in through immigration.
+
+**The sweep.** `sweeps/G0/` is `animals.enabled` over `true, false` on seeds 1–3 at 20000 ticks; 6/6 cells pass, 46.6 s wall on 6 jobs. `sweep.md` calls the two-value band "fragile" because its rule is "fewer than 3 grid values"; a boolean can never have three, so the label carries no meaning here.

@@ -1,0 +1,8 @@
+hunter_refugium_k rc=0 wall=40s
+hunter_kill_prob rc=0 wall=22s
+grazer_energy_cost rc=0 wall=36s
+tree_mature_age rc=0 wall=24s
+season_amplitude rc=0 wall=29s
+hunter_immigration_floor rc=0 wall=19s
+tree_crowding_mortality rc=0 wall=25s
+total=195s

@@ -131,6 +131,10 @@ pub struct CellResult {
     pub first_extinction: Option<u32>,
     /// Grazer maxima from tick 2000, as the cycle invariant counts them.
     pub grazer_peaks: usize,
+    /// First tick at which hunters are 0, over the whole run (immigration may bring them back).
+    pub hunter_extinction: Option<u32>,
+    /// Hunters that immigrated over the run.
+    pub hunter_immigrants: u32,
 }
 
 /// Run one cell in memory (no snapshots) and evaluate it exactly as `ecosim check` would.
@@ -151,8 +155,10 @@ pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) 
     let last = rows.len() - 1;
     let grazer_peaks = grazer_maxima(&rows, (WINDOW_START as usize).min(last), last).len();
     let first_extinction = first_extinction(&rows).map(|r| r.tick);
+    let hunter_extinction = rows.iter().find(|r| r.hunters == 0).map(|r| r.tick);
+    let hunter_immigrants = rows[last].hunter_immigrants;
     let report = evaluate(&Series { rows, mature_at_10000: mature.map(Ok), timing: Timing::Excluded })?;
-    Ok(CellResult { csv, report, first_extinction, grazer_peaks })
+    Ok(CellResult { csv, report, first_extinction, grazer_peaks, hunter_extinction, hunter_immigrants })
 }
 
 /// Run labelled cells on `jobs` threads; results come back in input order.
@@ -292,7 +298,7 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
     for k in &keys {
         let _ = write!(csv, ",{k}_pass,{k}_value,{k}_margin");
     }
-    csv.push_str(",first_extinction_tick,grazer_peaks\n");
+    csv.push_str(",first_extinction_tick,grazer_peaks,hunter_extinction_tick,hunter_immigrants\n");
     for ((cell, (id, _, _)), r) in cells.iter().zip(&jobs).zip(&results) {
         for (p, &i) in cfg.specs.iter().zip(&cell.idx) {
             let _ = write!(csv, "{},", p.values[i]);
@@ -307,7 +313,8 @@ pub fn sweep(cfg: &SweepConfig, out: &Path) -> Result<Vec<CellResult>, String> {
             }
         }
         let ext = r.first_extinction.map_or(String::new(), |t| t.to_string());
-        let _ = writeln!(csv, ",{ext},{}", r.grazer_peaks);
+        let hext = r.hunter_extinction.map_or(String::new(), |t| t.to_string());
+        let _ = writeln!(csv, ",{ext},{},{hext},{}", r.grazer_peaks, r.hunter_immigrants);
         fs::write(out.join("cells").join(format!("{id}.csv")), &r.csv).map_err(|e| e.to_string())?;
     }
     fs::write(out.join("sweep.csv"), csv).map_err(|e| e.to_string())?;

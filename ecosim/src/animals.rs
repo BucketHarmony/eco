@@ -1,7 +1,7 @@
 //! Grazers and hunters: fixed-priority behaviour, energy, reproduction and death.
 
 use crate::sim::Sim;
-use crate::world::{cidx, patch_of, PATCHES_X, UNREACHABLE};
+use crate::world::{cidx, patch_of, ColClass, PATCHES_X, UNREACHABLE, WX, WY};
 use rand::Rng;
 use serde::Serialize;
 
@@ -81,6 +81,14 @@ impl Animal {
 /// Stability rule 1 (type II response): intake = min(intake_max, intake_k · grass).
 pub fn grazing_intake(grass: f32, intake_max: f32, intake_k: f32) -> f32 {
     (intake_k * grass).min(intake_max).max(0.0)
+}
+
+/// Stability rule 3 (continuous shrub refugium): chance an attack kills a grazer standing in a patch
+/// with this shrub density, `kill_prob · (1 − shrub)^refugium_k`. Shrub only lowers the chance; it
+/// never makes a grazer an illegal target.
+pub fn attack_success(kill_prob: f64, shrub: f32, refugium_k: f32) -> f64 {
+    let cover = (1.0 - shrub as f64).clamp(0.0, 1.0);
+    (kill_prob * libm::pow(cover, refugium_k as f64)).clamp(0.0, 1.0)
 }
 
 /// A grazer's fixed, arbitrary ranking of patches (lower is preferred): an integer hash mix.
@@ -194,11 +202,6 @@ impl Sim {
         self.patches[p].detritus += self.params.grazer.corpse_detritus;
     }
 
-    /// A grazer can be attacked only outside the shrub refugium (stability rule 3).
-    pub fn attackable(&self, g: &crate::animals::Animal) -> bool {
-        g.alive && self.patches[g.patch()].shrub <= self.params.hunter.refugium_shrub
-    }
-
     /// Animals phase: grazers in Vec order, then hunters. Newborns act from the next tick.
     pub fn update_animals(&mut self) {
         self.rebuild_hunter_grid();
@@ -308,23 +311,63 @@ impl Sim {
     /// Add a newborn grazer on column (x, y), keeping the per-patch counts and the column grid current.
     fn spawn_grazer(&mut self, x: usize, y: usize) {
         let gp = &self.params.grazer;
-        let (energy, cooldown) = (gp.newborn_energy, gp.cooldown);
+        self.add_grazer(x, y, gp.newborn_energy, gp.cooldown);
+    }
+
+    fn add_grazer(&mut self, x: usize, y: usize, energy: f32, cooldown: u32) {
         let id = self.alloc_id();
         self.grazer_grid[cidx(x, y)].push(self.grazers.len() as u32);
         self.grazers.push(Animal::new(id, Kind::Grazer, x, y, energy, 0, cooldown));
         self.grazers_in_patch[patch_of(x, y)] += 1;
     }
 
-    /// Nearest attackable grazer within the seek radius of column (x, y): (index, distance).
-    /// Lowest index wins ties.
-    fn nearest_prey(&self, x: i32, y: i32) -> Option<(usize, f32)> {
-        nearest_in_grid(&self.grazer_grid, &self.seek_offsets, x, y, |j| self.attackable(&self.grazers[j]))
+    /// A uniformly random soil column on the world's edge (x or y at 0 or 63), or any soil column
+    /// if the edge has none.
+    fn random_edge_soil_column(&mut self) -> Option<(usize, usize)> {
+        let edge: Vec<usize> = (0..crate::world::COLS)
+            .filter(|&c| {
+                let (x, y) = (c % WX, c / WX);
+                (x == 0 || y == 0 || x == WX - 1 || y == WY - 1) && self.world.class[c] == ColClass::Soil
+            })
+            .collect();
+        if edge.is_empty() {
+            return self.random_soil_column();
+        }
+        let c = edge[self.rng.gen_range(0..edge.len())];
+        Some((c % WX, c / WX))
     }
 
-    /// One attack by hunter `h` on grazer `j` (stability rule 2).
+    /// Small-number floor: on ticks that are a multiple of a species' `immigration_interval`, one
+    /// animal of that species arrives at a random edge soil column if fewer than `immigration_floor`
+    /// are alive. Immigrants have `start_energy`, age 0 and cooldown 0, and act from the next tick.
+    pub fn immigrate(&mut self, t: u32) {
+        let gp = self.params.grazer.clone();
+        if t.is_multiple_of(gp.immigration_interval) && self.count_grazers() < gp.immigration_floor {
+            if let Some((x, y)) = self.random_edge_soil_column() {
+                self.add_grazer(x, y, gp.start_energy, 0);
+            }
+        }
+        let hp = self.params.hunter.clone();
+        if t.is_multiple_of(hp.immigration_interval) && self.count_hunters() < hp.immigration_floor {
+            if let Some((x, y)) = self.random_edge_soil_column() {
+                let id = self.alloc_id();
+                self.hunters.push(Animal::new(id, Kind::Hunter, x, y, hp.start_energy, 0, 0));
+                self.hunter_immigrants += 1;
+            }
+        }
+    }
+
+    /// Nearest live grazer within the seek radius of column (x, y): (index, distance). Every live
+    /// grazer is a legal target, whatever the shrub. Lowest index wins ties.
+    fn nearest_prey(&self, x: i32, y: i32) -> Option<(usize, f32)> {
+        nearest_in_grid(&self.grazer_grid, &self.seek_offsets, x, y, |j| self.grazers[j].alive)
+    }
+
+    /// One attack by hunter `h` on grazer `j` (stability rules 2 and 3).
     fn attack(&mut self, h: usize, j: usize) {
         let hp = self.params.hunter.clone();
-        if self.rng.gen_bool(hp.kill_prob.clamp(0.0, 1.0)) {
+        let p = attack_success(hp.kill_prob, self.patches[self.grazers[j].patch()].shrub, hp.refugium_k);
+        if self.rng.gen_bool(p) {
             self.kill_grazer(j);
             let e = &mut self.hunters[h].energy;
             *e = (*e + hp.kill_energy).min(100.0);
@@ -426,8 +469,8 @@ mod tests {
         assert_eq!(grazing_intake(0.0, 3.0, 20.0), 0.0);
     }
 
-    /// One hunter next to one grazer, kill_prob 1: the attack succeeds unless the refugium applies.
-    fn attack_outcome(shrub: f32) -> bool {
+    /// One hunter next to one grazer, kill_prob 1: (grazer killed, hunter state, hunter energy).
+    fn attack_outcome(shrub: f32) -> (bool, State, f32) {
         let mut p = Params::load_default();
         p.tree.initial_count = 0;
         p.grazer.start_count = 0;
@@ -441,13 +484,43 @@ mod tests {
         sim.patches[patch_of(10, 10)].shrub = shrub;
         sim.rebuild_grazer_grid();
         sim.update_hunter(0);
-        !sim.grazers[0].alive
+        (!sim.grazers[0].alive, sim.hunters[0].state, sim.hunters[0].energy)
     }
 
     #[test]
-    fn refugium_blocks_attack() {
-        assert!(attack_outcome(0.4), "grazer outside refugium is killed");
-        assert!(!attack_outcome(0.6), "grazer in shrub > 0.5 cannot be attacked");
+    fn shrub_lowers_attack_success_but_never_forbids_the_attempt() {
+        let hp = Params::load_default().hunter;
+        let (killed, state, energy) = attack_outcome(0.0);
+        assert!(
+            killed && state == State::Hunt && energy == 50.0 + hp.kill_energy - hp.energy_cost,
+            "bare ground: {energy}"
+        );
+        // Full shrub: success is 0, but the hunter still attacks and pays the failed-attack cost.
+        let (killed, state, energy) = attack_outcome(1.0);
+        assert!(
+            !killed && state == State::Hunt && energy == 50.0 - hp.fail_cost - hp.energy_cost,
+            "full shrub: {energy}"
+        );
+    }
+
+    #[test]
+    fn attack_success_formula() {
+        assert_eq!(attack_success(0.2, 0.0, 2.0), 0.2);
+        assert!((attack_success(0.2, 0.5, 2.0) - 0.05).abs() < 1e-7);
+        assert!((attack_success(1.0, 0.75, 1.0) - 0.25).abs() < 1e-7);
+        assert_eq!(attack_success(0.2, 1.0, 2.0), 0.0);
+        assert_eq!(attack_success(0.2, 0.6, 0.0), 0.2, "k = 0 switches the refugium off");
+    }
+
+    /// Stability rule 3: success equals `kill_prob` on bare ground, never exceeds it, and does not
+    /// rise as shrub rises.
+    fn success_monotone_in_shrub(kill_prob: f64, a: f32, b: f32, k: f32) -> Result<(), TestCaseError> {
+        let (lo, hi) = (a.min(b), a.max(b));
+        prop_assert_eq!(attack_success(kill_prob, 0.0, k), kill_prob);
+        let (at_lo, at_hi) = (attack_success(kill_prob, lo, k), attack_success(kill_prob, hi, k));
+        prop_assert!(at_hi <= at_lo, "success rose from {} to {} as shrub rose {} -> {}", at_lo, at_hi, lo, hi);
+        prop_assert!((0.0..=kill_prob).contains(&at_hi) && at_lo <= kill_prob);
+        Ok(())
     }
 
     fn intake_bounded_and_monotone(a: f32, b: f32, k: f32) -> Result<(), TestCaseError> {
@@ -480,9 +553,10 @@ mod tests {
         sim.grazers.iter().map(|g| (g.alive, g.x, g.y)).collect()
     }
 
-    /// Stability rule 3: a grazer in a patch whose shrub exceeds the threshold is never chosen as
-    /// prey, and one hunter update leaves it alive and where it was.
-    fn refuge_is_never_attacked(
+    /// Stability rule 3 has no threshold: a hungry hunter's prey is the nearest live grazer within
+    /// the seek radius whatever the shrub (lowest index on ties), it attacks that grazer when in reach,
+    /// and no other grazer is touched. A grazer whose success chance is 0 always survives.
+    fn every_grazer_is_a_legal_target(
         grazers: &[(usize, usize)],
         shrub: &[f32],
         hunter: (usize, usize),
@@ -492,30 +566,41 @@ mod tests {
         let mut sim = meadow(grazers, shrub);
         sim.params.hunter.kill_prob = kill_prob;
         add_hunter(&mut sim, hunter, energy);
-        let threshold = sim.params.hunter.refugium_shrub;
-        let in_refuge = |sim: &Sim, j: usize| sim.patches[sim.grazers[j].patch()].shrub > threshold;
-        if let Some((j, _)) = sim.nearest_prey(hunter.0 as i32, hunter.1 as i32) {
-            prop_assert!(!in_refuge(&sim, j), "grazer {j} in a refuge was selected as prey");
-        }
-        // Refuge membership is taken before the update: a failed attack can push a grazer into one.
-        let sheltered: Vec<bool> = (0..sim.grazers.len()).map(|j| in_refuge(&sim, j)).collect();
+        let (hx, hy) = (hunter.0 as i32, hunter.1 as i32);
+        let hp = sim.params.hunter.clone();
+        let want = grazers
+            .iter()
+            .enumerate()
+            .map(|(j, &(x, y))| ((x as i32 - hx).pow(2) + (y as i32 - hy).pow(2), j))
+            .filter(|&(d2, _)| (d2 as f32).sqrt() <= hp.seek_radius)
+            .min();
+        let got = sim.nearest_prey(hx, hy);
+        prop_assert_eq!(got.map(|g| g.0), want.map(|w| w.1), "prey is not the nearest grazer");
         let before = positions(&sim);
         sim.update_hunter(0);
-        for (j, (b, a)) in before.iter().zip(positions(&sim)).enumerate() {
-            if sheltered[j] {
-                prop_assert_eq!(*b, a, "refuge grazer {} was touched", j);
+        let after = positions(&sim);
+        for (j, (b, a)) in before.iter().zip(&after).enumerate() {
+            if Some(j) != got.map(|g| g.0) {
+                prop_assert_eq!(b, a, "grazer {} is not the prey but was touched", j);
             }
+        }
+        if let Some((j, d)) = got.filter(|g| g.1 <= hp.attack_radius) {
+            prop_assert_eq!(sim.hunters[0].state, State::Hunt);
+            let p = attack_success(kill_prob, sim.patches[patch_of(grazers[j].0, grazers[j].1)].shrub, hp.refugium_k);
+            prop_assert!(p > 0.0 || after[j].0, "grazer {} at distance {} died with success chance 0", j, d);
         }
         Ok(())
     }
 
-    /// Stability rule 2: a hunter above satiation makes no attack, whatever is in reach.
+    /// Stability rule 2: a hunter above satiation makes no attack, whatever is in reach and however
+    /// bare the ground (kill_prob 1, any shrub).
     fn satiated_hunter_rests(
         grazers: &[(usize, usize)],
+        shrub: &[f32],
         hunter: (usize, usize),
         energy: f32,
     ) -> Result<(), TestCaseError> {
-        let mut sim = meadow(grazers, &[0.0; 64]);
+        let mut sim = meadow(grazers, shrub);
         sim.params.hunter.kill_prob = 1.0;
         add_hunter(&mut sim, hunter, energy);
         let before = positions(&sim);
@@ -628,23 +713,44 @@ mod tests {
         }
 
         #[test]
-        fn prop_refuge_is_never_attacked(
+        fn prop_attack_success_monotone_in_shrub(
+            kill_prob in 0.0f64..=1.0,
+            a in 0.0f32..=1.0,
+            b in 0.0f32..=1.0,
+            k in 0.0f32..8.0,
+        ) {
+            success_monotone_in_shrub(kill_prob, a, b, k)?;
+        }
+
+        #[test]
+        fn prop_every_grazer_is_a_legal_target(
             grazers in prop::collection::vec(column(), 1..40),
-            shrub in prop::collection::vec(0.0f32..1.0, 64),
+            shrub in prop::collection::vec(0.0f32..=1.0, 64),
             hunter in column(),
             energy in 1.0f32..=85.0,
             kill_prob in 0.0f64..=1.0,
         ) {
-            refuge_is_never_attacked(&grazers, &shrub, hunter, energy, kill_prob)?;
+            every_grazer_is_a_legal_target(&grazers, &shrub, hunter, energy, kill_prob)?;
         }
 
         #[test]
         fn prop_satiated_hunter_rests(
             grazers in prop::collection::vec(column(), 1..40),
+            shrub in prop::collection::vec(0.0f32..=1.0, 64),
             hunter in column(),
             energy in 85.001f32..=100.0,
         ) {
-            satiated_hunter_rests(&grazers, hunter, energy)?;
+            satiated_hunter_rests(&grazers, &shrub, hunter, energy)?;
+        }
+
+        #[test]
+        fn prop_immigration_follows_the_floor(
+            heights in crate::world::tests::terrain(),
+            hunters in 0usize..12,
+            grazer_floor in 0u32..4,
+            t in 1u32..3000,
+        ) {
+            immigration_follows_the_floor(&heights, hunters, grazer_floor, t)?;
         }
 
         #[test]
@@ -667,24 +773,106 @@ mod tests {
     }
 
     #[test]
-    fn refuge_regression_nearer_grazer_in_refuge() {
-        // Patch 0 is a refuge, patch 1 is not; the refuge grazer is nearer but must be skipped.
+    fn success_regression_zero_exponent_at_full_shrub() {
+        // (1 - 1)^0 is 1 in libm::pow, so k = 0 disables the refugium even at shrub 1.
+        success_monotone_in_shrub(0.3, 1.0, 0.0, 0.0).unwrap();
+    }
+
+    #[test]
+    fn target_regression_nearer_grazer_in_dense_shrub() {
+        // Under the old threshold rule the nearer grazer (patch 0, shrub 0.9) was skipped for the
+        // farther one; now it is the prey.
         let mut shrub = [0.0; 64];
         shrub[0] = 0.9;
-        refuge_is_never_attacked(&[(7, 3), (9, 3)], &shrub, (7, 4), 50.0, 1.0).unwrap();
+        every_grazer_is_a_legal_target(&[(7, 3), (9, 3)], &shrub, (7, 4), 50.0, 1.0).unwrap();
     }
 
     #[test]
-    fn refuge_regression_failed_attack_pushes_grazer_into_refuge() {
-        // Found by proptest: an exposed grazer displaced by a failed attack lands in a refuge patch.
+    fn target_regression_full_shrub_always_survives() {
         let mut shrub = [0.0; 64];
-        shrub[63] = 0.86;
-        refuge_is_never_attacked(&[(61, 53)], &shrub, (61, 51), 1.0, 0.0).unwrap();
+        shrub[patch_of(61, 53)] = 1.0;
+        every_grazer_is_a_legal_target(&[(61, 53), (61, 60)], &shrub, (61, 52), 10.0, 1.0).unwrap();
     }
 
     #[test]
-    fn satiation_regression_grazer_in_reach() {
-        satiated_hunter_rests(&[(10, 10)], (11, 10), 90.0).unwrap();
+    fn satiation_regression_grazer_in_reach_on_bare_ground() {
+        satiated_hunter_rests(&[(10, 10)], &[0.0; 64], (11, 10), 90.0).unwrap();
+    }
+
+    /// Small-number floor: at a multiple of the interval, exactly one hunter arrives on an edge soil
+    /// column (any soil column if the edge has none) with start energy, age 0 and cooldown 0, and
+    /// only when fewer than the floor are alive; the cumulative counter tracks it. Grazers follow
+    /// the same rule with their own floor.
+    fn immigration_follows_the_floor(
+        heights: &[u8],
+        hunters: usize,
+        grazer_floor: u32,
+        t: u32,
+    ) -> Result<(), TestCaseError> {
+        let mut sim = Sim::bare(heights);
+        let soil: Vec<usize> = (0..COLS).filter(|&c| sim.world.class[c] == ColClass::Soil).collect();
+        prop_assume!(!soil.is_empty());
+        sim.params.hunter.immigration_floor = 8;
+        sim.params.grazer.immigration_floor = grazer_floor;
+        for k in 0..hunters {
+            let c = soil[k % soil.len()];
+            add_hunter(&mut sim, (c % WX, c / WX), 50.0);
+        }
+        let (h0, g0, n0) = (sim.count_hunters(), sim.count_grazers(), sim.hunter_immigrants);
+        sim.immigrate(t);
+        let hunter_due = t.is_multiple_of(sim.params.hunter.immigration_interval) && h0 < 8;
+        prop_assert_eq!(sim.count_hunters(), h0 + hunter_due as u32);
+        prop_assert_eq!(sim.hunter_immigrants, n0 + hunter_due as u32);
+        let grazer_due = t.is_multiple_of(sim.params.grazer.immigration_interval) && g0 < grazer_floor;
+        prop_assert_eq!(sim.count_grazers(), g0 + grazer_due as u32);
+        let is_edge = |c: usize| c.is_multiple_of(WX) || c / WX == 0 || c % WX == WX - 1 || c / WX == WY - 1;
+        let any_edge = soil.iter().any(|&c| is_edge(c));
+        let placed_ok = |a: &Animal| {
+            let c = Sim::animal_col(a);
+            sim.world.class[c] == ColClass::Soil && (is_edge(c) || !any_edge)
+        };
+        if hunter_due {
+            let h = sim.hunters.last().unwrap();
+            prop_assert!(placed_ok(h), "immigrant hunter at ({}, {})", h.x, h.y);
+            prop_assert_eq!((h.energy, h.age, h.cooldown), (sim.params.hunter.start_energy, 0, 0));
+        }
+        if grazer_due {
+            let g = sim.grazers.last().unwrap();
+            prop_assert!(placed_ok(g), "immigrant grazer at ({}, {})", g.x, g.y);
+            prop_assert_eq!((g.energy, g.age, g.cooldown), (sim.params.grazer.start_energy, 0, 0));
+            let kept = sorted_cells(&sim.grazer_grid);
+            sim.rebuild_grazer_grid();
+            prop_assert_eq!(kept, sorted_cells(&sim.grazer_grid));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn immigration_regression_flat_world() {
+        // Tick 500 brings one hunter to the edge, tick 499 none; 8 live hunters stop it.
+        let flat = vec![14u8; COLS];
+        immigration_follows_the_floor(&flat, 0, 0, 500).unwrap();
+        immigration_follows_the_floor(&flat, 0, 3, 499).unwrap();
+        immigration_follows_the_floor(&flat, 8, 3, 1000).unwrap();
+        // The default grazer floor (0) never brings a grazer.
+        let mut sim = Sim::bare(&flat);
+        sim.params.hunter.immigration_floor = 8;
+        sim.params.grazer.immigration_floor = Params::load_default().grazer.immigration_floor;
+        sim.immigrate(500);
+        assert_eq!((sim.count_hunters(), sim.count_grazers(), sim.hunter_immigrants), (1, 0, 1));
+    }
+
+    #[test]
+    fn immigration_regression_no_edge_soil_falls_back_to_any_soil() {
+        // Water all round the rim (height 8, below the water level), soil inside.
+        let mut heights = vec![14u8; COLS];
+        for (c, h) in heights.iter_mut().enumerate() {
+            let (x, y) = (c % WX, c / WX);
+            if x == 0 || y == 0 || x == WX - 1 || y == WY - 1 {
+                *h = 8;
+            }
+        }
+        immigration_follows_the_floor(&heights, 0, 1, 1500).unwrap();
     }
 
     #[test]

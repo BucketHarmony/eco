@@ -1,5 +1,6 @@
-# ecosim CI gate. The seven numbered steps run in this order here and in `just ci` (ecosim/justfile);
-# ecosim/tests/ci.rs checks both. Step 2b builds the docs warning-free; step 8 is the release half of the cross-profile determinism test.
+# ecosim CI gate. The numbered steps run in this order here and in `just ci` (ecosim/justfile);
+# ecosim/tests/ci.rs checks both. Step 2b builds the docs warning-free; step 8 is the release half of the cross-profile determinism test;
+# step 9 checks one 60000-tick run under `ecosim check --long`.
 name: ci
 
 on:
@@ -94,3 +95,8 @@ jobs:
 
       - name: 8 determinism across profiles
         run: ECOSIM_REQUIRE_CROSS=1 cargo test --release --test integration determinism
+
+      - name: 9 long run
+        run: |
+          ./target/release/ecosim run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000
+          ./target/release/ecosim check --long ci-runs/long-s1

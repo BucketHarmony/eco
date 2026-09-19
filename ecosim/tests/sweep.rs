@@ -38,7 +38,7 @@ fn fresh_s42() -> &'static Path {
 }
 
 /// `check::evaluate` on a fresh seed-42 run reproduces the committed `ecosim check runs/s42` output
-/// (captured before check moved into the library), line for line apart from wall time. The runtime
+/// (regenerated with the dynamics fixes, DECISIONS.md), line for line apart from wall time. The runtime
 /// line is compared by name only: its verdict depends on the build profile and the machine.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
@@ -116,7 +116,7 @@ fn sweep_cells_equal_standalone_runs() {
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines.len(), 3, "{csv}");
     assert!(lines[0].starts_with("hunter.kill_prob,seed,run_length_pass,run_length_value,run_length_margin,"));
-    assert!(lines[0].ends_with(",first_extinction_tick,grazer_peaks"));
+    assert!(lines[0].ends_with(",first_extinction_tick,grazer_peaks,hunter_extinction_tick,hunter_immigrants"));
     assert!(!lines[0].contains("runtime"));
     assert!(lines[1].starts_with("0.2,3,false,500,"));
     assert_eq!(fs::read_dir(out.join("cells")).unwrap().count(), 2);

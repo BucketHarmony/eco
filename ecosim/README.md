@@ -3,7 +3,7 @@
 This is a deterministic, headless voxel ecology simulator (SAD 1).
 - The spec is in `../docs/`.
 - Design calls are in `DECISIONS.md` and parameter history is in `TUNING.md`.
-- The sweep results are in `SWEEP_FINDINGS.md`, and the measured coverage is in `COVERAGE.md`.
+- The sweep results are in `SWEEP_FINDINGS.md` (shot 4) and `sweeps/shot5/FINDINGS.md` (the dynamics fixes). The measured coverage is in `COVERAGE.md`.
 
 ## Commands
 
@@ -13,6 +13,7 @@ cargo test                                   # debug: property tests + integrati
 cargo test --release
 ecosim run --seed 1 --ticks 20000 --out runs/s1 --snapshot-every 100 [--set key=value ...]
 ecosim check runs/s1                         # invariants; exit 1 on any failure
+ecosim check --long runs/l1                  # long-run invariants for runs of >= 60000 ticks
 ecosim stats runs/s1
 ecosim diff runs/a runs/b                    # byte-compare two run directories
 ecosim sweep --baseline --seeds 1,2,3        # margin table; see `ecosim sweep --help`
@@ -30,6 +31,7 @@ CI is defined in `../.github/workflows/ci.yml`. The `justfile` in this directory
 6. `ecosim run` on seeds 1, 2 and 3 into `ci-runs/`, then `ecosim check` on each
 7. `ecosim sweep --baseline --seeds 1,2,3`, writing `ci-runs/baseline-margins.txt`
 8. `cargo test --release` of the determinism tests with `ECOSIM_REQUIRE_CROSS=1`. This requires the debug and release binaries to write identical run directories.
+9. `ecosim run` on seed 1 for 60000 ticks, then `ecosim check --long` on it
 
 To run it locally, first install the two tools once:
 

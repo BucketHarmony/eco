@@ -142,3 +142,110 @@ Real predator–prey cycles appeared (hunter peaks 140–260), but hunters went 
   | 42 | 1626 | 0.82–1.26 |
 
 - `cargo test --release`: 11 unit and 5 integration tests pass.
+
+## Dynamics fixes (shot 5)
+
+The rule changes (continuous refugium, hunter immigration floor, tree lifespan jitter, canopy self-thinning) are recorded in `DECISIONS.md` under "Dynamics fixes". All rounds were run with the sweep harness. Scratch rounds (r1–r8, L1–L3) ran into a scratch directory, while the official rounds 1–4 ran all seven required sweeps. Round 4's output is committed in `sweeps/shot5/`, and its findings are in `sweeps/shot5/FINDINGS.md`.
+
+In the tables below:
+- "hext" is a cell where hunters reach 0 at some tick.
+- "pass" means every 20000-tick invariant passes. Runtime is excluded.
+
+### Values changed in this shot
+
+| param | before | after | why |
+|---|---|---|---|
+| hunter.start_count | 12 | 20 | brief (`hunter.initial = 20`) |
+| hunter.refugium_shrub → refugium_k | 0.58 | 2.0 | brief; 2.0 is the middle of the round-2/3 band [0.5, 3.5] and the brief's default |
+| hunter.immigration_floor / interval | (new) | 8 / 500 | brief |
+| grazer.immigration_floor / interval | (new) | 0 / 500 | brief (off for grazers) |
+| tree.lifespan_jitter | (new) | 0.2 | brief |
+| tree.crowding_mortality | (new) | 0.02 | brief; the band is [0, 0.05], reported only |
+| grazer.start_count | 60 | 300 | 20 hunters against 60 grazers with no shrub yet → grazer extinction by tick 1100–2500 on every seed (r1, r3) |
+| hunter.fail_cost | 2.0 | 0.25 | at mean shrub about 0.65 success is about 0.02–0.06, and a 2-energy miss starved hunters (r2, r4–r6) |
+| hunter.cooldown | 3000 | 5000 | slower hunter growth; with fail 0.25, cooldown 3000 overshoots and crashes (r6) |
+| hunter.kill_prob | 0.2 | 0.3 | middle of the round-1 band [0.1, 0.5] |
+| grazer.energy_cost | 0.08 | 0.10 | middle of the round-1 band [0.04, 0.16] |
+| season.amplitude | 12 | 15 | middle of the round-1 band [12, 18] |
+| tree.mature_age | 1000 | 1000 | round 2 tried 1500, the middle of round 1's [1000, 2500], and the band shrank to [500, 1500]; back to 1000, where round 4's band is the full grid |
+| grazer.max_grazers_per_patch | 8 | 5 | 60k-tick grazer swings; seed 1 failed `check --long` at 8 (L1–L3) |
+
+### r1: `grazer.start_count 60/300` × `refugium_k 0.5/1/1.5` × `kill_prob 0.2/0.3` (brief defaults otherwise)
+- start 60 fails everywhere, with grazer extinction early.
+- start 300, k 1.0, kp 0.2 passed seeds 2 and 3. Seed 1 had hext at 15394.
+- k 0.5 fails through over-predation.
+- Immigrants per run were 11–36, so the floor was usually binding.
+
+### r2: start 300; `fail_cost 0.5/1/2` × `k 1/2` × `kp 0.2/0.3`
+- 4 of 36 cells pass: (0.5, 2, 0.2) on seeds 2 and 3, and (2, 1, 0.2) on seeds 2 and 3.
+- At k 1, grazers crash around tick 7000–9000. At k 2 with fail ≥ 1, hunters starve around tick 10000–15000.
+- Diagnosis (trajectory `a1`): with the threshold refugium gone, hunters chase grazers in every patch, and flight plus failed-attack displacement starve grazers even with grass at 0.5.
+
+### r3: start 60; `grazer.flee_radius 1/2/3` × `kp 0.2/0.4` × `k 1/2`
+Almost every cell fails, with grazers extinct by tick 1000–4000. The early phase (shrub ≈ 0) is the bottleneck, and flee radius doesn't fix it. Flee radius was left at 4.
+
+### r4: start 300; `flee_radius 2/3/4` × `hunter.cooldown 3000/5000` × `fail_cost 1/2`
+- 0 of 36 cells pass. In every cell hunters go extinct first, at tick 6000–13700.
+- Trajectory `a4` (flee 3, fail 1): hunters fall from 78 to 1 between ticks 7000 and 12000, while grazers stay at 700–2300. Hunters starve beside abundant prey, because each miss costs more than the expected kill return at success ≈ 0.02.
+
+### r5: start 300; `hunter.energy_cost 0.015/0.025/0.035` × `k 1/2/3` × `fail_cost 0.5/1`
+- Only (k 2, fail 0.5) passes, on 2 of 3 seeds, at any energy cost.
+- Energy cost is a weak lever. The attack budget `kp·(1−s)^k·kill_energy − fail_cost` dominates.
+
+### r6: start 300; 2^6 factorial `fail_cost 0.25/0.5` × `k 1.5/2.5` × `kp 0.15/0.3` × `cooldown 3000/5000` × `flee 2/4` × `satiation 70/85`
+- 18 of 64 combinations pass 3 of 3.
+- fail 0.25 with k 1.5 and cooldown 5000 passes at every kp, flee and satiation value.
+- cooldown 3000 with fail 0.25 fails in most cells: the faster hunter growth overshoots.
+
+### r7, r8: candidate (fail 0.25, cooldown 5000)
+- `k` 0.5:4.0:0.5 at start 60: `max_10x` fails on seeds 1 and 3 at k ≤ 2.0 (seed 1 only at 2.5), and hext at k ≥ 3.
+- At start 300: pass for k 0.5–2.5 (15 of 15 cells), hext at k ≥ 3.
+- `kill_prob` 0.1:0.5:0.1 at start 300, k 1.5: 15 of 15 pass.
+- Adopted: start 300, fail 0.25, cooldown 5000, k 1.5 (band middle), kp 0.3 (band middle).
+
+### Round 1 (official sweeps, defaults as adopted after r8)
+
+| sweep | band | notes |
+|---|---|---|
+| refugium_k | [0.5, 3.0] | hext at 3.5 and 4.0 (6 cells) |
+| kill_prob | [0.1, 0.5] | |
+| energy_cost | [0.04, 0.16] | middle 0.10 → adopted |
+| mature_age | [1000, 2500] | 500 fails `no_extinction` (seed 2) |
+| amplitude | [12, 18] | middle 15 → adopted; 9 fails `fertility_band` −0.020 |
+| immigration_floor | [0, 16] | |
+| crowding_mortality | [0, 0.05] | |
+
+hext: 6 of 129 (4.7%).
+
+### Round 2: `energy_cost 0.10`, `mature_age 1500`, `amplitude 15`
+- Bands: k [0.5, 3.5], kp [0.1, 0.5], energy [0.04, 0.16], mature_age **[500, 1500]** (2000 fails `mature_trees_10k` on seed 2, −0.086), amplitude [9, 18], floor [0, 16], crowding [0, 0.05].
+- hext: 3 of 129 (2.3%).
+- Next: k 2.0 (middle of [0.5, 3.5]); mature_age back to 1000 (middle of [500, 1500]).
+
+### Round 3: `refugium_k 2.0`, `mature_age 1000`
+- Bands: k [0.5, 3.5], kp [0.1, 0.5], energy [0.04, 0.16], mature_age [500, 2500], amplitude [9, 18], floor [0, 16], crowding [0, 0.05].
+- hext: 3 of 129 (2.3%).
+- `check` passes on seeds 1, 2, 3 and 42.
+- 60k `check --long`:
+  - seeds 2 and 3 pass (margins +0.36, +0.45)
+  - **seed 1 fails `long_band`**: the tick-20000 anchor sat on a grazer peak (2130), then grazers fell to 371 < 426
+- Hunters were flat at 28–57 in all three runs.
+
+### L1–L3: 60k-tick sweeps, scored with the long-run rule (seeds 1–6 or 1–8)
+- **L1**, `hunter.displace_steps 1/3` × `grazer.cooldown 300/600` × `max_grazers_per_patch 5/8`:
+  - cooldown 600 kills grazers everywhere.
+  - mgpp 5 passes 6 of 6 at both displacement values. mgpp 8 passes 5 of 6 and 4 of 6.
+- **L2**, mgpp 4/5/6 on seeds 1–8: passes 6, 7 and 6 of 8.
+  - mgpp 5 fails only seed 8, where a post-summer crash takes grazers from about 1900 to 164.
+- **L3**, `grazer.max_age 3000/8000/12000` × mgpp 5/8: 6–8 of 8 with no trend in `max_age`. The crashes aren't age cohorts: they follow peak summer, when grazers overshoot their grass supply.
+- Adopted mgpp 5. Across every 60k cell it passed 41 of 44 seed runs.
+
+### Round 4 (final; committed in `sweeps/shot5/`)
+- Bands: k [0.5, 3.0], kp [0.1, 0.5], energy [0.04, 0.16], mature_age [500, 2500], amplitude [12, 18], floor [0, 16], crowding [0, 0.05].
+- hext: 5 of 129 (3.9%), all at k ≥ 3.5.
+- `check` passes on seeds 1, 2, 3 and 42.
+- 60k `check --long` passes on seeds 1, 2 and 3 (margins +0.50, +0.30, +0.48).
+- The hunters-disabled capacity test and the drought test pass.
+- Defaults were not moved again: every default is inside its band, and 3 of 5 sit at the band middle.
+  - `refugium_k` 2.0 is 0.25 from the middle, 1.75. Moving it would put the default off the grid.
+  - `mature_age` 1000 is below the middle, 1500. Round 2 showed that 1500 shrinks this band.

@@ -44,6 +44,8 @@ pub struct StatsRow {
     pub detritus_total: f32,
     /// Mean patch temperature.
     pub temperature: f32,
+    /// Hunters that have immigrated so far (cumulative).
+    pub hunter_immigrants: u32,
 }
 
 /// Marks a column with no trunk in `Sim::trunk_at`.
@@ -105,6 +107,8 @@ pub struct Sim {
     pub tick: u32,
     /// Next entity id to hand out.
     pub next_id: u32,
+    /// Hunters that have immigrated so far.
+    pub hunter_immigrants: u32,
 }
 
 impl Sim {
@@ -156,6 +160,7 @@ impl Sim {
             flee_offsets: Vec::new(),
             tick: 0,
             next_id: 0,
+            hunter_immigrants: 0,
         };
         sim.seek_offsets = offsets_within(sim.params.hunter.seek_radius);
         sim.flee_offsets = offsets_within(sim.params.grazer.flee_radius);
@@ -173,6 +178,8 @@ impl Sim {
         p.tree.initial_count = 0;
         p.grazer.start_count = 0;
         p.hunter.start_count = 0;
+        p.hunter.immigration_floor = 0;
+        p.grazer.immigration_floor = 0;
         let world = World::from_heights(heights, &p);
         Sim::with_world(p, ChaCha8Rng::seed_from_u64(3), world)
     }
@@ -231,12 +238,13 @@ impl Sim {
     }
 
     /// Advance one tick, in the fixed order:
-    /// animals → producers → moisture/fertility (every 10) → temperature (every 100).
+    /// animals → immigration → producers → moisture/fertility (every 10) → temperature (every 100).
     /// Snapshots and stats rows are taken by the caller after this returns.
     pub fn step(&mut self) {
         self.tick += 1;
         let t = self.tick;
         self.update_animals();
+        self.immigrate(t);
         self.update_producers(t);
         if t.is_multiple_of(self.params.tree.update_every) {
             self.update_trees();
@@ -307,6 +315,7 @@ impl Sim {
             fertility_mean: (soil_cols.iter().map(|&c| self.fertility[c] as f64).sum::<f64>() / nc) as f32,
             detritus_total: self.patches.iter().map(|p| p.detritus as f64).sum::<f64>() as f32,
             temperature: (self.patches.iter().map(|p| p.temperature as f64).sum::<f64>() / PATCHES as f64) as f32,
+            hunter_immigrants: self.hunter_immigrants,
         }
     }
 }

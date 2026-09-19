@@ -9,6 +9,13 @@ use std::path::{Path, PathBuf};
 
 /// First tick of the invariant window; the burn-in before it is ignored.
 pub const WINDOW_START: u32 = 2000;
+/// Anchor tick of the trees' `max_10x` limit. Trees grow slowly from a dozen, so a tick-2000 anchor
+/// measured establishment speed rather than a runaway; animals keep `WINDOW_START`.
+pub const TREE_ANCHOR: u32 = 5000;
+/// Minimum length of a run for `check --long`.
+pub const LONG_TICKS: u32 = 60_000;
+/// Start of the `check --long` population band window and the tick its bounds are relative to.
+pub const LONG_BAND_FROM: u32 = 20_000;
 /// Runtime invariant limit for a 20000-tick run, in milliseconds.
 pub const RUNTIME_LIMIT_MS: u64 = 30_000;
 
@@ -30,8 +37,8 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
         .enumerate()
         .map(|(i, line)| {
             let f: Vec<&str> = line.split(',').collect();
-            if f.len() != 10 {
-                return Err(format!("series.csv line {}: expected 10 fields", i + 2));
+            if f.len() != 11 {
+                return Err(format!("series.csv line {}: expected 11 fields", i + 2));
             }
             let u = |k: usize| f[k].parse::<u32>().map_err(|e| format!("line {}: {e}", i + 2));
             let x = |k: usize| f[k].parse::<f32>().map_err(|e| format!("line {}: {e}", i + 2));
@@ -46,6 +53,7 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                 fertility_mean: x(7)?,
                 detritus_total: x(8)?,
                 temperature: x(9)?,
+                hunter_immigrants: u(10)?,
             })
         })
         .collect()
@@ -279,18 +287,26 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
         tightest(mins.iter().map(|&(_, m)| (m as f64, 1.0, margin_at_least(m as f64, 1.0)))),
     );
 
-    // 2. No species count exceeds 10× its tick-2000 value (value = max count, threshold = limit).
+    // 2. No species count exceeds 10× its anchor value (value = max count, threshold = limit).
+    // Grazers and hunters are anchored at tick 2000, trees at tick 5000.
     let mut ok = true;
     let mut obs = Vec::new();
     let mut parts = Vec::new();
     for (n, f) in species.iter() {
-        let base = f(&rows[from]);
+        let anchor = if *n == "trees" { (TREE_ANCHOR as usize).min(last) } else { from };
+        let base = f(&rows[anchor]);
         let max = win.iter().map(f).max().unwrap_or(0);
         ok &= max <= 10 * base;
         obs.push(format!("{n} max={max} limit={}", 10 * base));
         parts.push((max as f64, (10 * base) as f64, margin_at_most(max as f64, (10 * base) as f64)));
     }
-    out.push("max_10x", "no species exceeds 10x its tick-2000 count", ok, obs.join(" "), tightest(parts));
+    out.push(
+        "max_10x",
+        "no species exceeds 10x its anchor count (animals: tick 2000, trees: tick 5000)",
+        ok,
+        obs.join(" "),
+        tightest(parts),
+    );
 
     // 3. Grazer cycle: ≥ 2 local maxima ≥ 1500 ticks apart (value = first-to-last span, 0 if < 2).
     let maxima = grazer_maxima(rows, from, last);
@@ -385,6 +401,65 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
     Ok(CheckReport { lines: out.0 })
 }
 
+/// Every `check --long` key in report order; `long_run_length` only appears for short runs.
+pub const LONG_KEYS: [&str; 3] = ["long_run_length", "long_no_extinction", "long_band"];
+
+/// `ecosim check --long` on a run directory.
+pub fn check_run_long(run_dir: &Path) -> Result<CheckReport, String> {
+    evaluate_long(&read_series(run_dir)?)
+}
+
+/// The long-run invariants, for runs of at least `LONG_TICKS`: no species reaches 0 at any tick,
+/// and grazers and hunters stay within [0.2×, 5×] of their tick-20000 count over ticks 20000–60000.
+/// These replace, rather than extend, the 20000-tick invariants.
+pub fn evaluate_long(rows: &[StatsRow]) -> Result<CheckReport, String> {
+    if rows.is_empty() {
+        return Err("series.csv has no rows".into());
+    }
+    for (i, r) in rows.iter().enumerate() {
+        if r.tick as usize != i {
+            return Err(format!("series.csv: row {i} has tick {}", r.tick));
+        }
+    }
+    let last = rows.len() - 1;
+    let mut out = Builder(Vec::new());
+    let long = LONG_TICKS as f64;
+    if last < LONG_TICKS as usize {
+        let vtm = (last as f64, long, margin_at_least(last as f64, long));
+        out.push("long_run_length", "run length >= 60000 ticks", false, format!("last tick {last}"), vtm);
+    }
+    let species: [(&str, Column<u32>); 3] =
+        [("grazers", |r| r.grazers), ("hunters", |r| r.hunters), ("trees", |r| r.trees)];
+    let mins: Vec<(&str, u32)> = species.iter().map(|(n, f)| (*n, rows.iter().map(f).min().unwrap_or(0))).collect();
+    out.push(
+        "long_no_extinction",
+        "no species reaches 0 over the whole run",
+        mins.iter().all(|m| m.1 > 0),
+        mins.iter().map(|(n, m)| format!("min {n}={m}")).collect::<Vec<_>>().join(" "),
+        tightest(mins.iter().map(|&(_, m)| (m as f64, 1.0, margin_at_least(m as f64, 1.0)))),
+    );
+    let from = (LONG_BAND_FROM as usize).min(last);
+    let win = &rows[from..=(LONG_TICKS as usize).min(last)];
+    let (mut ok, mut obs, mut parts) = (true, Vec::new(), Vec::new());
+    for (n, f) in &species[..2] {
+        let base = f(&rows[from]) as f64;
+        let (lo, hi) = (0.2 * base, 5.0 * base);
+        let min = win.iter().map(f).min().unwrap_or(0) as f64;
+        let max = win.iter().map(f).max().unwrap_or(0) as f64;
+        ok &= min >= lo && max <= hi;
+        obs.push(format!("{n} [{min}, {max}] vs [{lo:.1}, {hi:.1}]"));
+        parts.push(band(min, max, lo, hi));
+    }
+    out.push(
+        "long_band",
+        "grazers and hunters over ticks 20000-60000 within [0.2x, 5x] of their tick-20000 count",
+        ok,
+        obs.join(" "),
+        tightest(parts),
+    );
+    Ok(CheckReport { lines: out.0 })
+}
+
 fn range(it: impl Iterator<Item = f32>) -> (f32, f32) {
     it.fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), v| (a.min(v), b.max(v)))
 }
@@ -400,7 +475,7 @@ pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
     if rows.is_empty() {
         return Err("series.csv has no rows".into());
     }
-    let cols: [(&str, Column<f64>); 9] = [
+    let cols: [(&str, Column<f64>); 10] = [
         ("grazers", |r| r.grazers as f64),
         ("hunters", |r| r.hunters as f64),
         ("trees", |r| r.trees as f64),
@@ -410,14 +485,15 @@ pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
         ("fertility_mean", |r| r.fertility_mean as f64),
         ("detritus_total", |r| r.detritus_total as f64),
         ("temperature", |r| r.temperature as f64),
+        ("hunter_immigrants", |r| r.hunter_immigrants as f64),
     ];
-    let mut out = vec![format!("{:<16}{:>12}{:>12}{:>12}", "column", "min", "max", "mean")];
+    let mut out = vec![format!("{:<18}{:>12}{:>12}{:>12}", "column", "min", "max", "mean")];
     for (name, f) in cols.iter() {
         let v: Vec<f64> = rows.iter().map(f).collect();
         let min = v.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let mean = v.iter().sum::<f64>() / v.len() as f64;
-        out.push(format!("{name:<16}{min:>12.4}{max:>12.4}{mean:>12.4}"));
+        out.push(format!("{name:<18}{min:>12.4}{max:>12.4}{mean:>12.4}"));
     }
     out.push(match first_extinction(&rows) {
         Some(r) => {
@@ -483,13 +559,15 @@ mod tests {
                 fertility_mean: 100.0,
                 detritus_total: 10.0,
                 temperature: 12.0,
+                hunter_immigrants: 0,
             })
             .collect()
     }
 
     #[test]
     fn maxima_detects_a_cycle_and_ignores_flat_lines() {
-        let cyc = rows_from(|t| (100.0 + 40.0 * (t as f64 * 2.0 * std::f64::consts::PI / 4000.0).sin()) as u32, 20001);
+        let cyc =
+            rows_from(|t| (100.0 + 40.0 * libm::sin(t as f64 * 2.0 * std::f64::consts::PI / 4000.0)) as u32, 20001);
         let m = grazer_maxima(&cyc, 2000, 20000);
         assert!(m.len() >= 4, "{m:?}");
         assert!(m.last().unwrap() - m.first().unwrap() >= 1500);
@@ -572,7 +650,7 @@ mod tests {
         let rows = (0..=20_000u32)
             .map(|t| StatsRow {
                 tick: t,
-                grazers: (h.base + h.amp * (t as f64 * std::f64::consts::TAU / h.period).sin()).round() as u32,
+                grazers: (h.base + h.amp * libm::sin(t as f64 * std::f64::consts::TAU / h.period)).round() as u32,
                 hunters: h.hunters,
                 trees: h.t0 + h.t0 * t / 20_000,
                 grass_mean: h.grass,
@@ -581,6 +659,7 @@ mod tests {
                 fertility_mean: h.fertility,
                 detritus_total: 10.0,
                 temperature: 12.0,
+                hunter_immigrants: 0,
             })
             .collect();
         Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms) }
@@ -600,14 +679,14 @@ mod tests {
         "animals_10k",
     ];
 
-    /// Break exactly one invariant at tick `t` (in [2001, 19999], never 10000). `side` picks the band
+    /// Break exactly one invariant at tick `t` (in [2001, 19999], never 5000 or 10000). `side` picks the band
     /// side; `keep` is the row count for `run_length` (15001..=20000).
     fn violate(s: &mut Series, key: &str, t: usize, side: bool, keep: usize) {
         let rows = &mut s.rows;
         match key {
             "run_length" => rows.truncate(keep),
             "no_extinction" => rows[t].hunters = 0,
-            "max_10x" => rows[t].trees = 10 * rows[2000].trees + 1,
+            "max_10x" => rows[t].trees = 10 * rows[TREE_ANCHOR as usize].trees + 1,
             "grazer_cycle" => rows.iter_mut().for_each(|r| r.grazers = 150),
             "fertility_band" => rows[t].fertility_mean = if side { 39.9 } else { 220.1 },
             "grass_band" => rows[t].grass_mean = if side { 0.049 } else { 0.951 },
@@ -644,7 +723,7 @@ mod tests {
         fn prop_one_violation_fails_exactly_that_invariant(
             h in healthy(),
             key in prop::sample::select(&VIOLABLE[..]),
-            t in (2001usize..=19_999).prop_filter("not tick 10000", |&t| t != 10_000),
+            t in (2001usize..=19_999).prop_filter("not an anchor tick", |&t| t != 5_000 && t != 10_000),
             side in any::<bool>(),
             keep in 15_001usize..=20_000,
         ) {
@@ -670,6 +749,54 @@ mod tests {
         }
     }
 
+    /// Keys failing in `evaluate_long` on these rows.
+    fn failing_long(rows: &[StatsRow]) -> Vec<&'static str> {
+        evaluate_long(rows).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect()
+    }
+
+    #[test]
+    fn long_check_passes_a_healthy_run_and_flags_each_violation() {
+        let n = LONG_TICKS as usize + 1;
+        let base = |t: usize| if t < 20_000 { 200 } else { 100 + (t % 7) as u32 };
+        let healthy = rows_from(base, n);
+        let report = evaluate_long(&healthy).unwrap();
+        assert!(report.pass(), "{:?}", report.lines);
+        assert_eq!(report.lines.iter().map(|l| l.key).collect::<Vec<_>>(), LONG_KEYS[1..]);
+
+        // A zero anywhere, even before tick 20000, is an extinction; the band only watches 20000+.
+        let mut rows = healthy.clone();
+        rows[500].hunters = 0;
+        assert_eq!(failing_long(&rows), ["long_no_extinction"]);
+        // 5.1x the anchor fails the band; 5x and just above 0.2x pass.
+        let mut rows = healthy.clone();
+        let anchor = rows[LONG_BAND_FROM as usize].grazers;
+        rows[40_000].grazers = anchor * 5;
+        rows[40_001].grazers = anchor.div_ceil(5);
+        assert!(failing_long(&rows).is_empty());
+        rows[40_000].grazers = anchor * 51 / 10;
+        assert_eq!(failing_long(&rows), ["long_band"]);
+        let mut rows = healthy.clone();
+        rows[59_999].hunters = 26;
+        assert_eq!(failing_long(&rows), ["long_band"], "hunters 26 > 5 x 5");
+        // Ticks after 60000 are outside the band window (but still watched for extinction).
+        let mut rows = rows_from(base, n + 10);
+        rows[n + 5].grazers = 10_000;
+        assert!(failing_long(&rows).is_empty());
+    }
+
+    #[test]
+    fn long_check_on_a_short_run_reports_its_length() {
+        let rows = rows_from(|_| 50, 20_001);
+        let report = evaluate_long(&rows).unwrap();
+        assert_eq!(report.lines.iter().map(|l| l.key).collect::<Vec<_>>(), LONG_KEYS);
+        assert_eq!(failing_long(&rows), ["long_run_length"]);
+        assert!(evaluate_long(&rows_from(|_| 50, 10)).unwrap().get("long_band").unwrap().pass);
+        assert!(evaluate_long(&[]).is_err());
+        let mut gap = rows_from(|_| 50, 10);
+        gap.remove(4);
+        assert!(evaluate_long(&gap).unwrap_err().contains("row 4 has tick 5"));
+    }
+
     #[test]
     fn stats_and_diff_on_small_run_dirs() {
         let root = std::env::temp_dir().join(format!("ecosim-check-{}", std::process::id()));
@@ -681,9 +808,9 @@ mod tests {
             fs::write(d.join("snap_000000").join("height.bin"), [1u8, 2]).unwrap();
         }
         let lines = stats_report(&a).unwrap();
-        assert_eq!(lines.len(), 11, "{lines:?}");
+        assert_eq!(lines.len(), 12, "{lines:?}");
         assert!(lines[1].starts_with("grazers") && lines[1].contains("14.0000"), "{}", lines[1]);
-        assert_eq!(lines[10], "first extinction: tick 3 (grazers=0 hunters=5 trees=20)");
+        assert_eq!(lines[11], "first extinction: tick 3 (grazers=0 hunters=5 trees=20)");
         assert_eq!(diff_runs(&a, &b).unwrap(), Vec::<String>::new());
 
         fs::write(b.join("timing.json"), "{}").unwrap();

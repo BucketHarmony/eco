@@ -6,4 +6,10 @@ disallowed-methods = [
     { path = "f32::exp", reason = "platform-dependent; use libm::expf" },
     { path = "f32::ln", reason = "platform-dependent; use libm::logf" },
     { path = "f32::powf", reason = "platform-dependent; use libm::powf" },
+    { path = "f64::sin", reason = "platform-dependent; use libm::sin" },
+    { path = "f64::cos", reason = "platform-dependent; use libm::cos" },
+    { path = "f64::tan", reason = "platform-dependent; use libm::tan" },
+    { path = "f64::exp", reason = "platform-dependent; use libm::exp" },
+    { path = "f64::ln", reason = "platform-dependent; use libm::log" },
+    { path = "f64::powf", reason = "platform-dependent; use libm::pow (attack_success)" },
 ]

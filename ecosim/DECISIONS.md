@@ -166,3 +166,74 @@ All of these are behaviour-preserving, and the manifest is unchanged.
 - **"Light follows the formula with absorb 96."** 96 is the SAD's example, but the configured value is 100. It's tested as one regression case rather than as the property's parameter.
 - **"Incrementally maintained hunter grid equals a rebuild."** The hunter grid is rebuilt from scratch every tick, so this is trivially true for hunters. It's only meaningful, and only stated, for grazers.
 - **"The `check` verdict is a function of the series alone."** The runtime invariant reads wall time from `timing.json`, so a debug run of a passing seed fails it. Stated for every other invariant; the golden test compares the runtime line by name only.
+
+## Dynamics fixes
+
+These are the calls made in the shot-5 "dynamics fixes" brief. Tuning is in `TUNING.md` ("Dynamics fixes (shot 5)"), and the sweep results are in `sweeps/shot5/FINDINGS.md`.
+
+**Continuous refugium (stability rule 3)**
+- **The formula.** `hunter.refugium_shrub` is gone. An attack now succeeds with probability `kill_prob · (1 − shrub)^refugium_k` (`animals::attack_success`), using the shrub of the grazer's patch.
+  - Every live grazer is a legal target. A failed attack keeps its costs: `fail_cost` plus displacement of the grazer.
+  - The addendum's line "shrub ≤ `refugium_shrub` triggers one attack" is superseded by this rule. The addendum itself was not edited, because the brief scopes this shot to ecosim.
+- **Precision.** `refugium_k` is an `f32` param like the other knobs. The power is computed in `f64` with `libm::pow`, with `1 − shrub` clamped to [0, 1] and the result clamped to [0, 1], then passed to `gen_bool`.
+  - `libm::pow(0, 0) = 1`, so k = 0 switches the refugium off even at shrub 1. A regression test pins this.
+- **The test rewrite.** The refugium and satiation tests were rewritten:
+  - Shrub lowers success but never forbids the attempt.
+  - Success equals `kill_prob` at shrub 0 and is monotone non-increasing in shrub (a property).
+  - The nearest grazer is targeted whatever its shrub.
+  - A satiated hunter rests at any shrub.
+
+**Immigration floor**
+- **Reused keys.** The brief's `hunter.initial` is the existing `hunter.start_count`. The brief's tree "lifespan" mean is the existing `tree.max_age`. No keys were duplicated.
+- **Timing.** Immigration runs as its own phase right after animals: animals → immigration → producers → … It fires on ticks where `t % immigration_interval == 0` (tick 0 is never stepped).
+  - The live count is taken after that tick's deaths and births. The grazer check runs before the hunter check.
+  - An immigrant acts from the next tick.
+- **The immigrant.** It has `start_energy` (60, the brief's value), age 0 and cooldown 0.
+  - It is placed on a uniformly random edge soil column (x or y at 0 or 63), chosen from the edge-soil list in index order with one `gen_range` draw.
+  - If no edge column is soil, it falls back to any soil column.
+  - There is one draw per immigrant, and none when the floor isn't binding.
+- **Grazers.** They get the same two params with floor 0, which is off.
+- **Output.** `series.csv` gains a last column, `hunter_immigrants`, the cumulative count. `sweep.csv` gains `hunter_extinction_tick` (the first tick with hunters = 0) and `hunter_immigrants` (the final count).
+  - `sweeps/cycle_ratio.py` skips both columns. It also prints the hunter count at each qualifying grazer peak.
+- **At the defaults the floor never fires.** Hunters stay at 24 or more on seeds 1–3. It does its job at the edge of the `refugium_k` band; see FINDINGS.
+
+**Tree lifespan jitter**
+- **The draw.** The lifespan is `round(max_age · (1 + lifespan_jitter · u))`, with u uniform in [−1, 1]. It is drawn in `plant_tree`, which covers both world generation and germination, and stored per tree as `Tree::lifespan`.
+  - The draw happens even when jitter is 0, so the RNG stream doesn't depend on the jitter value.
+  - A tree dies at `age >= lifespan`, replacing `max_age`.
+- **Format.** `entities.json` tree records gain `lifespan`. `format_version` stays 1: it is an added field. ecoview's loader reads only the fields it types, and it finds `series.csv` columns by header name, so neither addition affects it.
+
+**Canopy self-thinning**
+- **The literal rule can't fire, so it was generalised.** The literal rule is "a mature tree whose trunk column is under ≥2 other canopies". A mature canopy covers the 3×3 around its trunk, but `min_spacing = 2` keeps trunks at Chebyshev distance ≥ 2. So no trunk column is ever under another tree's canopy, and the literal rule would never fire.
+  - `Sim::crowding(i)` instead counts the other live trees whose canopy lies over any column of tree i's 3×3 crown: mature trees within Chebyshev 2 and young trees on a crown column. Saplings cast no canopy.
+  - A mature tree with `crowding ≥ 2` dies with probability `tree.crowding_mortality` at each tree update.
+- **When the draw happens.** The check runs after the tree's age, dry-tick and stage update, and only if it survived those. The RNG draw is made only for crowded mature trees, and only when `crowding_mortality > 0`.
+- **Death.** It goes through `kill_tree`, which adds `death_detritus` and recomputes the light of the crown columns. Later trees in the same update see the thinned stand.
+
+**Checks**
+- **`max_10x` anchor.** Trees are now anchored at tick 5000 (`TREE_ANCHOR`); animals stay at tick 2000. The report line reads "no species exceeds 10x its anchor count (animals: tick 2000, trees: tick 5000)". Runs shorter than 5000 ticks anchor trees at their last tick.
+- **`ecosim check --long`** is a separate report (`check::evaluate_long`). It replaces the 20000-tick invariants rather than extending them. Its lines:
+  - `long_no_extinction`: grazers, hunters and trees are > 0 at every tick of the whole run.
+  - `long_band`: raw grazer and hunter counts over ticks 20000–60000 stay within [0.2×, 5×] of their raw tick-20000 count. No smoothing is applied, which is the literal reading of the brief.
+  - `long_run_length`: appears, and fails, only for runs shorter than 60000 ticks.
+  - The 20000-tick invariants aren't applied to long runs because some of them don't hold there. For example, `fertility_mean` reaches its cap of 255 by about tick 30000 and would fail `fertility_band`.
+- **`parse_series`** requires the new 11-column header. Run directories written before this shot, including ecoview's copies, no longer pass `ecosim check`.
+
+**Tuning outside the brief's listed params**
+- To get the required bands, several params outside the brief's list were changed: `grazer.start_count` 300, `hunter.fail_cost` 0.25, `hunter.cooldown` 5000 and `grazer.max_grazers_per_patch` 5. No invariant was changed. Each change is logged, with its evidence, in `TUNING.md`.
+
+**Platform math**
+- `clippy.toml` now also disallows `f64::{sin, cos, tan, exp, ln, powf}`. The only new sim math is `libm::pow` in `attack_success`.
+- Two test helpers in `check.rs` that built synthetic sine series moved to `libm::sin`.
+
+**CI**
+- Step 9 (`just long`) runs seed 1 for 60000 ticks with `--snapshot-every 10000` and runs `ecosim check --long` on it. It takes about 20 s here, which fits the 10-minute job, so no `nightly.yml` was needed.
+- `tests/ci.rs` now requires 8 command-identified steps, adding `check --long ci-runs/long-s1`.
+
+**Regenerated artifacts**
+- These rules change behaviour on purpose. One commit regenerates:
+  - `runs/s42`
+  - `fixtures/s42-mini`
+  - `tests/data/s42-manifest.sha256`
+  - `tests/data/s42-check.txt`
+- **ecoview's fixture is stale.** `ecoview/public/` still holds the pre-shot s42 run and mini fixture. They remain valid format-1 data, just older behaviour, and their tree records have no `lifespan`. This shot doesn't touch the renderer; refresh the copy with `bash scripts/sync-data.sh` in a renderer session.

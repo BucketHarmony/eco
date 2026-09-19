@@ -17,7 +17,7 @@ pub const FORMAT_VERSION: u32 = 1;
 
 /// The first line of `series.csv`.
 pub const SERIES_HEADER: &str =
-    "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature";
+    "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants";
 
 #[derive(Serialize)]
 struct Dims {
@@ -72,6 +72,7 @@ struct TreeOut {
     z: u8,
     age: u32,
     stage: Stage,
+    lifespan: u32,
 }
 
 #[derive(Serialize)]
@@ -101,7 +102,7 @@ pub fn snapshot_dir_name(tick: u32) -> String {
 /// One `series.csv` data line (no newline).
 pub fn format_row(r: &StatsRow) -> String {
     format!(
-        "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+        "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
         r.tick,
         r.grazers,
         r.hunters,
@@ -111,7 +112,8 @@ pub fn format_row(r: &StatsRow) -> String {
         r.moisture_mean,
         r.fertility_mean,
         r.detritus_total,
-        r.temperature
+        r.temperature,
+        r.hunter_immigrants
     )
 }
 
@@ -134,6 +136,7 @@ fn entities(sim: &Sim) -> Vec<EntityOut> {
             z: sim.world.height[t.col()] + 1,
             age: t.age,
             stage: sim.tree_stage(t),
+            lifespan: t.lifespan,
         }));
     }
     for group in [&sim.grazers, &sim.hunters] {
@@ -282,10 +285,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    type Entity = (u32, String, f32, f32, u8, u32, String, f32);
+    type Entity = (u32, String, f32, f32, u8, u32, String, f32, u32);
 
     /// Everything a snapshot records, in the snapshot's own encoding. Entity tuples are
-    /// (id, kind, x, y, z, age, stage-or-state, energy); trees have energy 0.
+    /// (id, kind, x, y, z, age, stage-or-state, energy, lifespan); trees have energy 0, animals lifespan 0.
     #[derive(Debug, PartialEq)]
     struct Recorded {
         tick: u32,
@@ -324,7 +327,9 @@ mod tests {
             let tree = e["kind"] == "tree";
             let label = if tree { &e["stage"] } else { &e["state"] };
             let energy = if tree { 0.0 } else { f(&e["energy"]) };
-            (u(&e["id"]), s(&e["kind"]), f(&e["x"]), f(&e["y"]), u(&e["z"]) as u8, u(&e["age"]), s(label), energy)
+            let lifespan = if tree { u(&e["lifespan"]) } else { 0 };
+            let (id, kind, z, age) = (u(&e["id"]), s(&e["kind"]), u(&e["z"]) as u8, u(&e["age"]));
+            (id, kind, f(&e["x"]), f(&e["y"]), z, age, s(label), energy, lifespan)
         });
         Recorded {
             tick: name.strip_prefix("snap_").unwrap().parse().unwrap(),
@@ -352,14 +357,14 @@ mod tests {
         for t in trees {
             let z = sim.world.height[t.col()] + 1;
             let stage = label(&sim.tree_stage(t));
-            entities.push((t.id, "tree".into(), t.x as f32, t.y as f32, z, t.age, stage, 0.0));
+            entities.push((t.id, "tree".into(), t.x as f32, t.y as f32, z, t.age, stage, 0.0, t.lifespan));
         }
         for (kind, group) in [("grazer", &sim.grazers), ("hunter", &sim.hunters)] {
             let mut v: Vec<_> = group.iter().filter(|a| a.alive).collect();
             v.sort_by_key(|a| a.id);
             for a in v {
                 let z = sim.world.height[Sim::animal_col(a)] + 1;
-                entities.push((a.id, kind.into(), a.x, a.y, z, a.age, label(&a.state), a.energy));
+                entities.push((a.id, kind.into(), a.x, a.y, z, a.age, label(&a.state), a.energy, 0));
             }
         }
         Recorded {

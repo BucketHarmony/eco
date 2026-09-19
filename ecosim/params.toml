@@ -28,7 +28,7 @@ initial_fertility = 128.0
 
 [season]
 # Temperature swing: temp_base ± amplitude over one year (was climate.temp_amp).
-amplitude = 12.0
+amplitude = 15.0
 
 [cover]
 moisture_draw = 15.0
@@ -62,6 +62,8 @@ update_every = 50
 young_age = 500
 mature_age = 1000
 max_age = 6000
+lifespan_jitter = 0.2
+crowding_mortality = 0.02
 moisture_draw = 50.0
 dry_moisture = 30.0
 dry_death_ticks = 500
@@ -75,16 +77,16 @@ moisture = [30.0, 100.0, 255.0, 256.0]
 temp = [-3.0, 2.0, 26.0, 31.0]
 
 [grazer]
-start_count = 60
+start_count = 300
 start_energy = 60.0
 start_age_max = 1000
-energy_cost = 0.08
+energy_cost = 0.10
 max_age = 5000
 repro_energy = 70.0
 repro_cost = 35.0
 cooldown = 300
 newborn_energy = 30.0
-max_grazers_per_patch = 8
+max_grazers_per_patch = 5
 corpse_detritus = 15.0
 intake_max = 3.0
 intake_k = 20.0
@@ -95,23 +97,27 @@ flee_radius = 4.0
 search_patches = 2
 crowding = 8.0
 choice_tolerance = 0.75
+immigration_floor = 0
+immigration_interval = 500
 
 [hunter]
-start_count = 12
+start_count = 20
 start_energy = 60.0
 start_age_max = 1000
 energy_cost = 0.04
 max_age = 8000
 repro_energy = 75.0
 repro_cost = 40.0
-cooldown = 3000
+cooldown = 5000
 newborn_energy = 40.0
 corpse_detritus = 25.0
 satiation = 85.0
 attack_radius = 2.0
-kill_prob = 0.2
+kill_prob = 0.3
 kill_energy = 40.0
-fail_cost = 2.0
+fail_cost = 0.25
 displace_steps = 3
-refugium_shrub = 0.58
+refugium_k = 2.0
 seek_radius = 16.0
+immigration_floor = 8
+immigration_interval = 500

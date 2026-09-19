@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use ecosim::check::{check_run, diff_runs, stats_report};
+use ecosim::check::{check_run, check_run_long, diff_runs, stats_report};
 use ecosim::output::run;
 use ecosim::sweep::{baseline, margin_table, parse_range, parse_values, sweep, ParamSpec, SweepConfig};
 use ecosim::Params;
@@ -32,7 +32,12 @@ enum Cmd {
         set: Vec<String>,
     },
     /// Apply the acceptance invariants to a run directory; exit 1 on any failure.
-    Check { run_dir: PathBuf },
+    Check {
+        run_dir: PathBuf,
+        /// Apply the long-run invariants (runs of at least 60000 ticks) instead of the 20000-tick ones.
+        #[arg(long)]
+        long: bool,
+    },
     /// Print min/max/mean per series column and the first extinction tick.
     Stats { run_dir: PathBuf },
     /// Byte-compare two run directories (ignoring timing.json); exit 1 on any difference.
@@ -151,7 +156,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Cmd::Check { run_dir } => match check_run(&run_dir) {
+        Cmd::Check { run_dir, long } => match if long { check_run_long(&run_dir) } else { check_run(&run_dir) } {
             Ok(report) => {
                 for l in &report.lines {
                     let verdict = if l.pass { "PASS" } else { "FAIL" };

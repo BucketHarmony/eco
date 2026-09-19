@@ -7,7 +7,7 @@ export PROPTEST_RNG_SEED := "20260918"
 
 ecosim := "./target/release/ecosim"
 
-ci: fmt clippy docs test coverage build runs baseline cross
+ci: fmt clippy docs test coverage build runs baseline cross long
 
 # 1
 fmt:
@@ -44,3 +44,7 @@ baseline:
 # 8: the release half of the cross-profile determinism test (the debug half ran in step 3)
 cross:
     ECOSIM_REQUIRE_CROSS=1 cargo test --release --test integration determinism
+
+# 9: one 60000-tick run under the long-run invariants (`check --long`)
+long:
+    {{ecosim}} run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000 && {{ecosim}} check --long ci-runs/long-s1

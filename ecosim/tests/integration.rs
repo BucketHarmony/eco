@@ -82,6 +82,7 @@ fn drought_kills_grass_by_tick_5000() {
 fn hunters_disabled_grazers_stay_within_30pct_of_capacity() {
     let mut p = Params::load_default();
     p.hunter.start_count = 0;
+    p.hunter.immigration_floor = 0;
     let mut sim = Sim::new(p, 42);
     let mut g = vec![sim.count_grazers() as f64];
     while sim.tick < 20000 {
@@ -117,7 +118,7 @@ fn snapshot_round_trips_through_reader() {
     assert_eq!(meta["dims"]["x"], WX);
     assert_eq!(meta["snapshots"].as_array().unwrap().len(), 4);
     assert_eq!(meta["overrides"], serde_json::json!(["hunter.kill_prob=0.2"]));
-    assert_eq!(meta["params"]["season"]["amplitude"], 12.0);
+    assert_eq!(meta["params"]["season"]["amplitude"], sim.params.season.amplitude as f64);
 
     let snap = dir.join("snap_000300");
     assert_eq!(fs::read(snap.join("material.bin")).unwrap(), sim.world.material);

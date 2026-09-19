@@ -10,7 +10,8 @@ maxima count from tick 2000 must equal sweep.csv's grazer_peaks column.
 
 For each maximum after `from_tick` (default 4000), its trough is the smoothed minimum between
 the previous maximum (or from_tick for the first) and the peak; ratio = peak / trough.
-A peak "qualifies" when ratio >= 1.5.
+A peak "qualifies" when ratio >= 1.5. `hunters@peaks` lists the raw hunter count at each qualifying
+peak tick (older sweeps without a hunters column print '-').
 """
 import csv
 import os
@@ -68,17 +69,19 @@ def main():
     frm = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
     rows = list(csv.DictReader(open(os.path.join(d, 'sweep.csv'))))
     params = [k for k in rows[0] if k != 'seed' and not k.endswith(('_pass', '_value', '_margin'))
-              and k not in ('first_extinction_tick', 'grazer_peaks')]
-    print(f"{' '.join(params)} seed | peaks>{frm} qualifying(>=1.5) | ratio min/median/max | answer")
+              and k not in ('first_extinction_tick', 'grazer_peaks', 'hunter_extinction_tick', 'hunter_immigrants')]
+    print(f"{' '.join(params)} seed | peaks>{frm} qualifying(>=1.5) | ratio min/median/max | answer | hunters@peaks")
     for r in rows:
         cid = '_'.join(f'{p}={r[p]}' for p in params) + f"_s={r['seed']}"
-        g = [float(x['grazers']) for x in csv.DictReader(open(os.path.join(d, 'cells', cid + '.csv')))]
+        cell = list(csv.DictReader(open(os.path.join(d, 'cells', cid + '.csv'))))
+        g = [float(x['grazers']) for x in cell]
         ma, _, _ = cycle_stats(g, frm)
         assert len(maxima(ma, 2000, len(g) - 1)) == int(r['grazer_peaks']), f'{cid}: peak count mismatch'
         _, peaks, ratios = cycle_stats(g, frm)
         q = sum(x >= 1.5 for x in ratios)
         rs = f'{min(ratios):.2f}/{statistics.median(ratios):.2f}/{max(ratios):.2f}' if ratios else '-'
-        print(f"{' '.join(r[p] for p in params)} s{r['seed']} | {len(peaks)} {q} | {rs} | {'YES' if q >= 2 else 'NO'}")
+        hp = ','.join(cell[p]['hunters'] for p, x in zip(peaks, ratios) if x >= 1.5) if 'hunters' in cell[0] else '-'
+        print(f"{' '.join(r[p] for p in params)} s{r['seed']} | {len(peaks)} {q} | {rs} | {'YES' if q >= 2 else 'NO'} | {hp or '-'}")
 
 
 if __name__ == '__main__':

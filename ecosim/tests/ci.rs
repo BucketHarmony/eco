@@ -1,11 +1,11 @@
-//! The CI gate itself: `.github/workflows/ci.yml` and the justfile's `ci` recipe run the seven
+//! The CI gate itself: `.github/workflows/ci.yml` and the justfile's `ci` recipe run the
 //! required steps, in order. Both are scanned as text; the steps are recognised by their commands.
 
 use std::fs;
 use std::path::Path;
 
-/// The seven required steps, each identified by a command it must contain.
-const STEPS: [(&str, &str); 7] = [
+/// The required steps, each identified by a command it must contain.
+const STEPS: [(&str, &str); 8] = [
     ("fmt", "cargo fmt --check"),
     ("clippy", "cargo clippy --all-targets -- -D warnings"),
     ("test (debug)", "cargo test\n"),
@@ -13,6 +13,7 @@ const STEPS: [(&str, &str); 7] = [
     ("build release", "cargo build --release"),
     ("runs and checks", "--seed \"$s\" --ticks 20000"),
     ("sweep baseline", "sweep --baseline --seeds 1,2,3"),
+    ("long run", "check --long ci-runs/long-s1"),
 ];
 
 /// Index of the first block containing each step's command; panics naming a missing step.
@@ -46,7 +47,7 @@ fn blocks(text: &str, starts: impl Fn(&str) -> bool) -> Vec<String> {
 }
 
 #[test]
-fn ci_workflow_runs_the_seven_steps_in_order() {
+fn ci_workflow_runs_the_required_steps_in_order() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/ci.yml");
     let yml = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let steps = blocks(&yml, |l| l.trim_start().starts_with("- "));

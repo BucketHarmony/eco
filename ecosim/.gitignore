@@ -1,5 +1,6 @@
 runs/
 sweeps/*/cells/
+sweeps/shot5/*/cells/
 __pycache__/
 proptest-regressions/
 ci-runs/

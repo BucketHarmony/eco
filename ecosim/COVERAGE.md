@@ -6,24 +6,29 @@ Coverage is measured with this command (CI step 4, `just coverage`):
 cargo llvm-cov --fail-under-lines 85 --ignore-filename-regex 'main\.rs|cli/'
 ```
 
-It used cargo-llvm-cov 0.9.1 on Rust 1.98.1, and was measured on 2026-09-18. The floor is 85% of lines, and `main.rs`, the CLI argument handling, is excluded.
+It used cargo-llvm-cov 0.9.1 on Rust 1.98.1, and was re-measured on 2026-09-19 after the dynamics fixes. The floor is 85% of lines, and `main.rs`, the CLI argument handling, is excluded.
 
-**Total: 95.85% of lines (2699 of 2816), 93.29% of functions and 94.81% of regions.**
+**Total: 96.15% of lines (3045 of 3167), 93.23% of functions and 95.21% of regions.**
 
 | File | Lines | Missed | Line cover | Function cover |
 |---|---:|---:|---:|---:|
-| abiotic.rs | 161 | 0 | 100.00% | 100.00% |
-| animals.rs | 486 | 1 | 99.79% | 100.00% |
-| check.rs | 475 | 20 | 95.79% | 90.12% |
+| abiotic.rs | 162 | 0 | 100.00% | 100.00% |
+| animals.rs | 622 | 1 | 99.84% | 100.00% |
+| check.rs | 568 | 23 | 95.95% | 90.32% |
 | lib.rs | 7 | 1 | 85.71% | 100.00% |
-| output.rs | 243 | 10 | 95.88% | 100.00% |
-| params.rs | 143 | 9 | 93.71% | 84.85% |
+| output.rs | 246 | 10 | 95.93% | 100.00% |
+| params.rs | 144 | 9 | 93.75% | 84.85% |
 | producers.rs | 171 | 0 | 100.00% | 100.00% |
-| sim.rs | 186 | 2 | 98.92% | 100.00% |
-| sweep.rs | 466 | 74 | 84.12% | 80.25% |
-| trees.rs | 207 | 0 | 100.00% | 100.00% |
+| sim.rs | 191 | 2 | 98.95% | 100.00% |
+| sweep.rs | 471 | 76 | 83.86% | 78.31% |
+| trees.rs | 314 | 0 | 100.00% | 100.00% |
 | world.rs | 271 | 0 | 100.00% | 100.00% |
-| **Total** | **2816** | **117** | **95.85%** | **93.29%** |
+| **Total** | **3167** | **122** | **96.15%** | **93.23%** |
+
+The dynamics-fix code is fully covered, apart from the paths listed below:
+- `attack_success`, `immigrate`, the edge-column choice and its no-edge fallback are covered by unit and property tests in `animals.rs`.
+- `crowding` and self-thinning are covered in `trees.rs`.
+- `evaluate_long` has tests for a healthy run, each violation, a short run, no rows and a tick gap.
 
 ## What is not covered
 
@@ -35,7 +40,7 @@ The first measurement, 94.76%, found three `pub fn`s that nothing called: `Param
   - the error-cell text
 
   The committed sweeps in `sweeps/` exercise these branches through the CLI. `margin_table`, which only `main.rs` calls, was uncovered in the first measurement and now has assertions in `baseline_margins_equal_check_margins`.
-- **`check.rs`** misses these arms:
+- **`check.rs`** misses these arms (`check_run_long`, the CLI's file-reading wrapper, is also only reached through `main.rs`):
   - the malformed-`series.csv` errors (a bad header, a wrong field count, no rows, a non-contiguous tick)
   - the `timing.json`-missing arm
   - the zero-target edge of the band margins

@@ -31,6 +31,8 @@ pub struct Tree {
     pub age: u32,
     /// Consecutive ticks spent below `dry_moisture`.
     pub dry_ticks: u32,
+    /// Age at which it dies, drawn at planting.
+    pub lifespan: u32,
     /// False once dead; removed at the next compaction.
     pub alive: bool,
 }
@@ -124,11 +126,16 @@ impl Sim {
         }
     }
 
-    /// Plant a tree on (x, y) and refresh the light of the columns its canopy covers.
+    /// Plant a tree on (x, y) and refresh the light of the columns its canopy covers. Its lifespan is
+    /// `max_age · (1 + lifespan_jitter · u)` with u uniform in [−1, 1], one draw from the sim RNG.
     pub fn plant_tree(&mut self, x: usize, y: usize, age: u32) {
         let id = self.alloc_id();
+        let tp = &self.params.tree;
+        let (mean, jitter) = (tp.max_age as f32, tp.lifespan_jitter);
+        let u: f32 = self.rng.gen_range(-1.0..=1.0);
+        let lifespan = (mean * (1.0 + jitter * u)).round().max(0.0) as u32;
         self.trunk_at[cidx(x, y)] = self.trees.len() as u32;
-        self.trees.push(Tree { id, x: x as u8, y: y as u8, age, dry_ticks: 0, alive: true });
+        self.trees.push(Tree { id, x: x as u8, y: y as u8, age, dry_ticks: 0, lifespan, alive: true });
         self.refresh_canopy_columns(x as u8, y as u8);
     }
 
@@ -156,6 +163,34 @@ impl Sim {
         self.trunk_at[col] = NO_TREE;
         self.patches[patch_of(x as usize, y as usize)].detritus += self.params.tree.death_detritus;
         self.refresh_canopy_columns(x, y);
+    }
+
+    /// Other live trees whose canopy lies over any column of tree `i`'s mature crown (the 3×3
+    /// around its trunk): mature trees with trunks within Chebyshev 2, young trees within 1.
+    pub fn crowding(&self, i: usize) -> usize {
+        let (x, y) = (self.trees[i].x as i32, self.trees[i].y as i32);
+        let mut n = 0;
+        for dy in -2..=2i32 {
+            for dx in -2..=2i32 {
+                let (tx, ty) = (x + dx, y + dy);
+                if (dx == 0 && dy == 0) || !in_bounds(tx, ty) {
+                    continue;
+                }
+                let ti = self.trunk_at[cidx(tx as usize, ty as usize)];
+                if ti == NO_TREE {
+                    continue;
+                }
+                let reach = match self.tree_stage(&self.trees[ti as usize]) {
+                    Stage::Sapling => continue,
+                    Stage::Young => 1,
+                    Stage::Mature => 2,
+                };
+                if dx.abs().max(dy.abs()) <= reach {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     /// Germination probability on a soil column: f_L(surface light)·f_M(moisture)·f_T(patch temp).
@@ -199,11 +234,20 @@ impl Sim {
             } else {
                 self.trees[i].dry_ticks = 0;
             }
-            if self.trees[i].age >= tp.max_age || self.trees[i].dry_ticks >= tp.dry_death_ticks {
+            if self.trees[i].age >= self.trees[i].lifespan || self.trees[i].dry_ticks >= tp.dry_death_ticks {
                 self.kill_tree(i);
                 continue;
             }
             let after = self.tree_stage(&self.trees[i]);
+            // Canopy self-thinning: one draw, only for a mature tree under ≥ 2 other canopies.
+            if after == Stage::Mature
+                && tp.crowding_mortality > 0.0
+                && self.crowding(i) >= 2
+                && self.rng.gen::<f32>() < tp.crowding_mortality
+            {
+                self.kill_tree(i);
+                continue;
+            }
             if after != before {
                 let (x, y) = (self.trees[i].x, self.trees[i].y);
                 self.refresh_canopy_columns(x, y);
@@ -245,6 +289,8 @@ mod tests {
     /// including seedlings from `update_trees`) equal a full recompute of every column.
     fn incremental_light_matches_full(heights: &[u8], soil_moisture: f32, ops: &[Op]) -> Result<(), TestCaseError> {
         let mut sim = Sim::bare(heights);
+        // Heavy self-thinning so updates also kill crowded trees.
+        sim.params.tree.crowding_mortality = 0.5;
         sim.moisture.iter_mut().zip(&sim.world.class).for_each(|(m, &k)| {
             if k == ColClass::Soil {
                 *m = soil_moisture;
@@ -280,8 +326,53 @@ mod tests {
         Ok(())
     }
 
+    /// Columns a tree's canopy lies over: the 3x3 around a mature trunk, the trunk column of a young one.
+    fn canopy_columns(sim: &Sim, t: &Tree) -> Vec<(i32, i32)> {
+        let (x, y) = (t.x as i32, t.y as i32);
+        match sim.tree_stage(t) {
+            Stage::Sapling => vec![],
+            Stage::Young => vec![(x, y)],
+            Stage::Mature => (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (x + dx, y + dy))).collect(),
+        }
+    }
+
+    /// `crowding` equals a brute-force count: the other live trees whose canopy columns meet the
+    /// 3x3 crown of tree `i`. Planted trees keep `lifespan` within `max_age · (1 ± lifespan_jitter)`.
+    fn crowding_matches_brute_force(plants: &[(usize, usize, u32)], jitter: f32) -> Result<(), TestCaseError> {
+        let mut sim = bare_sim();
+        sim.params.tree.lifespan_jitter = jitter;
+        for &(x, y, age) in plants {
+            if sim.spacing_ok(x as i32, y as i32) {
+                sim.plant_tree(x, y, age);
+            }
+        }
+        let mean = sim.params.tree.max_age as f32;
+        for (i, t) in sim.trees.iter().enumerate() {
+            let (lo, hi) = ((mean * (1.0 - jitter)).floor() as u32, (mean * (1.0 + jitter)).ceil() as u32);
+            prop_assert!((lo..=hi).contains(&t.lifespan), "lifespan {} outside [{}, {}]", t.lifespan, lo, hi);
+            let crown: Vec<(i32, i32)> =
+                (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (t.x as i32 + dx, t.y as i32 + dy))).collect();
+            let want = sim
+                .trees
+                .iter()
+                .enumerate()
+                .filter(|&(j, o)| j != i && o.alive && canopy_columns(&sim, o).iter().any(|c| crown.contains(c)))
+                .count();
+            prop_assert_eq!(sim.crowding(i), want, "tree {} at ({}, {})", i, t.x, t.y);
+        }
+        Ok(())
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(crate::cases(32)))]
+
+        #[test]
+        fn prop_crowding_matches_brute_force(
+            plants in prop::collection::vec((0..16usize, 0..16usize, 0u32..1500), 1..60),
+            jitter in 0.0f32..=0.9,
+        ) {
+            crowding_matches_brute_force(&plants, jitter)?;
+        }
 
         #[test]
         fn prop_incremental_light_matches_full(
@@ -297,6 +388,54 @@ mod tests {
     fn light_regression_overlapping_canopies_then_one_dies() {
         let ops = [Op::Plant(10, 10, 950), Op::Plant(12, 10, 1000), Op::Update, Op::Kill(1), Op::Update];
         incremental_light_matches_full(&vec![14u8; COLS], 100.0, &ops).unwrap();
+    }
+
+    #[test]
+    fn crowding_regression_row_of_mature_and_young_trees() {
+        // Mature at x = 10, 12, 14 (spacing 2) and a young tree at 13: the middle mature tree has
+        // three neighbours, the young one is under two canopies.
+        let plants = [(10, 10, 2000), (12, 10, 2000), (14, 10, 2000), (13, 12, 600), (5, 5, 0)];
+        crowding_matches_brute_force(&plants, 0.2).unwrap();
+    }
+
+    #[test]
+    fn crowded_mature_tree_thins_and_lone_ones_survive() {
+        let mut sim = bare_sim();
+        sim.params.tree.crowding_mortality = 1.0;
+        sim.moisture.fill(200.0);
+        for x in [10, 12, 14] {
+            sim.plant_tree(x, 10, 2000);
+        }
+        // Tree 0 has one neighbour; tree 1 two (dies); after that, tree 2 has none.
+        sim.update_trees();
+        let alive: Vec<bool> = sim.trees.iter().map(|t| t.alive).collect();
+        assert_eq!(alive, [true, false, true]);
+        assert_eq!(sim.patches[patch_of(12, 10)].detritus, sim.params.tree.death_detritus);
+        assert_eq!(sim.world.surface_light(cidx(12, 10)), 255, "the gap over the dead trunk opens");
+        // With mortality 0 nothing thins.
+        let mut sim = bare_sim();
+        sim.params.tree.crowding_mortality = 0.0;
+        sim.moisture.fill(200.0);
+        for x in [10, 12, 14] {
+            sim.plant_tree(x, 10, 2000);
+        }
+        sim.update_trees();
+        assert!(sim.trees.iter().all(|t| t.alive));
+    }
+
+    #[test]
+    fn tree_dies_at_its_own_lifespan() {
+        let mut sim = bare_sim();
+        sim.moisture.fill(200.0);
+        sim.plant_tree(20, 20, 0);
+        sim.plant_tree(40, 40, 0);
+        sim.trees[0].lifespan = 100;
+        sim.trees[1].lifespan = 101;
+        sim.update_trees(); // age 50
+        sim.update_trees(); // age 100: tree 0 reaches its lifespan
+        assert!(!sim.trees[0].alive && sim.trees[1].alive);
+        sim.update_trees();
+        assert!(!sim.trees[1].alive);
     }
 
     #[test]

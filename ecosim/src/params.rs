@@ -144,8 +144,12 @@ pub struct TreeParams {
     pub young_age: u32,
     /// Age at which a tree becomes mature and seeds.
     pub mature_age: u32,
-    /// Age at which a tree dies.
+    /// Mean lifespan: each tree dies at its own `max_age · (1 + lifespan_jitter · u)`, u uniform in [−1, 1].
     pub max_age: u32,
+    /// Relative spread of per-tree lifespans around `max_age`.
+    pub lifespan_jitter: f32,
+    /// Per-update death chance of a mature tree whose crown is overlapped by the canopy of ≥ 2 other trees.
+    pub crowding_mortality: f32,
     /// Moisture a tree takes from its column per update.
     pub moisture_draw: f32,
     /// Moisture below which a tree counts as dry.
@@ -214,6 +218,10 @@ pub struct GrazerParams {
     pub crowding: f32,
     /// Patches scoring within this of the best are all acceptable move targets.
     pub choice_tolerance: f32,
+    /// One grazer immigrates when fewer than this many are alive (0 disables immigration).
+    pub immigration_floor: u32,
+    /// Ticks between immigration checks.
+    pub immigration_interval: u32,
 }
 
 /// The hunter species.
@@ -252,10 +260,14 @@ pub struct HunterParams {
     pub fail_cost: f32,
     /// Steps a grazer is pushed away by a failed attack.
     pub displace_steps: u32,
-    /// Grazers in patches with more shrub than this cannot be attacked (stability rule 3).
-    pub refugium_shrub: f32,
+    /// Shrub refugium exponent: attack success is `kill_prob · (1 − shrub)^refugium_k` (stability rule 3).
+    pub refugium_k: f32,
     /// A hunter looks for prey within this distance.
     pub seek_radius: f32,
+    /// One hunter immigrates when fewer than this many are alive (0 disables immigration).
+    pub immigration_floor: u32,
+    /// Ticks between immigration checks.
+    pub immigration_interval: u32,
 }
 
 impl Params {
@@ -364,7 +376,8 @@ mod tests {
         assert_eq!(p.grass.initial, 1.0);
         assert_eq!(p.shrub.light, [1.0, 2.5, 3.0, 4.0]);
         // Setting a key to its current value changes nothing.
-        let same = Params::from_toml_str_with(&defaults(), &["season.amplitude=12".into()]).unwrap();
+        let amp = format!("season.amplitude={}", Params::load_default().season.amplitude);
+        let same = Params::from_toml_str_with(&defaults(), &[amp]).unwrap();
         assert_eq!(serde_json::to_string(&same).unwrap(), serde_json::to_string(&Params::load_default()).unwrap());
     }
 

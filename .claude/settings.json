@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(rustup:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(git:*)",
+      "Bash(./target/release/ecosim:*)",
+      "Bash(./target/debug/ecosim:*)",
+      "Bash(bash scripts/sync-data.sh:*)",
+      "PowerShell(cargo:*)",
+      "PowerShell(npm:*)",
+      "PowerShell(npx:*)",
+      "PowerShell(node:*)",
+      "PowerShell(git:*)"
+    ]
+  }
+}

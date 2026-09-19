@@ -1,0 +1,12 @@
+# build outputs
+target/
+node_modules/
+dist/
+
+# large, regenerable run data (fixtures/s42-mini is committed)
+ecosim/runs/
+ecoview/public/runs/
+
+# test artifacts
+ecoview/test-results/
+ecoview/playwright-report/

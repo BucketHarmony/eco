@@ -272,7 +272,9 @@ pub struct HunterParams {
     pub kill_prob: f64,
     /// Energy gained from a kill.
     pub kill_energy: f32,
-    /// Energy lost on a failed attack.
+    /// Energy every attack attempt costs, hit or miss (food-limited hunters).
+    pub hunt_cost: f32,
+    /// Energy a failed attack costs on top of `hunt_cost`.
     pub fail_cost: f32,
     /// Steps a grazer is pushed away by a failed attack.
     pub displace_steps: u32,

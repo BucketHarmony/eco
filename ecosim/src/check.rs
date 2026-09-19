@@ -585,6 +585,90 @@ pub fn extinction_line(e: &Extinction) -> String {
     )
 }
 
+/// Lag range of the predator–prey signature: −`SIG_MAX_LAG`..=`SIG_MAX_LAG` ticks in `SIG_LAG_STEP`s.
+pub const SIG_MAX_LAG: i32 = 2000;
+/// Step between the signature's lags.
+pub const SIG_LAG_STEP: i32 = 50;
+
+/// The predator–prey signature of a run: the lagged cross-correlation of hunters against grazers
+/// over ticks `WINDOW_START`..=20000 (or the run's end).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Signature {
+    /// The lag with the largest Pearson correlation of grazers(t) with hunters(t + lag), and that
+    /// correlation. A positive lag means hunter numbers follow grazer numbers.
+    Cycle {
+        /// Ticks by which hunters trail grazers at the best lag (`pp_lag`).
+        lag: i32,
+        /// The correlation at that lag (`pp_corr`).
+        corr: f64,
+    },
+    /// Grazers or hunters reach 0 inside the window, so the correlation is undefined there.
+    Extinct(Extinction),
+    /// No lag has two samples with non-zero variance on both sides (a flat or too-short series).
+    Flat,
+}
+
+/// The predator–prey signature (`ecosim stats --signature`, sweep columns `pp_lag`, `pp_corr`).
+/// Each lag L correlates grazers(t) with hunters(t + L) over the ticks t where both t and t + L lie
+/// in the window. Lags run from −2000 upward, and only a strictly larger correlation replaces the
+/// best, so ties go to the most negative lag.
+pub fn signature(rows: &[StatsRow]) -> Signature {
+    let end = rows.len().min(20_001);
+    let from = (WINDOW_START as usize).min(end);
+    let win = &rows[from..end];
+    let gone = extinctions(rows).into_iter().filter(|e| e.species != "trees");
+    for e in gone {
+        let count = |r: &StatsRow| if e.species == "grazers" { r.grazers } else { r.hunters };
+        if win.iter().any(|r| count(r) == 0) {
+            return Signature::Extinct(e);
+        }
+    }
+    let g: Vec<f64> = win.iter().map(|r| r.grazers as f64).collect();
+    let h: Vec<f64> = win.iter().map(|r| r.hunters as f64).collect();
+    let mut best: Option<(i32, f64)> = None;
+    for lag in (-SIG_MAX_LAG..=SIG_MAX_LAG).step_by(SIG_LAG_STEP as usize) {
+        let shift = lag.unsigned_abs() as usize;
+        if shift + 2 > g.len() {
+            continue;
+        }
+        let n = g.len() - shift;
+        let (a, b) = if lag >= 0 { (&g[..n], &h[shift..]) } else { (&g[shift..], &h[..n]) };
+        if let Some(c) = pearson(a, b) {
+            if best.is_none_or(|(_, bc)| c > bc) {
+                best = Some((lag, c));
+            }
+        }
+    }
+    best.map_or(Signature::Flat, |(lag, corr)| Signature::Cycle { lag, corr })
+}
+
+/// Pearson correlation of two equal-length samples; `None` when either has zero variance.
+fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
+    let n = a.len() as f64;
+    let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
+    let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        let (dx, dy) = (x - ma, y - mb);
+        sab += dx * dy;
+        saa += dx * dx;
+        sbb += dy * dy;
+    }
+    (saa > 0.0 && sbb > 0.0).then(|| sab / (saa * sbb).sqrt())
+}
+
+/// The printable `ecosim stats --signature` line.
+pub fn signature_line(s: &Signature) -> String {
+    match s {
+        Signature::Cycle { lag, corr } => format!(
+            "signature: pp_lag {lag} pp_corr {corr:.4} (grazers(t) vs hunters(t+lag), ticks {WINDOW_START}-20000, lags -{SIG_MAX_LAG}..{SIG_MAX_LAG} step {SIG_LAG_STEP})"
+        ),
+        Signature::Extinct(e) => {
+            format!("signature: undefined, {} extinct at tick {} (dominant cause: {})", e.species, e.tick, e.dominant_name())
+        }
+        Signature::Flat => "signature: undefined, no lag with variance in both series".into(),
+    }
+}
+
 /// min/max/mean per series column plus first extinction tick, as printable lines.
 pub fn stats_report(run_dir: &Path) -> Result<Vec<String>, String> {
     let rows = read_series(run_dir)?;
@@ -683,6 +767,68 @@ mod tests {
                 traits: Default::default(),
             })
             .collect()
+    }
+
+    /// A seasonal-looking grazer series and hunters that copy it `delay` ticks later.
+    fn delayed_copy(delay: i32, phase: f64) -> Vec<StatsRow> {
+        let g = |t: i32| {
+            let t = t as f64;
+            (400.0 + 150.0 * libm::sin(t / 5000.0 * std::f64::consts::TAU + phase) + 60.0 * libm::sin(t / 7300.0 * 6.3))
+                as u32
+        };
+        let mut rows = rows_from(|t| g(t as i32), 20_001);
+        rows.iter_mut().enumerate().for_each(|(t, r)| r.hunters = g(t as i32 - delay) / 10 + 1);
+        rows
+    }
+
+    /// The signature finds a known delay: hunters that are the grazer series `delay` ticks later
+    /// (delay a multiple of 50 within ±2000) give pp_lag = delay and pp_corr ≈ 1.
+    fn signature_finds_the_delay(delay: i32, phase: f64) -> Result<(), TestCaseError> {
+        match signature(&delayed_copy(delay, phase)) {
+            Signature::Cycle { lag, corr } => {
+                prop_assert_eq!(lag, delay);
+                prop_assert!(corr > 0.999, "corr {}", corr);
+            }
+            other => prop_assert!(false, "{:?}", other),
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(24)))]
+
+        #[test]
+        fn prop_signature_finds_the_delay(k in -40i32..=40, phase in 0.0f64..std::f64::consts::TAU) {
+            signature_finds_the_delay(k * SIG_LAG_STEP, phase)?;
+        }
+    }
+
+    #[test]
+    fn signature_regression_delay_edges_extinct_and_flat() {
+        for d in [0, 350, -350, SIG_MAX_LAG, -SIG_MAX_LAG] {
+            signature_finds_the_delay(d, 0.0).unwrap();
+        }
+        let line = signature_line(&signature(&delayed_copy(350, 0.0)));
+        assert!(line.starts_with("signature: pp_lag 350 pp_corr 0.99") && line.ends_with("step 50)"), "{line}");
+        // Hunters at 0 inside the window: undefined, reported with the extinction's cause.
+        let mut rows = delayed_copy(350, 0.0);
+        for r in &mut rows[12_000..] {
+            r.hunters = 0;
+        }
+        rows[12_000].deaths[1][Cause::Starved as usize] = 3;
+        let s = signature(&rows);
+        assert!(matches!(&s, Signature::Extinct(e) if e.species == "hunters" && e.tick == 12_000), "{s:?}");
+        assert_eq!(signature_line(&s), "signature: undefined, hunters extinct at tick 12000 (dominant cause: starved)");
+        // An extinction before tick 2000 leaves 0s in the window too; trees reaching 0 do not count.
+        let mut rows = delayed_copy(0, 0.0);
+        rows.iter_mut().for_each(|r| r.trees = 0);
+        assert!(matches!(signature(&rows), Signature::Cycle { lag: 0, .. }));
+        rows[1500..].iter_mut().for_each(|r| r.grazers = 0);
+        assert!(matches!(signature(&rows), Signature::Extinct(e) if e.species == "grazers" && e.tick == 1500));
+        // Constant hunters (the default of `rows_from`) have no variance at any lag.
+        let flat = rows_from(|t| 100 + (t % 7) as u32, 20_001);
+        assert_eq!(signature(&flat), Signature::Flat);
+        assert!(signature_line(&Signature::Flat).starts_with("signature: undefined"));
     }
 
     #[test]

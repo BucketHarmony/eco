@@ -353,3 +353,17 @@ No value changed. Mutation stays at its starting value of 0.05, and no other par
 ## Collapse atlas (shot 14)
 
 No parameter changed. The shot adds `[rng] stream = 0`, which leaves every default run byte-identical, and reports the atlas in `sweeps/atlas/ATLAS.md`.
+
+## Food-limited hunters (shot 14a, Blocked)
+
+**No value changed.** `hunter.hunt_cost` was added at 0.0, the pre-shot rule. `disease.hunter_rate` stays 0.001 and `kill_energy` stays 40. The sweeps are in `sweeps/shot14a/` and the analysis in its `FINDINGS.md`.
+
+| round | grid (seeds) | result |
+|---|---|---|
+| x1 | hunter_rate 0; kill_energy 20:80:10 × hunt_cost 0:5:1 (1, 2, 3, 42) | 10 of 168 cells pass. hunt_cost 0 means grazers are eaten, and 2 or more means hunters starve. The band is around 1. |
+| x2 = `kill_x_cost_fine` | hunter_rate 0; kill_energy 40:80:10 × hunt_cost 0.5:1.5:0.1 (1, 2, 3, 42) | 46 of 220 cells pass, and no cell passes all four seeds. Seed 1 is `eaten` in 54 of 55 cells. |
+| `crowding_on_kill_x_cost` | hunter_rate 0.001; kill_energy 40:80:10 × hunt_cost 0:1.5:0.25 (1, 2, 3, 42) | The anchor holds for hunt_cost ≤ 0.5–0.75, but no cell reaches the signature target. The best cell is 70/0: lag > 0 on every seed, corr 0.00–0.34. |
+| `diag_refractory500_kill_x_cost` | hunter_rate 0, refractory 500; kill_energy 20:80:20 × hunt_cost 0.5:2:0.5 (1, 2, 3, 42) | 0 of 64 cells pass. Every cell is a grazer extinction, `eaten`. |
+
+Required sweeps (seeds 1–3, hunter_rate 0): `hunter_kill_energy` passes 7 of 21 cells, `hunter_hunt_cost` 1 of 18 and `kill_x_cost` 5 of 48. None reaches the target region.
+

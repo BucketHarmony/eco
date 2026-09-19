@@ -600,3 +600,37 @@ A report-only shot. No rule, default or file format changed. The atlas is `sweep
   - A flip is *seed-determined* when every seed repeats its stream-0 outcome on all 5 extra streams. Then the world, not the draws, decides the outcome.
   - It is *noise* when any seed changes outcome across its streams.
 - **Output layout.** The reruns use `ecosim sweep --param rng.stream --values 1,2,3,4,5` with the cell's two values as `--set`. Their output goes to `sweeps/atlas/<grid>/flips/<cell>/`. `sweep.csv` and `sweep.md` are committed, and the per-cell series are gitignored like every other sweep's.
+
+## Food-limited hunters (shot 14a, Blocked)
+
+The shot's code is in, but its defaults are not: **no kill_energy × hunt_cost cell meets the target, so every default is unchanged**, and the run is byte-identical to the shot-14 manifest. The evidence is in `sweeps/shot14a/FINDINGS.md`, and the block is in `overnight/shots/14a.BLOCKED.md` (outside the repo).
+
+**`hunter.hunt_cost` and `fail_cost`**
+- **`hunt_cost` is new (default 0.0) and is charged on every attack attempt, hit or miss.** A kill leaves `min(energy + kill_energy − hunt_cost, 100)`, so the cost is taken before the clamp. A miss leaves `energy − hunt_cost − fail_cost`.
+- **`fail_cost` is kept as an extra charge on a miss, not folded into `hunt_cost`.** Folding it would charge the old 0.25 on hits as well, and the identity case could not reproduce the pre-shot rule through `--set`. Keeping it also leaves the four anchor values untouched.
+  - The shot's property reads "after a failed attack = before − hunt_cost". The test states it as `before − hunt_cost − fail_cost`, and the regression sibling pins the bare form at `fail_cost` 0.
+- **Energy is clamped only at 100.** A miss can take a hunter below 0, and it then starves in the same update, as before.
+- `hunt_cost` 0 is the pre-shot rule to the bit: `x − 0.0` and `x + k − 0.0` are exact.
+
+**`disease.hunter_rate` stays 0.001.** Change 1 asks for 0. With it at 0, no cell of any grid keeps the anchor. Seed 1 loses its grazers to predation in 54 of the 55 fine-grid cells, and the shot forbids tuning anything else. So the change was not made. The shot is blocked instead, with the best region reported.
+
+**The signature (`check::signature`)**
+- **Lag convention.** Lag L correlates grazers(t) with hunters(t + L), so a positive L means hunters follow grazers.
+- **Window.** Ticks 2000 to 20000, or to the end of a shorter run.
+- **The sample for each lag.** Each lag uses only the ticks where both t and t + L lie in the window, with the means taken over that overlap (plain Pearson). A lag with fewer than 2 samples, or with zero variance on either side, is skipped.
+- **Ties.** Lags run from −2000 upward, and only a strictly larger correlation replaces the best, so ties go to the most negative lag.
+- **Undefined cases.**
+  - Grazers or hunters are 0 at any tick of the window. This includes a species that died out before tick 2000. The result is `Extinct`, carrying that species' `Extinction`, so the report names the cause with the `ecosim stats` rule.
+  - Trees reaching 0 doesn't count.
+  - No lag has variance on both sides: `Flat`.
+- **`ecosim stats --signature` prints only the signature line.** Plain `stats` output is unchanged, so scripts that parse it are unaffected.
+- **Sweep columns.** `sweep.csv` appends `pp_lag,pp_corr,pp_undefined`. When the signature is defined, the first two are filled and `pp_undefined` is empty. Otherwise the first two are empty and `pp_undefined` holds `<species> <cause>` or `flat`. `cycle_ratio.py` skips all three.
+
+**Tests**
+- `prop_attack_energy_accounting` (with `attack_energy_regression_clamp_and_zero_costs`) calls `attack` directly, now `pub(crate)`, at kill_prob 1 and at kill_prob 0.
+- `prop_signature_finds_the_delay` (with `signature_regression_delay_edges_extinct_and_flat`): hunters that copy the grazer series d ticks later give pp_lag = d. The sibling pins ±2000, extinction inside the window and before it, trees ignored, and a flat series.
+- **Identity:** `old_hunting_economics_via_set_reproduce_the_shot_14_manifest` sets `disease.hunter_rate=0.001`, `kill_energy=40` and `hunt_cost=0` through `--set`. It compares the run with `tests/data/s42-manifest-preshot14a.sha256`, a copy of the shot-14 manifest taken before any change. Because the defaults didn't move, that file equals `s42-manifest.sha256` for now. The test is there for a later shot that changes the defaults.
+- **Forced extinction:** `forced_hunter_starvation_by_hunt_cost_runs_to_the_end` runs `hunt_cost=5` on seed 1. The hunters starve out, the run reaches 20000 with valid snapshots, `stats` names `starved`, `stats --signature` reports undefined with `starved`, and the last snapshot restores.
+
+**Not regenerated.** The manifest, the golden check output and the fixtures are unchanged, because behaviour at the defaults is unchanged.
+

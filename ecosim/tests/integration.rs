@@ -302,6 +302,28 @@ fn forced_hunter_extinction_by_refractory_runs_to_the_end() {
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
 
+/// Forced extinction by hunting cost: at `hunter.hunt_cost=5` an attack costs more than a hunter
+/// can win back at the typical success rate, so the hunters starve out on seed 1. The run continues
+/// to 20000 ticks with valid snapshots, `ecosim stats` names `starved`, the predator–prey signature
+/// is reported as undefined with that cause, and the last snapshot restores.
+#[test]
+fn forced_hunter_starvation_by_hunt_cost_runs_to_the_end() {
+    let dir = tmp("forced_hunt_cost_extinction");
+    let set = ["hunter.hunt_cost=5".to_string()];
+    let last = run_with(&dir, &set);
+    assert_eq!(last.hunters, 0, "hunters extinct by the end");
+    let text = assert_valid_run(&dir);
+    let line = text.lines().find(|l| l.starts_with("extinction: hunters at tick")).unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("dominant cause: starved"), "{line}");
+    let out = Command::new(env!("CARGO_BIN_EXE_ecosim")).args(["stats", "--signature"]).arg(&dir).output().unwrap();
+    assert!(out.status.success());
+    let sig = String::from_utf8(out.stdout).unwrap();
+    assert!(sig.starts_with("signature: undefined, hunters extinct at tick ") && sig.contains("starved"), "{sig}");
+    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
+    assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
+}
+
 /// Forced extinction under heredity: at `grazer.repro_energy=400` no grazer can ever breed (energy
 /// tops out at 100, and the clamp keeps `repro_threshold` at 100 or more), so with mutation 0.2 the
 /// grazers are eaten out on seed 1 (tick 2285) and the hunters starve after them. The run continues
@@ -387,6 +409,7 @@ fn format_2_and_fire_only_add_to_version_1_files() {
         params.remove("heredity");
         params["hunter"].as_object_mut().unwrap().remove(key);
         params["hunter"].as_object_mut().unwrap().remove("flee_radius");
+        params["hunter"].as_object_mut().unwrap().remove("hunt_cost");
         for k in ["immigration_floor", "immigration_interval"] {
             params["tree"].as_object_mut().unwrap().remove(k);
         }

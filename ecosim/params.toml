@@ -117,6 +117,7 @@ satiation = 85.0
 attack_radius = 2.0
 kill_prob = 0.3
 kill_energy = 40.0
+hunt_cost = 0.0
 fail_cost = 0.25
 displace_steps = 3
 refugium_k = 2.0

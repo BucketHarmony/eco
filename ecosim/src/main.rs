@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use ecosim::check::{check_run, check_run_long, diff_runs, stats_report};
+use ecosim::check::{self, check_run, check_run_long, diff_runs, read_series, signature_line, stats_report};
 use ecosim::output::{fork, run_with_state, ForkSpec};
 use ecosim::sweep::{baseline, margin_table, parse_range, parse_values, sweep, ParamSpec, SweepConfig};
 use ecosim::Params;
@@ -58,7 +58,13 @@ enum Cmd {
         long: bool,
     },
     /// Print min/max/mean per series column and the first extinction tick.
-    Stats { run_dir: PathBuf },
+    Stats {
+        run_dir: PathBuf,
+        /// Print only the predator–prey signature: the lag of the largest hunter–grazer
+        /// cross-correlation over ticks 2000–20000, and its value.
+        #[arg(long)]
+        signature: bool,
+    },
     /// Byte-compare two run directories (ignoring timing.json); exit 1 on any difference.
     Diff { a: PathBuf, b: PathBuf },
     /// Run a parameter grid across seeds in memory and report where each invariant breaks.
@@ -213,7 +219,11 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Cmd::Stats { run_dir } => match stats_report(&run_dir) {
+        Cmd::Stats { run_dir, signature } => match if signature {
+            read_series(&run_dir).map(|rows| vec![signature_line(&check::signature(&rows))])
+        } else {
+            stats_report(&run_dir)
+        } {
             Ok(lines) => {
                 lines.iter().for_each(|l| println!("{l}"));
                 ExitCode::SUCCESS

@@ -1,0 +1,13 @@
+# shot 14a sweeps (2026-09-19T10:39:35Z), binary at 469959c+wip
+ecosim sweep --param hunter.kill_energy --range 20:80:10 --set disease.hunter_rate=0 --set hunter.hunt_cost=1.0 --seeds 1,2,3 --out sweeps/shot14a/hunter_kill_energy
+wrote sweeps/shot14a/hunter_kill_energy: 7/21 cells pass
+ecosim sweep --param hunter.hunt_cost --range 0:5:1 --set disease.hunter_rate=0 --seeds 1,2,3 --out sweeps/shot14a/hunter_hunt_cost
+wrote sweeps/shot14a/hunter_hunt_cost: 1/18 cells pass
+ecosim sweep --param hunter.kill_energy --values 20,40,60,80 --param hunter.hunt_cost --values 0,1,2,3 --set disease.hunter_rate=0 --seeds 1,2,3 --out sweeps/shot14a/kill_x_cost
+wrote sweeps/shot14a/kill_x_cost: 5/48 cells pass
+ecosim sweep --param hunter.kill_energy --range 40:80:10 --param hunter.hunt_cost --range 0.5:1.5:0.1 --set disease.hunter_rate=0 --seeds 1,2,3,42 --out sweeps/shot14a/kill_x_cost_fine
+wrote sweeps/shot14a/kill_x_cost_fine: 46/220 cells pass
+ecosim sweep --param hunter.kill_energy --range 40:80:10 --param hunter.hunt_cost --range 0:1.5:0.25 --seeds 1,2,3,42 --out sweeps/shot14a/crowding_on_kill_x_cost  (disease.hunter_rate at 0.001)
+wrote sweeps/shot14a/crowding_on_kill_x_cost: 88/140 cells pass
+ecosim sweep --param hunter.kill_energy --values 20,40,60,80 --param hunter.hunt_cost --values 0.5,1,1.5,2 --set disease.hunter_rate=0 --set hunter.refractory=500 --seeds 1,2,3,42 --out sweeps/shot14a/diag_refractory500_kill_x_cost  (diagnostic only: refractory is outside this shot's tuning surface)
+wrote sweeps/shot14a/diag_refractory500_kill_x_cost: 0/64 cells pass

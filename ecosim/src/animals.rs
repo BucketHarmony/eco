@@ -480,16 +480,18 @@ impl Sim {
         nearest_in_grid(&self.grazer_grid, &self.seek_offsets, x, y, |j| self.grazers[j].alive)
     }
 
-    /// One attack by hunter `h` on grazer `j` (stability rules 2 and 3).
-    fn attack(&mut self, h: usize, j: usize) {
+    /// One attack by hunter `h` on grazer `j` (stability rules 2 and 3). Every attempt costs
+    /// `hunt_cost`: a kill leaves `min(energy + kill_energy − hunt_cost, 100)`, a miss
+    /// `energy − hunt_cost − fail_cost` and displaces the grazer.
+    pub(crate) fn attack(&mut self, h: usize, j: usize) {
         let hp = self.params.hunter.clone();
         let p = attack_success(hp.kill_prob, self.patches[self.grazers[j].patch()].shrub, hp.refugium_k);
         if self.rng.gen_bool(p) {
             self.kill_grazer(j, Cause::Eaten);
             let e = &mut self.hunters[h].energy;
-            *e = (*e + hp.kill_energy).min(100.0);
+            *e = (*e + hp.kill_energy - hp.hunt_cost).min(100.0);
         } else {
-            self.hunters[h].energy -= hp.fail_cost;
+            self.hunters[h].energy = self.hunters[h].energy - hp.hunt_cost - hp.fail_cost;
             let (hx, hy) = self.hunters[h].col();
             let (gx, gy) = self.grazers[j].col();
             let (mut dx, mut dy) = ((gx - hx).signum(), (gy - hy).signum());
@@ -644,6 +646,55 @@ mod tests {
             !killed && state == State::Hunt && energy == 50.0 - hp.fail_cost - hp.energy_cost,
             "full shrub: {energy}"
         );
+    }
+
+    /// One direct attack by a hunter with `before` energy on an adjacent grazer on bare ground, at
+    /// kill_prob 1 (`hit`) or 0: the hunter's energy afterwards.
+    fn energy_after_attack(hit: bool, before: f32, kill_energy: f32, hunt_cost: f32, fail_cost: f32) -> f32 {
+        let mut p = Params::load_default();
+        (p.tree.initial_count, p.grazer.start_count, p.hunter.start_count) = (0, 0, 0);
+        p.hunter.kill_prob = if hit { 1.0 } else { 0.0 };
+        (p.hunter.kill_energy, p.hunter.hunt_cost, p.hunter.fail_cost) = (kill_energy, hunt_cost, fail_cost);
+        let world = World::from_heights(&vec![14u8; COLS], &p);
+        let mut sim = Sim::with_world(p, rand_chacha::ChaCha8Rng::seed_from_u64(3), world);
+        sim.grazers.push(Animal::new(0, Kind::Grazer, (10, 10), 50.0, 0, 100, sim.params.default_traits(Kind::Grazer)));
+        sim.grazers_in_patch[patch_of(10, 10)] = 1;
+        sim.hunters.push(Animal::new(
+            1,
+            Kind::Hunter,
+            (11, 10),
+            before,
+            0,
+            100,
+            sim.params.default_traits(Kind::Hunter),
+        ));
+        sim.rebuild_grazer_grid();
+        sim.attack(0, 0);
+        assert_eq!(sim.grazers[0].alive, !hit);
+        sim.hunters[0].energy
+    }
+
+    /// Food-limited hunters: every attempt costs `hunt_cost`. After a kill the hunter has
+    /// `before + kill_energy − hunt_cost`, clamped to 100; after a miss `before − hunt_cost`, less
+    /// the extra `fail_cost` a miss has always cost.
+    fn attack_energy_accounting(before: f32, kill: f32, hunt: f32, fail: f32) -> Result<(), TestCaseError> {
+        prop_assert_eq!(energy_after_attack(true, before, kill, hunt, fail), (before + kill - hunt).min(100.0));
+        prop_assert_eq!(energy_after_attack(false, before, kill, hunt, fail), before - hunt - fail);
+        Ok(())
+    }
+
+    #[test]
+    fn attack_energy_regression_clamp_and_zero_costs() {
+        // A kill that would overshoot is clamped after the cost is taken: 90 + 40 − 1 → 100.
+        assert_eq!(energy_after_attack(true, 90.0, 40.0, 1.0, 0.25), 100.0);
+        assert_eq!(energy_after_attack(true, 50.0, 40.0, 1.0, 0.25), 89.0);
+        // hunt_cost 0 is the pre-shot rule: a kill adds kill_energy, only a miss costs fail_cost.
+        assert_eq!(energy_after_attack(true, 30.0, 40.0, 0.0, 0.25), 70.0);
+        assert_eq!(energy_after_attack(false, 30.0, 40.0, 0.0, 0.25), 29.75);
+        // fail_cost 0 leaves the property's bare form: a miss costs exactly hunt_cost.
+        assert_eq!(energy_after_attack(false, 30.0, 40.0, 2.0, 0.0), 28.0);
+        // Energy is not clamped below: a miss can take a hunter under 0, and it starves in its update.
+        assert_eq!(energy_after_attack(false, 1.0, 40.0, 2.0, 0.25), -1.25);
     }
 
     #[test]
@@ -871,6 +922,16 @@ mod tests {
             k in 0.0f32..8.0,
         ) {
             success_monotone_in_shrub(kill_prob, a, b, k)?;
+        }
+
+        #[test]
+        fn prop_attack_energy_accounting(
+            before in 0.0f32..=100.0,
+            kill in 0.0f32..=100.0,
+            hunt in 0.0f32..=5.0,
+            fail in prop::sample::select(vec![0.0f32, 0.25, 1.0]),
+        ) {
+            attack_energy_accounting(before, kill, hunt, fail)?;
         }
 
         #[test]

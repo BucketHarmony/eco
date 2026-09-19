@@ -307,6 +307,7 @@ fn forced_hunter_extinction_by_refractory_runs_to_the_end() {
 /// to 20000 ticks with valid snapshots, `ecosim stats` names `starved`, the predator–prey signature
 /// is reported as undefined with that cause, and the last snapshot restores.
 #[test]
+#[cfg_attr(coverage, ignore = "full-length run that reaches no line the unit tests miss; runs in `cargo test`")]
 fn forced_hunter_starvation_by_hunt_cost_runs_to_the_end() {
     let dir = tmp("forced_hunt_cost_extinction");
     let set = ["hunter.hunt_cost=5".to_string()];

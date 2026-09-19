@@ -32,6 +32,12 @@ opt-level = 1
 [dev-dependencies]
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 sha2 = "=0.11.0"
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+# Tick throughput against benches/baseline.json (DECISIONS.md, shot 15a).
+[[bench]]
+name = "tick"
+harness = false
 
 # cargo-llvm-cov builds with `--cfg coverage`; the tests use it to trim their cost (DECISIONS.md, Test hardening).
 [lints.rust]

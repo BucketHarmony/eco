@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
 use ecosim::check::{self, check_run, check_run_long, diff_runs, signature_line, stats_report};
-use ecosim::output::{fork, run_with, ForkSpec, RunOptions, FORMAT_VERSION};
+use ecosim::output::{fork, run_profiled, run_with, ForkSpec, RunOptions, FORMAT_VERSION};
 use ecosim::sweep::{baseline, margin_table, parse_range, parse_values, sweep, ParamSpec, SweepConfig};
 use ecosim::Params;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -36,6 +36,10 @@ enum Cmd {
         /// Run directory format: 3 writes `events.csv`; 2 writes the version-2 directory without it.
         #[arg(long, default_value_t = FORMAT_VERSION, value_parser = clap::value_parser!(u32).range(2..=3))]
         format_version: u32,
+        /// Write the wall time of each tick phase to this JSON file, which must lie outside --out.
+        /// The run directory is the same with and without it.
+        #[arg(long, value_name = "FILE")]
+        profile: Option<PathBuf>,
     },
     /// Continue a run from one of its snapshots into a new run directory, optionally with changed params.
     Fork {
@@ -160,11 +164,21 @@ fn parse_sweep(args: &[String]) -> Result<SweepCmd, String> {
     }
 }
 
+/// Whether `file` lies inside directory `dir` (compared as absolute paths, before either exists).
+fn inside(file: &Path, dir: &Path) -> bool {
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    abs(file).starts_with(abs(dir))
+}
+
 fn main() -> ExitCode {
     match Cli::parse().cmd {
-        Cmd::Run { seed, ticks, out, snapshot_every, params, set, snapshot_state, format_version } => {
+        Cmd::Run { seed, ticks, out, snapshot_every, params, set, snapshot_state, format_version, profile } => {
             if snapshot_every == 0 {
                 eprintln!("--snapshot-every must be > 0");
+                return ExitCode::FAILURE;
+            }
+            if profile.as_deref().is_some_and(|f| inside(f, &out)) {
+                eprintln!("--profile must be outside the run directory --out");
                 return ExitCode::FAILURE;
             }
             let p = match Params::load_with(&params, &set) {
@@ -175,7 +189,19 @@ fn main() -> ExitCode {
                 }
             };
             let opts = RunOptions { state: snapshot_state, format_version };
-            match run_with(p, seed, ticks, snapshot_every, &set, &out, opts) {
+            let result = match &profile {
+                None => run_with(p, seed, ticks, snapshot_every, &set, &out, opts),
+                Some(file) => run_profiled(p, seed, ticks, snapshot_every, &set, &out, opts).and_then(|(s, prof)| {
+                    let json = serde_json::to_string_pretty(&prof).map_err(std::io::Error::other)?;
+                    std::fs::write(
+                        file,
+                        json + "
+",
+                    )?;
+                    Ok(s)
+                }),
+            };
+            match result {
                 Ok(s) => {
                     let last = s.rows.last().unwrap();
                     println!(

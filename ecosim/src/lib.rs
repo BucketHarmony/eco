@@ -10,6 +10,7 @@ pub mod heredity;
 pub mod output;
 pub mod params;
 pub mod producers;
+pub mod profile;
 pub mod sim;
 pub mod state;
 pub mod sweep;

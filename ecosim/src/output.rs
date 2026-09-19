@@ -3,6 +3,7 @@
 use crate::animals::{Animal, State};
 use crate::events::{parse_events, Event, EVENTS_FILE, EVENTS_HEADER};
 use crate::params::Params;
+use crate::profile::{lap, Phase, Profile, Profiler};
 use crate::sim::{Sim, StatsRow};
 use crate::trees::Stage;
 use crate::world::ColClass;
@@ -299,14 +300,26 @@ pub fn simulate(
     ticks: u32,
     mut on_tick: impl FnMut(&mut Sim) -> io::Result<()>,
 ) -> io::Result<Vec<StatsRow>> {
+    simulate_profiled(sim, ticks, None, |s, _| on_tick(s))
+}
+
+/// [`simulate`], charging the step phases and the stats rows to `prof` when given; `on_tick` gets
+/// the profiler too, to charge its own work.
+pub fn simulate_profiled(
+    sim: &mut Sim,
+    ticks: u32,
+    mut prof: Option<&mut Profiler>,
+    mut on_tick: impl FnMut(&mut Sim, Option<&mut Profiler>) -> io::Result<()>,
+) -> io::Result<Vec<StatsRow>> {
     let mut rows = Vec::with_capacity(ticks as usize + 1);
     loop {
-        on_tick(sim)?;
+        on_tick(sim, prof.as_deref_mut())?;
         rows.push(sim.stats());
+        lap(&mut prof, Phase::StatsRow);
         if sim.tick >= ticks {
             return Ok(rows);
         }
-        sim.step();
+        sim.step_profiled(prof.as_deref_mut());
     }
 }
 
@@ -372,6 +385,43 @@ pub fn run_with(
     out: &Path,
     opts: RunOptions,
 ) -> io::Result<RunSummary> {
+    run_inner(params, &RunSpec { seed, ticks, snapshot_every, overrides }, out, opts, None)
+}
+
+/// [`run_with`] under a [`Profiler`] (`ecosim run --profile`): the same run directory, plus the
+/// wall time of each phase. The profile is returned, not written, so it never enters the run directory.
+pub fn run_profiled(
+    params: Params,
+    seed: u64,
+    ticks: u32,
+    snapshot_every: u32,
+    overrides: &[String],
+    out: &Path,
+    opts: RunOptions,
+) -> io::Result<(RunSummary, Profile)> {
+    let dims = crate::world::Dims::of(&params);
+    let mut prof = Profiler::start();
+    let spec = RunSpec { seed, ticks, snapshot_every, overrides };
+    let summary = run_inner(params, &spec, out, opts, Some(&mut prof))?;
+    Ok((summary, prof.report(seed, ticks, dims)))
+}
+
+/// What a fresh run simulates and records.
+struct RunSpec<'a> {
+    seed: u64,
+    ticks: u32,
+    snapshot_every: u32,
+    overrides: &'a [String],
+}
+
+fn run_inner(
+    params: Params,
+    spec: &RunSpec,
+    out: &Path,
+    opts: RunOptions,
+    mut prof: Option<&mut Profiler>,
+) -> io::Result<RunSummary> {
+    let &RunSpec { seed, ticks, snapshot_every, overrides } = spec;
     assert!(snapshot_every > 0, "snapshot_every must be > 0");
     assert!(matches!(opts.format_version, 2 | FORMAT_VERSION), "format_version must be 2 or {FORMAT_VERSION}");
     let start = Instant::now();
@@ -390,19 +440,30 @@ pub fn run_with(
     write_meta_info(&sim, &info, out)?;
     sim.log_events = opts.format_version >= 3;
     if sim.log_events {
-        fs::write(out.join(EVENTS_FILE), format!("{EVENTS_HEADER}\n"))?;
+        fs::write(
+            out.join(EVENTS_FILE),
+            format!(
+                "{EVENTS_HEADER}
+"
+            ),
+        )?;
     }
-    let rows = simulate(&mut sim, ticks, |s| {
+    lap(&mut prof, Phase::Setup);
+    let rows = simulate_profiled(&mut sim, ticks, prof.as_deref_mut(), |s, mut p| {
         if s.tick % snapshot_every == 0 {
             write_snapshot(s, out, opts.state)?;
+            lap(&mut p, Phase::SnapshotWrite);
             flush_events(&mut s.events, out)?;
+            lap(&mut p, Phase::Events);
         }
         Ok(())
     })?;
     flush_events(&mut sim.events, out)?;
+    lap(&mut prof, Phase::Events);
     fs::write(out.join("series.csv"), series_csv(&rows))?;
     let wall_ms = start.elapsed().as_millis();
     fs::write(out.join("timing.json"), format!("{{\"wall_ms\":{wall_ms}}}"))?;
+    lap(&mut prof, Phase::SeriesWrite);
     Ok(RunSummary { wall_ms, rows })
 }
 

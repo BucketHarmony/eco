@@ -790,3 +790,38 @@ The world size is now a parameter. `[world] width`, `depth`, `height` and `patch
   - With the 25000-tick amplitude envelope that the shot-14c cases use, the hunter autocorrelation's peak moves by up to 600 ticks on these long cycles: 14600 for 14000.
   - Periods of 15000–16000 read up to 550 short even under slower envelopes (40000 and 60000). The window holds only three or four such cycles, and the 12000-tick detrend removes part of each.
   - So the case uses a 60000-tick envelope and periods of 12500–14000, where 200 draws stay within 500. The shot's "a hunter cycle over 12000 ticks" is read as that range.
+
+## Performance baseline and tick profile (shot 15a)
+
+No sim rule, default or file format changed, and nothing was optimised. The manifest, golden files and fixtures are untouched. The measurements and recommendations are in `PERF.md`.
+
+**`ecosim run --profile <file>`** (`src/profile.rs`)
+- **A lap timer.** `Profiler::lap(phase)` charges the time since the previous lap to that phase. The laps sit between the steps of `Sim::step_profiled` and of the run driver (`output::run_profiled`), so the phases tile the run with no gaps. Their sum equals the total except for the time between the last lap and the report, which is dropping the `Sim`. That is under 0.1% on every measured run; the acceptance allows 5%.
+- **The phases.** The prompt names eight. The profile splits three more out of them and adds the two ends of the run:
+  - `setup`: the output directory, world generation with the BFS distances, initial populations and `meta.json`.
+  - `immigration`, `trees` and `compaction` are their own phases rather than folded into `animals` or `producers`, because they sit between them in the tick order.
+  - `series_write`: `series.csv` and `timing.json` at the end.
+  - `events` covers both the flush at each snapshot and the last flush.
+- **The totals.** `ticks_per_second` is over the whole run, writing included. `step_ticks_per_second` is over the `Sim::step` phases alone.
+- **What it never touches.** The timer reads only `Instant`. `Sim::step` is `step_profiled(None)`, and `simulate` is `simulate_profiled` with no profiler, so every other caller (sweeps and forks) runs exactly the code it ran before.
+- **Where the file goes.** `ecosim run` refuses a `--profile` path inside `--out` (compared as absolute paths, before anything is written), so the run directory is byte-identical with and without it. `profile_leaves_the_run_directory_unchanged_and_accounts_for_the_run` checks this, and checks the 5% sum.
+
+**The bench** (`benches/tick.rs`, criterion 0.8.2 without default features)
+- **What it runs.** 2000 ticks of seed 42 in memory through `output::simulate`, with stats rows and no files, on 64×64 (`common::SQUARE`'s overrides) and 256×64.
+  - `Sim::new` is outside the timed part, because world generation is a per-run constant and not a tick cost.
+- **Sampling.** Criterion runs 10 samples per world with 1 s of warm-up. Each sample is one 2000-tick run, since a run takes 0.5–2 s.
+- **The number compared.** The harness records every timed run, warm-up included, and compares their median as ticks per second. Criterion's own estimates are printed but not compared: its mean is pulled by outliers, and reading its JSON files would tie the check to its output layout.
+- **The gate.** A world fails when its ticks per second is below 0.8 × its baseline. Faster is never a failure. A shot that makes the sim faster on purpose should update the baseline, or the gate drifts loose.
+- **The CI job.** `ecosim-bench` is its own job with its own cache, so it runs beside the gate, and it uploads `ci-runs/bench-tick.json`.
+  - It is not a numbered gate step and not in `just ci`: its baseline belongs to the CI runner, and this machine's speed differs by more than 20%, including 2× from core migration (`PERF.md`).
+  - `just bench` runs it locally.
+  - `tests/ci.rs` checks that `ci.yml` runs it and uploads its numbers.
+
+**How `benches/baseline.json` was taken**
+1. The first shot-15a push had no `benches/baseline.json`, and the bench only reported.
+2. The file was then written from that CI run's `bench-tick.json` artifact, with the run id and commit recorded in it.
+3. The second push compares against it.
+
+A baseline taken on a GitHub runner carries the runner's variance. If the job flakes near 20% on unchanged code, the remedy is more samples, not a wider threshold.
+
+**Measuring on this machine.** The i9-12900KF has P- and E-cores. Windows moves a long single-threaded run onto an E-core after a few seconds, and it then runs about 2× slower. So `PERF.md`'s numbers come from runs pinned to the P-cores (`start /affinity FFFF`). Unpinned wall times from earlier shots, such as shot 15's 44–59 s strip runs, overstate the cost by up to 2×.

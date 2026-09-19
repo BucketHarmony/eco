@@ -584,3 +584,45 @@ fn rng_stream_0_is_the_default_stream_and_others_differ() {
     );
     assert!(!differs.iter().any(|d| d.ends_with("height.bin")), "{differs:?}");
 }
+
+/// `ecosim run --profile` (shot 15a): the same seed with and without the profiler writes
+/// byte-identical run directories, the profile lies outside them, and its phase times sum to within
+/// 5% of its total. A profile path inside `--out` is refused before anything is written.
+#[test]
+fn profile_leaves_the_run_directory_unchanged_and_accounts_for_the_run() {
+    let exe = Path::new(env!("CARGO_BIN_EXE_ecosim"));
+    let (a, b, file) = (tmp("profile_off"), tmp("profile_on"), tmp("profile.json"));
+    let params = Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml");
+    let run = |out: &Path, extra: &[&Path]| {
+        let mut cmd = Command::new(exe);
+        cmd.args(["run", "--seed", "42", "--ticks", "600", "--snapshot-every", "200", "--params"]).arg(&params);
+        cmd.arg("--out").arg(out);
+        if let Some(f) = extra.first() {
+            cmd.arg("--profile").arg(f);
+        }
+        cmd.status().expect("spawn ecosim run").success()
+    };
+    assert!(run(&a, &[]));
+    assert!(run(&b, &[&file]));
+    assert_same_run(exe, &a, &b);
+    assert!(!fs::read_dir(&b).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("profile")));
+
+    let p = read_json(&file);
+    let (total, sum) = (p["total_ms"].as_f64().unwrap(), p["phase_sum_ms"].as_f64().unwrap());
+    let phases = p["phases"].as_array().unwrap();
+    let listed: f64 = phases.iter().map(|ph| ph["ms"].as_f64().unwrap()).sum();
+    assert!((listed - sum).abs() < 1e-6 * total.max(1.0), "{listed} vs {sum}");
+    assert!(total > 0.0 && (total - sum).abs() <= 0.05 * total, "phases sum to {sum} ms of {total} ms");
+    let names: Vec<&str> = phases.iter().map(|ph| ph["name"].as_str().unwrap()).collect();
+    let want = ["animals", "producers", "moisture_fertility", "temperature_season", "fire", "events", "snapshot_write"];
+    for name in want.iter().chain(&["stats_row"]) {
+        assert!(names.contains(name), "no phase {name} in {names:?}");
+    }
+    assert_eq!((p["ticks"].as_u64(), p["seed"].as_u64()), (Some(600), Some(42)));
+    assert_eq!(p["dims"], serde_json::json!([256, 64, 32, 8]));
+    assert!(p["ticks_per_second"].as_f64().unwrap() > 0.0);
+
+    let c = tmp("profile_inside");
+    assert!(!run(&c, &[&c.join("profile.json")]));
+    assert!(!c.exists());
+}

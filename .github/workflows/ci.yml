@@ -154,6 +154,41 @@ jobs:
           ./target/release/ecosim run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000
           ./target/release/ecosim check --long ci-runs/long-s1
 
+  # Tick throughput (ecosim/benches/tick.rs, DECISIONS.md shot 15a): 2000 ticks of seed 42 on the
+  # 64x64 and 256x64 worlds, failing on a slowdown of more than 20% against benches/baseline.json,
+  # whose numbers come from this job's bench-tick.json artifact.
+  ecosim-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ecosim/target
+          key: ${{ runner.os }}-bench-cargo-${{ hashFiles('ecosim/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-bench-cargo-
+
+      - name: build bench
+        run: cargo bench --bench tick --no-run
+
+      - name: bench against baseline
+        run: cargo bench --bench tick
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-tick
+          path: ecosim/ci-runs/bench-tick.json
+          if-no-files-found: error
+
   # ecoview gate: build the seed-42 run it renders, then build, unit + scenario tests, screenshots and the s42 films (single-view and 2x2 tiled).
   # shot:check compares against references rendered on the platform in shots/reference/PLATFORM, so it
   # runs only on a matching runner; elsewhere it is skipped with a notice (ecoview/DECISIONS.md, Shot 6).

@@ -4,6 +4,7 @@ use crate::animals::{Animal, Kind, CAUSES};
 use crate::events::Event;
 use crate::heredity::{trait_stats, TraitStats, Traits, TRAIT_CLAMP};
 use crate::params::Params;
+use crate::profile::{lap, Phase, Profiler};
 use crate::trees::Tree;
 use crate::world::{ColClass, Dims, World};
 use rand::{Rng, SeedableRng};
@@ -301,25 +302,39 @@ impl Sim {
     /// (every 10) → temperature (every 100).
     /// Snapshots and stats rows are taken by the caller after this returns.
     pub fn step(&mut self) {
+        self.step_profiled(None);
+    }
+
+    /// [`Sim::step`], charging each phase's wall time to `prof` when given. The timer never
+    /// touches sim state, so the step is the same with and without it.
+    pub fn step_profiled(&mut self, mut prof: Option<&mut Profiler>) {
         self.tick += 1;
         self.deaths = Deaths::default();
         let t = self.tick;
         self.update_animals();
+        lap(&mut prof, Phase::Animals);
         self.immigrate(t);
+        lap(&mut prof, Phase::Immigration);
         self.update_producers(t);
+        lap(&mut prof, Phase::Producers);
         if t.is_multiple_of(self.params.tree.update_every) {
             self.update_trees();
         }
+        lap(&mut prof, Phase::Trees);
         self.update_fire(t);
+        lap(&mut prof, Phase::Fire);
         if t.is_multiple_of(10) {
             self.update_soil(t);
         }
+        lap(&mut prof, Phase::MoistureFertility);
         if t.is_multiple_of(100) {
             self.update_temperature(t);
         }
+        lap(&mut prof, Phase::TemperatureSeason);
         if t.is_multiple_of(self.params.world.compact_every) {
             self.compact();
         }
+        lap(&mut prof, Phase::Compaction);
     }
 
     /// Remove dead entities and rebuild the trunk index.

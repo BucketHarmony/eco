@@ -48,3 +48,8 @@ cross:
 # 9: one 60000-tick run under the long-run invariants (`check --long`)
 long:
     {{ecosim}} run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000 && {{ecosim}} check --long ci-runs/long-s1
+
+# Not part of `ci`: the tick bench (its own job in ci.yml). benches/baseline.json holds CI-runner numbers,
+# so a local run's comparison says little about a regression (DECISIONS.md, shot 15a).
+bench:
+    cargo bench --bench tick

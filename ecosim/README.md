@@ -21,7 +21,11 @@ ecosim stats --signature runs/s1             # predator–prey signature: lag, v
 ecosim diff runs/a runs/b                    # byte-compare two run directories
 ecosim fork runs/s1 --at 10000 --ticks 10000 --out runs/f1 [--set key=value ...]   # continue from a snapshot
 ecosim sweep --baseline --seeds 1,2,3        # margin table; see `ecosim sweep --help`
+ecosim run --seed 42 --ticks 2000 --out runs/p --profile p.json   # also write wall time per tick phase (outside --out)
+cargo bench --bench tick                     # ticks/s on 64x64 and 256x64 against benches/baseline.json
 ```
+
+`PERF.md` has the performance baseline: per-phase profiles, full-run wall times, hotspots and recommendations.
 
 ## CI gate
 
@@ -36,6 +40,8 @@ CI is defined in `../.github/workflows/ci.yml`. The `justfile` in this directory
 7. `ecosim sweep --baseline --seeds 1,2,3`, writing `ci-runs/baseline-margins.txt`
 8. `cargo test --release` of the determinism tests with `ECOSIM_REQUIRE_CROSS=1`. This requires the debug and release binaries to write identical run directories.
 9. `ecosim run` on seed 1 for 60000 ticks, then `ecosim check --long` on it
+
+A separate job, `ecosim-bench`, runs `cargo bench --bench tick` and fails when either world is more than 20% slower than `benches/baseline.json` (CI-runner numbers). It is not part of `just ci`; `just bench` runs it locally.
 
 To run it locally, first install the two tools once:
 

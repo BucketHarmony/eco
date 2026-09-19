@@ -58,6 +58,14 @@ fn ci_workflow_runs_the_required_steps_in_order() {
     }
     assert!(yml.contains("ECOSIM_REQUIRE_CROSS=1 cargo test --release"), "ci.yml: no release determinism step");
     assert!(yml.contains("hashFiles('ecosim/Cargo.lock')"), "ci.yml: cache not keyed on Cargo.lock");
+    assert!(
+        yml.contains(
+            "run: cargo bench --bench tick
+"
+        ),
+        "ci.yml: no tick bench step"
+    );
+    assert!(yml.contains("path: ecosim/ci-runs/bench-tick.json"), "ci.yml: no upload of the bench numbers");
 }
 
 #[test]

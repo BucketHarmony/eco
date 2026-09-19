@@ -445,7 +445,15 @@ mod tests {
         sim.spawn_grazer(9, 9);
         sim.grazers[0].energy = 50.0;
         let id = sim.alloc_id();
-        sim.hunters.push(Animal::new(id, Kind::Hunter, 13, 13, 50.0, 0, 100));
+        sim.hunters.push(Animal::new(
+            id,
+            Kind::Hunter,
+            (13, 13),
+            50.0,
+            0,
+            100,
+            sim.params.default_traits(Kind::Hunter),
+        ));
         sim.update_animals();
         let (g, h) = (&sim.grazers[0], &sim.hunters[0]);
         assert_eq!((g.state, h.state), (State::Flee, State::Flee));

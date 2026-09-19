@@ -1,6 +1,7 @@
 //! Simulation state and the fixed tick order.
 
 use crate::animals::{Animal, Kind, CAUSES};
+use crate::heredity::{trait_stats, TraitStats, Traits, TRAIT_CLAMP};
 use crate::params::Params;
 use crate::trees::Tree;
 use crate::world::{patch_of, ColClass, World, COLS, PATCHES, WX};
@@ -57,6 +58,8 @@ pub struct StatsRow {
     pub patches_burning: u32,
     /// Patches that have burnt out so far (cumulative).
     pub total_burnt: u32,
+    /// Heritable trait means and standard deviations per species.
+    pub traits: TraitStats,
 }
 
 /// Marks a column with no trunk in `Sim::trunk_at`.
@@ -78,6 +81,12 @@ pub(crate) fn offsets_within(r: f32) -> Vec<(i32, i32, i32)> {
         .collect();
     v.sort_by_key(|&(dx, dy, d2)| (d2, dy, dx));
     v
+}
+
+/// Column offsets out to the largest grazer `flee_distance` the trait clamp allows, nearest first.
+/// Each grazer uses the prefix within its own distance.
+pub(crate) fn flee_offsets(params: &Params) -> Vec<(i32, i32, i32)> {
+    offsets_within(params.grazer.flee_radius * TRAIT_CLAMP.1)
 }
 
 /// The whole simulation state.
@@ -114,7 +123,7 @@ pub struct Sim {
     pub hunters_in_patch: Vec<u32>,
     /// Column offsets within the hunter seek radius, nearest first.
     pub seek_offsets: Vec<(i32, i32, i32)>,
-    /// Column offsets within the grazer flee radius, nearest first.
+    /// Column offsets within the largest grazer flee distance, nearest first.
     pub flee_offsets: Vec<(i32, i32, i32)>,
     /// Ticks completed.
     pub tick: u32,
@@ -184,7 +193,7 @@ impl Sim {
             total_burnt: 0,
         };
         sim.seek_offsets = offsets_within(sim.params.hunter.seek_radius);
-        sim.flee_offsets = offsets_within(sim.params.grazer.flee_radius);
+        sim.flee_offsets = flee_offsets(&sim.params);
         sim.place_initial_trees();
         sim.place_initial_animals();
         sim.rebuild_grazer_grid();
@@ -201,6 +210,8 @@ impl Sim {
         p.hunter.start_count = 0;
         p.hunter.immigration_floor = 0;
         p.grazer.immigration_floor = 0;
+        p.tree.immigration_floor = 0;
+        p.heredity.mutation = 0.0;
         p.fire.base_rate = 0.0;
         p.disease.grazer_rate = 0.0;
         p.disease.hunter_rate = 0.0;
@@ -211,7 +222,7 @@ impl Sim {
     /// Replace the params from the next step on (`ecosim fork --set`), recomputing what is derived from them.
     pub fn set_params(&mut self, params: Params) {
         self.seek_offsets = offsets_within(params.hunter.seek_radius);
-        self.flee_offsets = offsets_within(params.grazer.flee_radius);
+        self.flee_offsets = flee_offsets(&params);
         self.params = params;
     }
 
@@ -256,7 +267,8 @@ impl Sim {
                 let age = self.rng.gen_range(0..age_max.max(1));
                 let cooldown = self.rng.gen_range(0..=cd);
                 let id = self.alloc_id();
-                let a = Animal::new(id, kind, x, y, energy, age, cooldown);
+                let traits: Traits = self.params.default_traits(kind);
+                let a = Animal::new(id, kind, (x, y), energy, age, cooldown, traits);
                 match kind {
                     Kind::Grazer => {
                         self.grazers_in_patch[patch_of(x, y)] += 1;
@@ -360,6 +372,7 @@ impl Sim {
             deaths: self.deaths,
             patches_burning: self.patches.iter().filter(|p| p.burning_ticks_left > 0).count() as u32,
             total_burnt: self.total_burnt,
+            traits: [trait_stats(&self.grazers), trait_stats(&self.hunters)],
         }
     }
 }

@@ -2,7 +2,7 @@
 //! themselves live in [`evaluate`], which `check` and `sweep` share.
 
 use crate::animals::{Cause, CAUSES};
-use crate::output::{snapshot_dir_name, SERIES_FIELDS, SERIES_HEADER};
+use crate::output::{snapshot_dir_name, SERIES_FIELDS, SERIES_HEADER, TRAIT_FIELDS};
 use crate::sim::StatsRow;
 use std::collections::BTreeSet;
 use std::fs;
@@ -20,8 +20,14 @@ pub const LONG_BAND_FROM: u32 = 20_000;
 /// Runtime invariant limit for a 20000-tick run, in milliseconds.
 pub const RUNTIME_LIMIT_MS: u64 = 30_000;
 
-/// The fire columns `series.csv` gained in shot 9.
-const PRE_FIRE_TAIL: &str = ",patches_burning,total_burnt";
+/// Number of fire columns `series.csv` gained in shot 9.
+const FIRE_FIELDS: usize = 2;
+
+/// `SERIES_HEADER` without its last `cut` columns: the header an older ecosim wrote.
+fn header_without(cut: usize) -> &'static str {
+    let at = SERIES_HEADER.match_indices(',').nth(SERIES_FIELDS - cut - 1).map_or(SERIES_HEADER.len(), |(i, _)| i);
+    &SERIES_HEADER[..at]
+}
 
 /// Read and parse `series.csv` from a run directory.
 pub fn read_series(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
@@ -33,15 +39,15 @@ pub fn read_series(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
 /// Parse `series.csv` text. Sweeps parse their own in-memory CSV through this too, so a sweep cell
 /// is evaluated on exactly the values a run directory would hold.
 ///
-/// Runs written before fire existed (the header without its last two columns) still parse, with
-/// no burning recorded.
+/// Runs written before the trait columns (shot 11) or before fire (shot 9) as well still parse, with
+/// the missing columns read as 0.
 pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
     let mut lines = text.lines();
-    let fields = match lines.next() {
-        Some(SERIES_HEADER) => SERIES_FIELDS,
-        Some(h) if SERIES_HEADER.strip_suffix(PRE_FIRE_TAIL) == Some(h) => SERIES_FIELDS - 2,
-        _ => return Err("unexpected header".into()),
-    };
+    let header = lines.next().ok_or("unexpected header")?;
+    let fields = [SERIES_FIELDS, SERIES_FIELDS - TRAIT_FIELDS, SERIES_FIELDS - TRAIT_FIELDS - FIRE_FIELDS]
+        .into_iter()
+        .find(|&n| header_without(SERIES_FIELDS - n) == header)
+        .ok_or("unexpected header")?;
     lines
         .enumerate()
         .map(|(i, line)| {
@@ -64,8 +70,17 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                 temperature: x(9)?,
                 hunter_immigrants: u(10)?,
                 deaths: [[u(11)?, u(12)?, u(13)?, u(14)?, u(15)?], [u(16)?, u(17)?, u(18)?, u(19)?, u(20)?]],
-                patches_burning: if fields == SERIES_FIELDS { u(21)? } else { 0 },
-                total_burnt: if fields == SERIES_FIELDS { u(22)? } else { 0 },
+                patches_burning: if fields > 21 { u(21)? } else { 0 },
+                total_burnt: if fields > 21 { u(22)? } else { 0 },
+                traits: if fields == SERIES_FIELDS {
+                    let mut t = [[0.0; TRAIT_FIELDS / 2]; 2];
+                    for (k, v) in t.iter_mut().flatten().enumerate() {
+                        *v = x(23 + k)?;
+                    }
+                    t
+                } else {
+                    Default::default()
+                },
             })
         })
         .collect()
@@ -665,6 +680,7 @@ mod tests {
                 deaths: Default::default(),
                 patches_burning: 0,
                 total_burnt: 0,
+                traits: Default::default(),
             })
             .collect()
     }
@@ -768,6 +784,7 @@ mod tests {
                 deaths: Default::default(),
                 patches_burning: 0,
                 total_burnt: 0,
+                traits: Default::default(),
             })
             .collect();
         Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms) }

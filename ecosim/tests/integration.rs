@@ -240,15 +240,23 @@ fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
 
 /// Forced extinction by fire: every patch can ignite at any temperature and fire kills any animal
 /// in one tick, so both animal species burn out on seed 1 (hunters at tick 1333, grazers at 1611).
+/// Mutation is off (`heredity.mutation=0`) so fire is the only thing forced: with it on, 709 grazers
+/// outlast the fires on seed 1.
 /// The run continues to 20000 ticks with valid snapshots, fires keep burning, and `ecosim stats`
 /// names `burnt` as the dominant cause of both extinctions.
 #[test]
 fn forced_fire_extinction_runs_to_the_end_and_is_attributed_to_fire() {
     let dir = tmp("forced_fire_extinction");
-    let set: Vec<String> = ["fire.base_rate=1", "fire.temp_min=-50", "fire.temp_full=-40", "fire.animal_damage=100"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let set: Vec<String> = [
+        "fire.base_rate=1",
+        "fire.temp_min=-50",
+        "fire.temp_full=-40",
+        "fire.animal_damage=100",
+        "heredity.mutation=0",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     let last = run_with(&dir, &set);
     assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species burnt out");
     assert!(last.total_burnt > 1000, "total_burnt {}", last.total_burnt);
@@ -294,14 +302,48 @@ fn forced_hunter_extinction_by_refractory_runs_to_the_end() {
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
 
+/// Forced extinction under heredity: at `grazer.repro_energy=400` no grazer can ever breed (energy
+/// tops out at 100, and the clamp keeps `repro_threshold` at 100 or more), so with mutation 0.2 the
+/// grazers are eaten out on seed 1 (tick 2285) and the hunters starve after them. The run continues
+/// to 20000 ticks with valid snapshots and no NaN. Grazer trait deviations stay 0 (no grazer is ever
+/// born), hunter ones rise above 0 (hunters breed and mutate), and both species' trait columns read
+/// 0 once they are extinct. `entities.json` animals carry the three traits, and the last snapshot
+/// restores.
+#[test]
+fn forced_grazer_extinction_under_heredity_runs_to_the_end() {
+    let dir = tmp("forced_heredity_extinction");
+    let set = ["grazer.repro_energy=400".to_string(), "heredity.mutation=0.2".to_string()];
+    let last = run_with(&dir, &set);
+    assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species extinct by the end");
+    assert_eq!(last.traits, [[0.0; 6]; 2], "trait columns of extinct species");
+    let text = assert_valid_run(&dir);
+    let line = text.lines().find(|l| l.starts_with("extinction: grazers at tick")).unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("dominant cause: eaten"), "{line}");
+    let series = ecosim::check::parse_series(&fs::read_to_string(dir.join("series.csv")).unwrap()).unwrap();
+    assert!(series.iter().all(|r| r.traits[0][1] == 0.0 && r.traits[0][3] == 0.0 && r.traits[0][5] == 0.0));
+    assert!(series.iter().any(|r| r.traits[1][1] > 0.0), "hunter energy_cost_mult never varied");
+    let ents = read_json(&dir.join("snap_001000").join("entities.json"));
+    let animals: Vec<&Value> = ents.as_array().unwrap().iter().filter(|e| e["kind"] != "tree").collect();
+    assert!(!animals.is_empty());
+    for a in animals {
+        for k in ["energy_cost_mult", "flee_distance", "repro_threshold"] {
+            assert!(a[k].as_f64().is_some_and(f64::is_finite), "{a}");
+        }
+    }
+    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
+    assert_eq!((sim.tick, sim.count_grazers()), (20_000, 0), "the last snapshot restores");
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name)
 }
 
-/// Format version 2 and fire only add files, fields and columns. A fresh seed-42 mini run with fire
-/// and crowding off and the hunter refractory at the old cooldown, with the fire additions cut
-/// (`common::without_fire`), is the v1 fixture byte for byte apart from `meta.json` (the version,
-/// `forked_from`, the `[fire]` and `[disease]` params and the cooldown's new name) and the new
+/// Format version 2, fire and traits only add files, fields and columns. A fresh seed-42 mini run
+/// with fire, crowding and mutation off and the hunter refractory at the old cooldown, with the trait
+/// and fire additions cut (`common::without_traits`, `common::without_fire`), is the v1 fixture byte
+/// for byte apart from `meta.json` (the version, `forked_from`, the `[fire]`, `[disease]` and
+/// `[heredity]` params, the new immigration and flee keys, and the cooldown's new name) and the new
 /// `state.bin` files. The committed v2 fixture is the same command at the defaults, and is current.
 #[test]
 fn format_2_and_fire_only_add_to_version_1_files() {
@@ -312,8 +354,12 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     p.disease.grazer_rate = 0.0;
     p.disease.hunter_rate = 0.0;
     p.hunter.refractory = 5000;
+    p.heredity.mutation = 0.0;
     run(p, 42, 100, 100, &[], &fresh).unwrap();
-    let cut = |rel: &str| common::without_fire(Path::new(rel), fs::read(fresh.join(rel)).unwrap());
+    let cut = |rel: &str| {
+        let f = Path::new(rel);
+        common::without_fire(f, common::without_traits(f, fs::read(fresh.join(rel)).unwrap()))
+    };
     assert!(cut("series.csv") == fs::read(v1.join("series.csv")).unwrap(), "series.csv");
     for snap in ["snap_000000", "snap_000100"] {
         let files: Vec<_> = fs::read_dir(v1.join(snap)).unwrap().map(|e| e.unwrap().file_name()).collect();
@@ -338,7 +384,12 @@ fn format_2_and_fire_only_add_to_version_1_files() {
         let params = o["params"].as_object_mut().unwrap();
         params.remove("fire");
         params.remove("disease");
+        params.remove("heredity");
         params["hunter"].as_object_mut().unwrap().remove(key);
+        params["hunter"].as_object_mut().unwrap().remove("flee_radius");
+        for k in ["immigration_floor", "immigration_interval"] {
+            params["tree"].as_object_mut().unwrap().remove(k);
+        }
     }
     assert_eq!(a, b);
 

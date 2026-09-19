@@ -75,6 +75,8 @@ death_detritus = 40.0
 light = [60.0, 150.0, 255.0, 256.0]
 moisture = [30.0, 100.0, 255.0, 256.0]
 temp = [-3.0, 2.0, 26.0, 31.0]
+immigration_floor = 0
+immigration_interval = 500
 
 [grazer]
 start_count = 300
@@ -119,6 +121,7 @@ fail_cost = 0.25
 displace_steps = 3
 refugium_k = 2.0
 seek_radius = 16.0
+flee_radius = 4.0
 immigration_floor = 0
 immigration_interval = 500
 
@@ -142,3 +145,7 @@ grazer_rate = 0.001
 grazer_threshold = 16
 hunter_rate = 0.001
 hunter_threshold = 4
+
+[heredity]
+# Heritable animal traits (shot 11). mutation 0 switches it off: newborns copy their parent, no draws.
+mutation = 0.05

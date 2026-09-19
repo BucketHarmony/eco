@@ -17,11 +17,15 @@ use std::time::Instant;
 pub const FORMAT_VERSION: u32 = 2;
 
 /// The first line of `series.csv`. Columns 11–20 are that tick's deaths by species and cause,
-/// grazers then hunters, causes in `Cause` order; the last two are the fire columns.
-pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt,patches_burning,total_burnt";
+/// grazers then hunters, causes in `Cause` order; 21–22 are the fire columns; the last 12 are the
+/// mean and standard deviation of each heritable trait, grazers then hunters (`TraitStats` order).
+pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt,patches_burning,total_burnt,grazer_energy_cost_mult_mean,grazer_energy_cost_mult_sd,grazer_flee_distance_mean,grazer_flee_distance_sd,grazer_repro_threshold_mean,grazer_repro_threshold_sd,hunter_energy_cost_mult_mean,hunter_energy_cost_mult_sd,hunter_flee_distance_mean,hunter_flee_distance_sd,hunter_repro_threshold_mean,hunter_repro_threshold_sd";
 
 /// Number of fields in a `series.csv` line.
-pub const SERIES_FIELDS: usize = 23;
+pub const SERIES_FIELDS: usize = 35;
+
+/// Number of trait columns at the end of a `series.csv` line.
+pub const TRAIT_FIELDS: usize = 12;
 
 #[derive(Serialize)]
 struct Dims {
@@ -101,6 +105,9 @@ struct AnimalOut {
     energy: f32,
     age: u32,
     state: State,
+    energy_cost_mult: f32,
+    flee_distance: f32,
+    repro_threshold: f32,
 }
 
 #[derive(Serialize)]
@@ -135,6 +142,9 @@ pub fn format_row(r: &StatsRow) -> String {
         let _ = write!(line, ",{n}");
     }
     let _ = write!(line, ",{},{}", r.patches_burning, r.total_burnt);
+    for v in r.traits.iter().flatten() {
+        let _ = write!(line, ",{v:.4}");
+    }
     line
 }
 
@@ -173,6 +183,9 @@ fn entities(sim: &Sim) -> Vec<EntityOut> {
                 energy: a.energy,
                 age: a.age,
                 state: a.state,
+                energy_cost_mult: a.traits.energy_cost_mult,
+                flee_distance: a.traits.flee_distance,
+                repro_threshold: a.traits.repro_threshold,
             }));
         }
     }

@@ -1,12 +1,12 @@
 //! `state.bin`: the part of a snapshot the other files don't hold exactly, and the restore path that
 //! turns a snapshot directory back into a `Sim` that steps identically to the one that wrote it.
 //!
-//! Layout (version 2), all integers and floats little-endian, no padding:
+//! Layout (version 3), all integers and floats little-endian, no padding:
 //!
 //! | field | type |
 //! |---|---|
 //! | magic | `b"ECOSTATE"` |
-//! | state version | u32 = 2 |
+//! | state version | u32 = 3 |
 //! | tick, next_id, hunter_immigrants | 3 × u32 |
 //! | RNG seed, stream, word position | [u8; 32], u64, u128 |
 //! | deaths this tick | 2 × 5 × u32 (grazers then hunters, `Cause` order) |
@@ -16,16 +16,19 @@
 //! | grazers, hunters | each: u32 count, then per animal: id u32, x f32, y f32, energy f32, age u32, cooldown u32, state u8, alive u8 |
 //! | grazer grid | per column (4096): u32 length, then that many u32 grazer indices |
 //! | fire | total_burnt u32, then 64 × burning_ticks_left u32 (patch order) |
+//! | traits | per grazer, then per hunter (`Vec` order): energy_cost_mult, flee_distance, repro_threshold f32 |
 //!
-//! Version 2 is version 1 with the fire section appended; nothing before it moved.
+//! Version 2 is version 1 with the fire section appended, and version 3 is version 2 with the traits
+//! section appended; nothing before either moved.
 //!
 //! Entities are stored in `Vec` order, dead ones included, because indices into the Vecs (the trunk
 //! index, the grids) and the update order depend on it. Everything else a `Sim` holds is recomputed
 //! on load, and the recompute is tested to be bit-identical (DECISIONS.md, "Full-state snapshots").
 
 use crate::animals::{Animal, Kind, State};
+use crate::heredity::Traits;
 use crate::params::Params;
-use crate::sim::{offsets_within, Deaths, Patch, Sim, NO_TREE};
+use crate::sim::{flee_offsets, offsets_within, Deaths, Patch, Sim, NO_TREE};
 use crate::trees::Tree;
 use crate::world::{patch_of, World, COLS, PATCHES, ROCK, SOIL, VOXELS, WX, WY, WZ};
 use rand_chacha::rand_core::SeedableRng;
@@ -36,7 +39,7 @@ use std::path::Path;
 /// First bytes of every `state.bin`.
 pub const MAGIC: &[u8; 8] = b"ECOSTATE";
 /// `state.bin` layout version; `decode` rejects any other.
-pub const STATE_VERSION: u32 = 2;
+pub const STATE_VERSION: u32 = 3;
 
 const STATES: [State; 6] = [State::Flee, State::Eat, State::Move, State::Wander, State::Rest, State::Hunt];
 
@@ -92,6 +95,11 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
     b.extend_from_slice(&sim.total_burnt.to_le_bytes());
     for p in &sim.patches {
         b.extend_from_slice(&p.burning_ticks_left.to_le_bytes());
+    }
+    for a in sim.grazers.iter().chain(&sim.hunters) {
+        for v in a.traits.as_array() {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
     }
     b
 }
@@ -158,6 +166,9 @@ struct Decoded {
     total_burnt: u32,
 }
 
+/// Placeholder traits for a decoded animal until the traits section is read.
+const NO_TRAITS: Traits = Traits { energy_cost_mult: 0.0, flee_distance: 0.0, repro_threshold: 0.0 };
+
 fn decode_animals(r: &mut Reader, kind: Kind) -> Result<Vec<Animal>, String> {
     let n = r.count("animal")?;
     (0..n)
@@ -171,7 +182,7 @@ fn decode_animals(r: &mut Reader, kind: Kind) -> Result<Vec<Animal>, String> {
             if !(0.0..WX as f32).contains(&x) || !(0.0..WY as f32).contains(&y) {
                 return Err(format!("state.bin: animal {id} off the world at ({x}, {y})"));
             }
-            Ok(Animal { id, kind, x, y, energy, age, cooldown, state, alive })
+            Ok(Animal { id, kind, x, y, energy, age, cooldown, state, alive, traits: NO_TRAITS })
         })
         .collect()
 }
@@ -217,8 +228,8 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
             Ok(Tree { id, x, y, age, dry_ticks, lifespan, alive: r.flag()? })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let grazers = decode_animals(&mut r, Kind::Grazer)?;
-    let hunters = decode_animals(&mut r, Kind::Hunter)?;
+    let mut grazers = decode_animals(&mut r, Kind::Grazer)?;
+    let mut hunters = decode_animals(&mut r, Kind::Hunter)?;
     let grazer_grid = (0..COLS)
         .map(|_| {
             let n = r.count("grid cell")?;
@@ -237,6 +248,9 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
     let mut patches = patches;
     for p in &mut patches {
         p.burning_ticks_left = r.u32()?;
+    }
+    for a in grazers.iter_mut().chain(&mut hunters) {
+        a.traits = Traits::from_array([r.f32()?, r.f32()?, r.f32()?]);
     }
     if r.at != bytes.len() {
         return Err(format!("state.bin: {} trailing bytes", bytes.len() - r.at));
@@ -295,7 +309,7 @@ impl Sim {
         world.light = light;
         let mut sim = Sim {
             seek_offsets: offsets_within(params.hunter.seek_radius),
-            flee_offsets: offsets_within(params.grazer.flee_radius),
+            flee_offsets: flee_offsets(&params),
             params,
             rng: d.rng,
             world,

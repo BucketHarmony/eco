@@ -1,5 +1,6 @@
 //! Grazers and hunters: fixed-priority behaviour, energy, reproduction and death.
 
+use crate::heredity::Traits;
 use crate::sim::Sim;
 use crate::world::{cidx, patch_of, ColClass, PATCHES_X, UNREACHABLE, WX, WY};
 use rand::Rng;
@@ -82,6 +83,8 @@ pub struct Animal {
     pub state: State,
     /// False once dead; removed at the next compaction.
     pub alive: bool,
+    /// Heritable traits, used in place of the species parameters they name.
+    pub traits: Traits,
 }
 
 /// The 8 neighbour offsets, in a fixed order so random picks are deterministic.
@@ -89,8 +92,16 @@ const NEIGHBOURS: [(i32, i32); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0)
 
 impl Animal {
     /// A live animal on column (x, y), in state Wander.
-    pub fn new(id: u32, kind: Kind, x: usize, y: usize, energy: f32, age: u32, cooldown: u32) -> Animal {
-        Animal { id, kind, x: x as f32, y: y as f32, energy, age, cooldown, state: State::Wander, alive: true }
+    pub fn new(
+        id: u32,
+        kind: Kind,
+        (x, y): (usize, usize),
+        energy: f32,
+        age: u32,
+        cooldown: u32,
+        traits: Traits,
+    ) -> Animal {
+        Animal { id, kind, x: x as f32, y: y as f32, energy, age, cooldown, state: State::Wander, alive: true, traits }
     }
 
     /// The column it stands on, as signed coordinates.
@@ -253,20 +264,22 @@ impl Sim {
 
     /// Animals phase: grazers in Vec order, then hunters. Newborns act from the next tick.
     /// Crowding mortality is checked per species here, once, so a rate of 0 never reaches a draw.
+    /// So is mutation: at `heredity.mutation` 0 newborns copy their parent's traits with no draw.
     pub fn update_animals(&mut self) {
         self.rebuild_hunter_grid();
         let d = &self.params.disease;
         let (grazer_crowding, hunter_crowding) = (d.grazer_rate > 0.0, d.hunter_rate > 0.0);
+        let mutate = self.params.heredity.mutation > 0.0;
         let n = self.grazers.len();
         for i in 0..n {
             if self.grazers[i].alive {
-                self.update_grazer(i, grazer_crowding);
+                self.update_grazer(i, grazer_crowding, mutate);
             }
         }
         let n = self.hunters.len();
         for i in 0..n {
             if self.hunters[i].alive {
-                self.update_hunter(i, hunter_crowding);
+                self.update_hunter(i, hunter_crowding, mutate);
             }
         }
     }
@@ -278,9 +291,12 @@ impl Sim {
         p > 0.0 && self.rng.gen_bool(p)
     }
 
-    /// Nearest live hunter within the flee radius of column (x, y); lowest index wins ties.
-    fn nearest_hunter(&self, x: i32, y: i32) -> Option<(f32, f32)> {
-        nearest_in_grid(&self.hunter_grid, &self.flee_offsets, x, y, |_| true)
+    /// Nearest live hunter within `flee_distance` of column (x, y); lowest index wins ties. The
+    /// offsets are the prefix of `flee_offsets` (built for the largest distance the clamp allows)
+    /// that lies within `flee_distance`: the same list `offsets_within(flee_distance)` builds.
+    pub(crate) fn nearest_hunter(&self, x: i32, y: i32, flee_distance: f32) -> Option<(f32, f32)> {
+        let n = self.flee_offsets.partition_point(|&(_, _, d2)| (d2 as f32).sqrt() <= flee_distance);
+        nearest_in_grid(&self.hunter_grid, &self.flee_offsets[..n], x, y, |_| true)
             .map(|(j, _)| (self.hunters[j].x, self.hunters[j].y))
     }
 
@@ -327,7 +343,7 @@ impl Sim {
         self.greedy_step(x, y, cx, cy, -1.0)
     }
 
-    fn update_grazer(&mut self, i: usize, crowding: bool) {
+    pub(crate) fn update_grazer(&mut self, i: usize, crowding: bool, mutate: bool) {
         let gp = self.params.grazer.clone();
         let p = self.grazers[i].patch();
         let (energy, burning) = self.scorch(p, self.grazers[i].energy);
@@ -343,7 +359,7 @@ impl Sim {
         if burning {
             state = State::Flee;
             step = self.flee_fire(x, y, p);
-        } else if let Some((hx, hy)) = self.nearest_hunter(x, y) {
+        } else if let Some((hx, hy)) = self.nearest_hunter(x, y, self.grazers[i].traits.flee_distance) {
             state = State::Flee;
             step = self.greedy_step(x, y, hx, hy, -1.0);
         } else if self.patches[p].grass > gp.eat_min_grass && self.grazers[i].energy < gp.eat_below {
@@ -366,7 +382,7 @@ impl Sim {
         if let Some((nx, ny)) = step {
             self.move_grazer(i, nx, ny);
         }
-        let cost = gp.energy_cost * if step.is_some() { 2.0 } else { 1.0 };
+        let cost = gp.energy_cost * self.grazers[i].traits.energy_cost_mult * if step.is_some() { 2.0 } else { 1.0 };
         {
             let g = &mut self.grazers[i];
             g.state = state;
@@ -384,30 +400,34 @@ impl Sim {
             return;
         }
         let g = &self.grazers[i];
-        if g.energy > gp.repro_energy && g.cooldown == 0 && self.grazers_in_patch[p] < gp.max_grazers_per_patch {
-            let (cx, cy) = (g.x as usize, g.y as usize);
+        if g.energy > g.traits.repro_threshold && g.cooldown == 0 && self.grazers_in_patch[p] < gp.max_grazers_per_patch
+        {
+            let (cx, cy, parent) = (g.x as usize, g.y as usize, g.traits);
             let g = &mut self.grazers[i];
             g.energy -= gp.repro_cost;
             g.cooldown = gp.cooldown;
-            self.spawn_grazer(cx, cy);
+            let traits = self.offspring_traits(Kind::Grazer, parent, mutate);
+            self.add_grazer(cx, cy, gp.newborn_energy, gp.cooldown, traits);
         }
     }
 
-    /// Add a newborn grazer on column (x, y), keeping the per-patch counts and the column grid current.
+    /// Test helper: add a newborn grazer with the default traits on column (x, y), keeping the per-patch counts
+    /// and the column grid current.
+    #[cfg(test)]
     pub(crate) fn spawn_grazer(&mut self, x: usize, y: usize) {
         let gp = &self.params.grazer;
-        self.add_grazer(x, y, gp.newborn_energy, gp.cooldown);
+        self.add_grazer(x, y, gp.newborn_energy, gp.cooldown, self.params.default_traits(Kind::Grazer));
     }
 
-    fn add_grazer(&mut self, x: usize, y: usize, energy: f32, cooldown: u32) {
+    fn add_grazer(&mut self, x: usize, y: usize, energy: f32, cooldown: u32, traits: Traits) {
         let id = self.alloc_id();
         self.grazer_grid[cidx(x, y)].push(self.grazers.len() as u32);
-        self.grazers.push(Animal::new(id, Kind::Grazer, x, y, energy, 0, cooldown));
+        self.grazers.push(Animal::new(id, Kind::Grazer, (x, y), energy, 0, cooldown, traits));
         self.grazers_in_patch[patch_of(x, y)] += 1;
     }
 
-    /// A uniformly random soil column on the world's edge (x or y at 0 or 63), or any soil column
-    /// if the edge has none.
+    /// A uniformly random soil column on the world's edge (x or y at 0 or 63), or None (and no
+    /// draw) if the edge has none.
     fn random_edge_soil_column(&mut self) -> Option<(usize, usize)> {
         let edge: Vec<usize> = (0..crate::world::COLS)
             .filter(|&c| {
@@ -416,29 +436,40 @@ impl Sim {
             })
             .collect();
         if edge.is_empty() {
-            return self.random_soil_column();
+            return None;
         }
         let c = edge[self.rng.gen_range(0..edge.len())];
         Some((c % WX, c / WX))
     }
 
-    /// Small-number floor: on ticks that are a multiple of a species' `immigration_interval`, one
-    /// animal of that species arrives at a random edge soil column if fewer than `immigration_floor`
-    /// are alive. Immigrants have `start_energy`, age 0 and cooldown 0, and act from the next tick.
+    /// Open boundaries: on ticks that are a multiple of a species' `immigration_interval`, one
+    /// immigrant of that species arrives at a random edge soil column if fewer than
+    /// `immigration_floor` are alive. Animal immigrants have the default traits, `start_energy`, age
+    /// 0 and cooldown 0, and act from the next tick. A tree immigrant is a sapling (age 0), planted
+    /// only if its column keeps `min_spacing`. A floor of 0 never draws.
     pub fn immigrate(&mut self, t: u32) {
         let gp = self.params.grazer.clone();
         if t.is_multiple_of(gp.immigration_interval) && self.count_grazers() < gp.immigration_floor {
             if let Some((x, y)) = self.random_edge_soil_column() {
-                self.add_grazer(x, y, gp.start_energy, 0);
+                self.add_grazer(x, y, gp.start_energy, 0, self.params.default_traits(Kind::Grazer));
             }
         }
         let hp = self.params.hunter.clone();
         if t.is_multiple_of(hp.immigration_interval) && self.count_hunters() < hp.immigration_floor {
             if let Some((x, y)) = self.random_edge_soil_column() {
                 let id = self.alloc_id();
-                self.hunters.push(Animal::new(id, Kind::Hunter, x, y, hp.start_energy, 0, 0));
+                let traits = self.params.default_traits(Kind::Hunter);
+                self.hunters.push(Animal::new(id, Kind::Hunter, (x, y), hp.start_energy, 0, 0, traits));
                 self.hunters_in_patch[patch_of(x, y)] += 1;
                 self.hunter_immigrants += 1;
+            }
+        }
+        let tp = &self.params.tree;
+        if t.is_multiple_of(tp.immigration_interval) && self.count_trees() < tp.immigration_floor {
+            if let Some((x, y)) = self.random_edge_soil_column() {
+                if self.spacing_ok(x as i32, y as i32) {
+                    self.plant_tree(x, y, 0);
+                }
             }
         }
     }
@@ -479,7 +510,7 @@ impl Sim {
 
     /// One hunter update: rest when satiated, else attack, approach or wander; then energy, death
     /// (starved, burnt, old age, then crowded when `crowding` is on) and birth.
-    pub fn update_hunter(&mut self, i: usize, crowding: bool) {
+    pub fn update_hunter(&mut self, i: usize, crowding: bool, mutate: bool) {
         let hp = self.params.hunter.clone();
         let p = self.hunters[i].patch();
         let (energy, burning) = self.scorch(p, self.hunters[i].energy);
@@ -515,7 +546,7 @@ impl Sim {
                 }
             }
         }
-        let cost = hp.energy_cost * if step.is_some() { 2.0 } else { 1.0 };
+        let cost = hp.energy_cost * self.hunters[i].traits.energy_cost_mult * if step.is_some() { 2.0 } else { 1.0 };
         let h = &mut self.hunters[i];
         if let Some((nx, ny)) = step {
             h.x = nx as f32;
@@ -537,12 +568,13 @@ impl Sim {
             return;
         }
         let h = &mut self.hunters[i];
-        if h.energy > hp.repro_energy && h.cooldown == 0 {
+        if h.energy > h.traits.repro_threshold && h.cooldown == 0 {
             h.energy -= hp.repro_cost;
             h.cooldown = hp.refractory;
-            let (cx, cy) = (h.x as usize, h.y as usize);
+            let (cx, cy, parent) = (h.x as usize, h.y as usize, h.traits);
+            let traits = self.offspring_traits(Kind::Hunter, parent, mutate);
             let id = self.alloc_id();
-            self.hunters.push(Animal::new(id, Kind::Hunter, cx, cy, hp.newborn_energy, 0, hp.refractory));
+            self.hunters.push(Animal::new(id, Kind::Hunter, (cx, cy), hp.newborn_energy, 0, hp.refractory, traits));
             self.hunters_in_patch[p] += 1;
         }
     }
@@ -589,12 +621,12 @@ mod tests {
         p.hunter.kill_prob = 1.0;
         let world = World::from_heights(&vec![14u8; COLS], &p);
         let mut sim = Sim::with_world(p, rand_chacha::ChaCha8Rng::seed_from_u64(9), world);
-        sim.grazers.push(Animal::new(0, Kind::Grazer, 10, 10, 50.0, 0, 100));
+        sim.grazers.push(Animal::new(0, Kind::Grazer, (10, 10), 50.0, 0, 100, sim.params.default_traits(Kind::Grazer)));
         sim.grazers_in_patch[patch_of(10, 10)] = 1;
-        sim.hunters.push(Animal::new(1, Kind::Hunter, 11, 10, 50.0, 0, 100));
+        sim.hunters.push(Animal::new(1, Kind::Hunter, (11, 10), 50.0, 0, 100, sim.params.default_traits(Kind::Hunter)));
         sim.patches[patch_of(10, 10)].shrub = shrub;
         sim.rebuild_grazer_grid();
-        sim.update_hunter(0, false);
+        sim.update_hunter(0, false, false);
         (!sim.grazers[0].alive, sim.hunters[0].state, sim.hunters[0].energy)
     }
 
@@ -656,7 +688,15 @@ mod tests {
 
     fn add_hunter(sim: &mut Sim, (x, y): (usize, usize), energy: f32) {
         let id = sim.alloc_id();
-        sim.hunters.push(Animal::new(id, Kind::Hunter, x, y, energy, 0, 100));
+        sim.hunters.push(Animal::new(
+            id,
+            Kind::Hunter,
+            (x, y),
+            energy,
+            0,
+            100,
+            sim.params.default_traits(Kind::Hunter),
+        ));
         sim.rebuild_hunter_grid();
     }
 
@@ -688,7 +728,7 @@ mod tests {
         let got = sim.nearest_prey(hx, hy);
         prop_assert_eq!(got.map(|g| g.0), want.map(|w| w.1), "prey is not the nearest grazer");
         let before = positions(&sim);
-        sim.update_hunter(0, false);
+        sim.update_hunter(0, false, false);
         let after = positions(&sim);
         for (j, (b, a)) in before.iter().zip(&after).enumerate() {
             if Some(j) != got.map(|g| g.0) {
@@ -715,7 +755,7 @@ mod tests {
         sim.params.hunter.kill_prob = 1.0;
         add_hunter(&mut sim, hunter, energy);
         let before = positions(&sim);
-        sim.update_hunter(0, false);
+        sim.update_hunter(0, false, false);
         prop_assert_eq!(before, positions(&sim), "a satiated hunter touched a grazer");
         prop_assert_eq!(sim.hunters[0].state, State::Rest);
         Ok(())
@@ -859,9 +899,10 @@ mod tests {
             heights in crate::world::tests::terrain(),
             hunters in 0usize..12,
             grazer_floor in 0u32..4,
+            tree_floor in 0u32..3,
             t in 1u32..3000,
         ) {
-            immigration_follows_the_floor(&heights, hunters, grazer_floor, t)?;
+            immigration_follows_the_floor(&heights, hunters, grazer_floor, tree_floor, t)?;
         }
 
         #[test]
@@ -910,14 +951,16 @@ mod tests {
         satiated_hunter_rests(&[(10, 10)], &[0.0; 64], (11, 10), 90.0).unwrap();
     }
 
-    /// Small-number floor: at a multiple of the interval, exactly one hunter arrives on an edge soil
-    /// column (any soil column if the edge has none) with start energy, age 0 and cooldown 0, and
-    /// only when fewer than the floor are alive; the cumulative counter tracks it. Grazers follow
-    /// the same rule with their own floor.
+    /// Open boundaries: at a multiple of the interval, exactly one hunter arrives on an edge soil
+    /// column with the default traits, start energy, age 0 and cooldown 0, and only when fewer than
+    /// the floor are alive; the cumulative counter tracks it. Grazers follow the same rule with their
+    /// own floor, and trees too (a sapling, age 0). With no edge soil nothing arrives. When nothing is
+    /// due there is no draw.
     fn immigration_follows_the_floor(
         heights: &[u8],
         hunters: usize,
         grazer_floor: u32,
+        tree_floor: u32,
         t: u32,
     ) -> Result<(), TestCaseError> {
         let mut sim = Sim::bare(heights);
@@ -925,35 +968,47 @@ mod tests {
         prop_assume!(!soil.is_empty());
         sim.params.hunter.immigration_floor = 8;
         sim.params.grazer.immigration_floor = grazer_floor;
+        sim.params.tree.immigration_floor = tree_floor;
         for k in 0..hunters {
             let c = soil[k % soil.len()];
             add_hunter(&mut sim, (c % WX, c / WX), 50.0);
         }
-        let (h0, g0, n0) = (sim.count_hunters(), sim.count_grazers(), sim.hunter_immigrants);
+        let (h0, g0, n0, w0) =
+            (sim.count_hunters(), sim.count_grazers(), sim.hunter_immigrants, sim.rng.get_word_pos());
         sim.immigrate(t);
-        let hunter_due = t.is_multiple_of(sim.params.hunter.immigration_interval) && h0 < 8;
-        prop_assert_eq!(sim.count_hunters(), h0 + hunter_due as u32);
-        prop_assert_eq!(sim.hunter_immigrants, n0 + hunter_due as u32);
-        let grazer_due = t.is_multiple_of(sim.params.grazer.immigration_interval) && g0 < grazer_floor;
-        prop_assert_eq!(sim.count_grazers(), g0 + grazer_due as u32);
         let is_edge = |c: usize| c.is_multiple_of(WX) || c / WX == 0 || c % WX == WX - 1 || c / WX == WY - 1;
-        let any_edge = soil.iter().any(|&c| is_edge(c));
-        let placed_ok = |a: &Animal| {
-            let c = Sim::animal_col(a);
-            sim.world.class[c] == ColClass::Soil && (is_edge(c) || !any_edge)
-        };
-        if hunter_due {
-            let h = sim.hunters.last().unwrap();
-            prop_assert!(placed_ok(h), "immigrant hunter at ({}, {})", h.x, h.y);
-            prop_assert_eq!((h.energy, h.age, h.cooldown), (sim.params.hunter.start_energy, 0, 0));
+        let any_edge = soil.iter().any(|&c| is_edge(c)) as u32;
+        let hunter_due = (t.is_multiple_of(sim.params.hunter.immigration_interval) && h0 < 8) as u32;
+        prop_assert_eq!(sim.count_hunters(), h0 + hunter_due * any_edge);
+        prop_assert_eq!(sim.hunter_immigrants, n0 + hunter_due * any_edge);
+        let grazer_due = (t.is_multiple_of(sim.params.grazer.immigration_interval) && g0 < grazer_floor) as u32;
+        prop_assert_eq!(sim.count_grazers(), g0 + grazer_due * any_edge);
+        let tree_due = (t.is_multiple_of(sim.params.tree.immigration_interval) && tree_floor > 0) as u32;
+        prop_assert_eq!(sim.count_trees(), tree_due * any_edge, "the bare sim has no trees to crowd a sapling");
+        if hunter_due + grazer_due + tree_due == 0 {
+            prop_assert_eq!(sim.rng.get_word_pos(), w0, "a draw with nothing due");
         }
-        if grazer_due {
+        let class = sim.world.class.clone();
+        let placed_ok = |c: usize| class[c] == ColClass::Soil && is_edge(c);
+        if hunter_due * any_edge == 1 {
+            let h = sim.hunters.last().unwrap();
+            prop_assert!(placed_ok(Sim::animal_col(h)), "immigrant hunter at ({}, {})", h.x, h.y);
+            prop_assert_eq!((h.energy, h.age, h.cooldown), (sim.params.hunter.start_energy, 0, 0));
+            prop_assert_eq!(h.traits, sim.params.default_traits(Kind::Hunter));
+        }
+        if grazer_due * any_edge == 1 {
             let g = sim.grazers.last().unwrap();
-            prop_assert!(placed_ok(g), "immigrant grazer at ({}, {})", g.x, g.y);
+            prop_assert!(placed_ok(Sim::animal_col(g)), "immigrant grazer at ({}, {})", g.x, g.y);
             prop_assert_eq!((g.energy, g.age, g.cooldown), (sim.params.grazer.start_energy, 0, 0));
+            prop_assert_eq!(g.traits, sim.params.default_traits(Kind::Grazer));
             let kept = sorted_cells(&sim.grazer_grid);
             sim.rebuild_grazer_grid();
             prop_assert_eq!(kept, sorted_cells(&sim.grazer_grid));
+        }
+        if tree_due * any_edge == 1 {
+            let tr = sim.trees.last().unwrap();
+            prop_assert!(placed_ok(tr.col()), "immigrant tree at ({}, {})", tr.x, tr.y);
+            prop_assert_eq!((tr.age, sim.trunk_at[tr.col()]), (0, 0));
         }
         Ok(())
     }
@@ -962,19 +1017,21 @@ mod tests {
     fn immigration_regression_flat_world() {
         // Tick 500 brings one hunter to the edge, tick 499 none; 8 live hunters stop it.
         let flat = vec![14u8; COLS];
-        immigration_follows_the_floor(&flat, 0, 0, 500).unwrap();
-        immigration_follows_the_floor(&flat, 0, 3, 499).unwrap();
-        immigration_follows_the_floor(&flat, 8, 3, 1000).unwrap();
-        // The default grazer floor (0) never brings a grazer.
+        immigration_follows_the_floor(&flat, 0, 0, 0, 500).unwrap();
+        immigration_follows_the_floor(&flat, 0, 3, 1, 499).unwrap();
+        immigration_follows_the_floor(&flat, 8, 3, 1, 1000).unwrap();
+        // The default floors (0) never bring a grazer or a tree.
         let mut sim = Sim::bare(&flat);
+        let d = Params::load_default();
         sim.params.hunter.immigration_floor = 8;
-        sim.params.grazer.immigration_floor = Params::load_default().grazer.immigration_floor;
+        sim.params.grazer.immigration_floor = d.grazer.immigration_floor;
+        sim.params.tree.immigration_floor = d.tree.immigration_floor;
         sim.immigrate(500);
-        assert_eq!((sim.count_hunters(), sim.count_grazers(), sim.hunter_immigrants), (1, 0, 1));
+        assert_eq!((sim.count_hunters(), sim.count_grazers(), sim.count_trees(), sim.hunter_immigrants), (1, 0, 0, 1));
     }
 
     #[test]
-    fn immigration_regression_no_edge_soil_falls_back_to_any_soil() {
+    fn immigration_regression_no_edge_soil_brings_nothing() {
         // Water all round the rim (height 8, below the water level), soil inside.
         let mut heights = vec![14u8; COLS];
         for (c, h) in heights.iter_mut().enumerate() {
@@ -983,7 +1040,27 @@ mod tests {
                 *h = 8;
             }
         }
-        immigration_follows_the_floor(&heights, 0, 1, 1500).unwrap();
+        immigration_follows_the_floor(&heights, 0, 1, 1, 1500).unwrap();
+    }
+
+    /// A tree immigrant keeps `min_spacing`: an edge column next to a live trunk gets no sapling.
+    #[test]
+    fn tree_immigrant_respects_min_spacing() {
+        let mut sim = Sim::bare(&vec![14u8; COLS]);
+        for x in (0..WX).step_by(2) {
+            for y in [0, WY - 1] {
+                sim.plant_tree(x, y, 0);
+            }
+        }
+        for y in (2..WY - 2).step_by(2) {
+            for x in [0, WX - 1] {
+                sim.plant_tree(x, y, 0);
+            }
+        }
+        let n = sim.count_trees();
+        sim.params.tree.immigration_floor = n + 1;
+        sim.immigrate(sim.params.tree.immigration_interval);
+        assert_eq!(sim.count_trees(), n, "every edge column is within min_spacing of a trunk");
     }
 
     #[test]
@@ -1060,7 +1137,15 @@ mod tests {
         sim.grazers.iter_mut().for_each(|g| g.energy = 50.0);
         for _ in 0..6 {
             let id = sim.alloc_id();
-            sim.hunters.push(Animal::new(id, Kind::Hunter, 4, 4, 50.0, 0, 100));
+            sim.hunters.push(Animal::new(
+                id,
+                Kind::Hunter,
+                (4, 4),
+                50.0,
+                0,
+                100,
+                sim.params.default_traits(Kind::Hunter),
+            ));
         }
         sim.update_animals();
         assert_eq!(sim.deaths, [[0, 0, 0, 10, 0], [0, 0, 0, 4, 0]]);
@@ -1083,7 +1168,15 @@ mod tests {
             }
             for _ in 0..6 {
                 let id = sim.alloc_id();
-                sim.hunters.push(Animal::new(id, Kind::Hunter, 4, 4, 50.0, 0, 100));
+                sim.hunters.push(Animal::new(
+                    id,
+                    Kind::Hunter,
+                    (4, 4),
+                    50.0,
+                    0,
+                    100,
+                    sim.params.default_traits(Kind::Hunter),
+                ));
             }
             for _ in 0..50 {
                 sim.update_animals();
@@ -1103,18 +1196,26 @@ mod tests {
         let mut sim = Sim::bare(&vec![14u8; COLS]);
         let hp = sim.params.hunter.clone();
         let id = sim.alloc_id();
-        sim.hunters.push(Animal::new(id, Kind::Hunter, 20, 20, hp.repro_energy + 5.0, 0, 1));
+        sim.hunters.push(Animal::new(
+            id,
+            Kind::Hunter,
+            (20, 20),
+            hp.repro_energy + 5.0,
+            0,
+            1,
+            sim.params.default_traits(Kind::Hunter),
+        ));
         sim.rebuild_hunter_grid();
-        sim.update_hunter(0, false);
+        sim.update_hunter(0, false, false);
         assert_eq!(sim.hunters.len(), 2, "cooldown 1 runs out on this update");
         assert_eq!((sim.hunters[0].cooldown, sim.hunters[1].cooldown), (hp.refractory, hp.refractory));
         assert_eq!(sim.hunters[1].energy, hp.newborn_energy);
         sim.hunters[0].cooldown = 0;
         sim.hunters[0].energy = hp.repro_energy - 1.0;
-        sim.update_hunter(0, false);
+        sim.update_hunter(0, false, false);
         assert_eq!(sim.hunters.len(), 2, "no birth below repro_energy");
         sim.hunters[0].energy = hp.repro_energy + 5.0;
-        sim.update_hunter(0, false);
+        sim.update_hunter(0, false, false);
         assert_eq!((sim.hunters.len(), sim.hunters_in_patch[patch_of(20, 20)]), (3, 3));
     }
 
@@ -1194,13 +1295,45 @@ mod tests {
     fn death_cause_regression_starvation_beats_old_age() {
         let mut sim = Sim::bare(&vec![14u8; COLS]);
         let (gmax, hmax) = (sim.params.grazer.max_age, sim.params.hunter.max_age);
-        sim.grazers.push(Animal::new(0, Kind::Grazer, 10, 10, 0.01, gmax - 1, 100));
-        sim.grazers.push(Animal::new(1, Kind::Grazer, 40, 40, 50.0, gmax - 1, 100));
+        sim.grazers.push(Animal::new(
+            0,
+            Kind::Grazer,
+            (10, 10),
+            0.01,
+            gmax - 1,
+            100,
+            sim.params.default_traits(Kind::Grazer),
+        ));
+        sim.grazers.push(Animal::new(
+            1,
+            Kind::Grazer,
+            (40, 40),
+            50.0,
+            gmax - 1,
+            100,
+            sim.params.default_traits(Kind::Grazer),
+        ));
         sim.grazers_in_patch[patch_of(10, 10)] += 1;
         sim.grazers_in_patch[patch_of(40, 40)] += 1;
         sim.patches[patch_of(10, 10)].grass = 0.0;
-        sim.hunters.push(Animal::new(2, Kind::Hunter, 20, 50, 0.01, hmax - 1, 100));
-        sim.hunters.push(Animal::new(3, Kind::Hunter, 50, 20, 50.0, hmax - 1, 100));
+        sim.hunters.push(Animal::new(
+            2,
+            Kind::Hunter,
+            (20, 50),
+            0.01,
+            hmax - 1,
+            100,
+            sim.params.default_traits(Kind::Hunter),
+        ));
+        sim.hunters.push(Animal::new(
+            3,
+            Kind::Hunter,
+            (50, 20),
+            50.0,
+            hmax - 1,
+            100,
+            sim.params.default_traits(Kind::Hunter),
+        ));
         sim.rebuild_grazer_grid();
         sim.step();
         assert_eq!(sim.deaths, [[1, 0, 1, 0, 0], [1, 0, 1, 0, 0]]);

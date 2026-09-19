@@ -1,5 +1,7 @@
 //! All tunable parameters, loaded from `params.toml`. Nothing tunable is hard-coded elsewhere.
 
+use crate::animals::Kind;
+use crate::heredity::Traits;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -32,6 +34,8 @@ pub struct Params {
     pub fire: FireParams,
     /// `[disease]`
     pub disease: DiseaseParams,
+    /// `[heredity]`
+    pub heredity: HeredityParams,
 }
 
 /// Terrain generation and world-level settings.
@@ -176,6 +180,10 @@ pub struct TreeParams {
     pub moisture: Curve,
     /// Germination suitability over patch temperature.
     pub temp: Curve,
+    /// One sapling arrives when fewer than this many trees are alive (0 disables immigration).
+    pub immigration_floor: u32,
+    /// Ticks between tree immigration checks.
+    pub immigration_interval: u32,
 }
 
 /// The grazer species.
@@ -269,6 +277,9 @@ pub struct HunterParams {
     pub refugium_k: f32,
     /// A hunter looks for prey within this distance.
     pub seek_radius: f32,
+    /// Default of the hunter's `flee_distance` trait. No hunter behaviour reads it, so the trait
+    /// drifts neutrally: the control for the heritable traits that are under selection.
+    pub flee_radius: f32,
     /// One hunter immigrates when fewer than this many are alive (0 disables immigration).
     pub immigration_floor: u32,
     /// Ticks between immigration checks.
@@ -301,6 +312,15 @@ pub struct FireParams {
     pub ash: f32,
     /// Energy an animal in a burning patch loses per tick.
     pub animal_damage: f32,
+}
+
+/// Heritable animal traits. A newborn's traits are its parent's × (1 + mutation · u), u uniform in
+/// [−1, 1], one draw per trait; clamped to [0.25, 4] × the species default. 0 switches mutation off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeredityParams {
+    /// Largest relative change per trait per generation.
+    pub mutation: f32,
 }
 
 /// Density-dependent ("crowded") mortality. Per animal update, an animal in a patch holding n of
@@ -348,6 +368,15 @@ impl Params {
     pub fn load_default() -> Params {
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml");
         Params::load(&p).expect("load params.toml")
+    }
+
+    /// The traits an animal of this species starts with: every initial animal and every immigrant.
+    pub fn default_traits(&self, kind: Kind) -> Traits {
+        let (energy_cost_mult, flee_distance, repro_threshold) = match kind {
+            Kind::Grazer => (1.0, self.grazer.flee_radius, self.grazer.repro_energy),
+            Kind::Hunter => (1.0, self.hunter.flee_radius, self.hunter.repro_energy),
+        };
+        Traits { energy_cost_mult, flee_distance, repro_threshold }
     }
 
     /// Germination light curve with the sapling light need applied as its low-opt.

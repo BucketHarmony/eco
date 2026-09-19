@@ -117,11 +117,11 @@ runs/s42/
   series.csv          one row per tick: tick, grazers, hunters, trees, grass_mean, shrub_mean, moisture_mean, fertility_mean, detritus_total, temperature
   events.csv          (format_version 3) one row per event: tick,kind,species,patch_x,patch_y,x,y,cause,detail
   snap_000000/
-    material.bin      131072 × u8, x-fastest
-    light.bin         131072 × u8
-    moisture.bin      4096 × u8 (surface voxels, one per column)
-    fertility.bin     4096 × u8 (surface)
-    height.bin        4096 × u8 (surface z per column)
+    material.bin      x·y·z × u8, x-fastest (dims from meta.json; 131072 on 64×64×32)
+    light.bin         x·y·z × u8
+    moisture.bin      x·y × u8 (surface voxels, one per column; 4096 on 64×64)
+    fertility.bin     x·y × u8 (surface)
+    height.bin        x·y × u8 (surface z per column)
     patches.json      64 entries: grass, shrub, detritus, temperature
     entities.json     [{id, kind, x, y, z, energy, age, state}] for animals and trees (trees carry stage)
   snap_000100/ …

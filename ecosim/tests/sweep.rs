@@ -31,8 +31,8 @@ fn comparable(r: &CheckReport) -> Vec<(&'static str, bool, String, f64)> {
     r.lines.iter().filter(|l| l.key != "runtime").map(|l| (l.key, l.pass, l.observed.clone(), l.margin)).collect()
 }
 
-/// One fresh seed-42 run (20000 ticks, a snapshot every 100, as `runs/s42`), shared by the golden
-/// check test and the manifest test.
+/// One fresh seed-42 run (20000 ticks, a snapshot every 100, as `runs/s42`: the reference strip
+/// since shot 15), shared by the golden check test and the manifest test.
 fn fresh_s42() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
@@ -129,11 +129,12 @@ fn fresh_s42_matches_committed_manifest() {
     assert_same_manifest(&want, &got);
 }
 
-/// Shot 14b regenerated the manifest for events.csv only: every other line is the one the manifest
-/// held before (`s42-manifest-preshot14a.sha256`, which 14a left equal to it).
+/// Shot 14b regenerated the manifest for events.csv only: every other line of the shot-14 manifest
+/// (kept as `s42-64-manifest.sha256` when shot 15 moved seed 42 to the strip) is the one it held
+/// before (`s42-manifest-preshot14a.sha256`, which 14a left equal to it).
 #[test]
 fn manifest_regeneration_for_the_event_log_changed_no_existing_line() {
-    let want = read_manifest("s42-manifest.sha256");
+    let want = read_manifest("s42-64-manifest.sha256");
     assert_eq!(want.len(), 2 + 201 * 8);
     assert_same_manifest(&read_manifest("s42-manifest-preshot14a.sha256"), &without_events(want));
 }
@@ -162,29 +163,46 @@ fn s42_event_log_matches_the_series_and_stays_small() {
     }
 }
 
+/// 64-world identity (shot 15): the default params on the 64×64×32 world with patch 8, rain
+/// gradient 0 and slope bias 0 (`common::SQUARE`) hash to the shot-14 manifest byte for byte, so the
+/// world dimensions, the gradient and the slope change nothing there.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn square_world_reproduces_the_shot_14_manifest() {
+    let dir = tmp("s42_square");
+    let set = common::square_set(&["world.depth=64", "world.height=32", "world.patch=8"]);
+    run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["dims"], serde_json::json!({"x": 64, "y": 64, "z": 32, "patch": 8}));
+    assert_same_manifest(&read_manifest("s42-64-manifest.sha256"), &hash_run(&dir, |_, b| b));
+}
+
 /// Identity case for food-limited hunters (shots 14a and 14a-rev): the pre-shot hunting economics
 /// set explicitly through `--set` (hunter crowding 0.001, kill_energy 40, hunt_cost 0, handling_ticks
-/// 0) reproduce the shot-14 manifest byte for byte, and the manifest as shot 14b left it (events.csv
-/// included). `hunt_cost` 0 charges nothing on a kill and leaves a miss at `fail_cost` alone;
+/// 0) reproduce the shot-14 manifest byte for byte on the square world, and the manifest as shot 14b
+/// left it (events.csv included). `hunt_cost` 0 charges nothing on a kill and leaves a miss at `fail_cost` alone;
 /// handling 0 never enters Handling and writes the version-3 `state.bin`.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn old_hunting_economics_via_set_reproduce_the_shot_14_manifest() {
     let dir = tmp("s42_old_hunting");
-    let set: Vec<String> =
-        ["disease.hunter_rate=0.001", "hunter.kill_energy=40", "hunter.hunt_cost=0", "hunter.handling_ticks=0"]
-            .map(String::from)
-            .to_vec();
+    let set = common::square_set(&[
+        "disease.hunter_rate=0.001",
+        "hunter.kill_energy=40",
+        "hunter.hunt_cost=0",
+        "hunter.handling_ticks=0",
+    ]);
     run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
     let got = hash_run(&dir, |_, b| b);
     assert_eq!(got.len(), 2 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-manifest.sha256"), &got);
+    assert_same_manifest(&read_manifest("s42-64-manifest.sha256"), &got);
     assert_same_manifest(&read_manifest("s42-manifest-preshot14a.sha256"), &without_events(got));
 }
 
-/// Default params with shot 11 switched off: mutation 0 (the immigration floors already default to 0).
+/// Default params on the square world with shot 11 switched off: mutation 0 (the immigration floors
+/// already default to 0).
 fn pre_shot_11() -> Params {
-    let mut p = Params::load_default();
+    let mut p = common::square();
     p.heredity.mutation = 0.0;
     p
 }
@@ -297,12 +315,13 @@ fn sweep_cells_equal_standalone_runs() {
     }
 }
 
-/// `--baseline` margins equal `ecosim check` margins on the same seed (runtime excluded).
+/// `--baseline` margins equal `ecosim check` margins on the same seed (runtime excluded), on the
+/// square world (`common::SQUARE`) to keep the coverage run short.
 #[test]
 fn baseline_margins_equal_check_margins() {
     let cfg = SweepConfig {
         params_path: params_path(),
-        fixed: vec![],
+        fixed: common::square_set(&[]),
         specs: vec![],
         seeds: vec![2],
         ticks: 10_500,
@@ -310,7 +329,7 @@ fn baseline_margins_equal_check_margins() {
     };
     let reports = baseline(&cfg).unwrap();
     let dir = tmp("baseline_s2");
-    run(Params::load_default(), 2, 10_500, 2_500, &[], &dir).unwrap();
+    run(common::square(), 2, 10_500, 2_500, &common::square_set(&[]), &dir).unwrap();
     let check = check_run(&dir).unwrap();
     assert!(check.get("mature_trees_10k").is_some());
     assert_eq!(comparable(&reports[0].1), comparable(&check));

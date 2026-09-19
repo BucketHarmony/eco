@@ -10,18 +10,19 @@
 //! | tick, next_id, hunter_immigrants | 3 × u32 |
 //! | RNG seed, stream, word position | [u8; 32], u64, u128 |
 //! | deaths this tick | 2 × 5 × u32 (grazers then hunters, `Cause` order) |
-//! | moisture, fertility | 2 × 4096 × f32 (column order) |
-//! | patches | 64 × (grass, shrub, detritus, temperature) f32 |
+//! | moisture, fertility | 2 × cols × f32 (column order; cols = width × depth, 4096 on 64×64) |
+//! | patches | patches × (grass, shrub, detritus, temperature) f32 (64 patches on 64×64) |
 //! | trees | u32 count, then per tree: id u32, x u8, y u8, age u32, dry_ticks u32, lifespan u32, alive u8 |
 //! | grazers, hunters | each: u32 count, then per animal: id u32, x f32, y f32, energy f32, age u32, cooldown u32, state u8, alive u8 |
-//! | grazer grid | per column (4096): u32 length, then that many u32 grazer indices |
-//! | fire | total_burnt u32, then 64 × burning_ticks_left u32 (patch order) |
+//! | grazer grid | per column (cols): u32 length, then that many u32 grazer indices |
+//! | fire | total_burnt u32, then patches × burning_ticks_left u32 (patch order) |
 //! | traits | per grazer, then per hunter (`Vec` order): energy_cost_mult, flee_distance, repro_threshold f32 |
 //! | handling | per hunter (`Vec` order): handling ticks left u32 |
 //!
 //! Version 2 is version 1 with the fire section appended, version 3 is version 2 with the traits
 //! section appended, and version 4 is version 3 with the handling section appended; nothing before
-//! any of them moved. Version 4 is written only when handling is in use (`hunter.handling_ticks` above
+//! any of them moved. The dimensions are not in the file: they come from the params (`meta.json`)
+//! the snapshot is restored with, and a file of the wrong size for them fails to decode. Version 4 is written only when handling is in use (`hunter.handling_ticks` above
 //! 0, or a hunter still handling); otherwise the file is version 3, byte for byte what the ecosim
 //! before handling wrote, and it decodes with every hunter's handling 0. Animal state 6 is Handling,
 //! which only a version-4 file holds.
@@ -35,7 +36,7 @@ use crate::heredity::Traits;
 use crate::params::Params;
 use crate::sim::{flee_offsets, offsets_within, Deaths, Patch, Sim, NO_TREE};
 use crate::trees::Tree;
-use crate::world::{patch_of, World, COLS, PATCHES, ROCK, SOIL, VOXELS, WX, WY, WZ};
+use crate::world::{Dims, World, ROCK, SOIL};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::fs;
@@ -184,7 +185,7 @@ struct Decoded {
 /// Placeholder traits for a decoded animal until the traits section is read.
 const NO_TRAITS: Traits = Traits { energy_cost_mult: 0.0, flee_distance: 0.0, repro_threshold: 0.0 };
 
-fn decode_animals(r: &mut Reader, kind: Kind) -> Result<Vec<Animal>, String> {
+fn decode_animals(r: &mut Reader, kind: Kind, d: Dims) -> Result<Vec<Animal>, String> {
     let n = r.count("animal")?;
     (0..n)
         .map(|_| {
@@ -194,7 +195,7 @@ fn decode_animals(r: &mut Reader, kind: Kind) -> Result<Vec<Animal>, String> {
             let s = r.u8()? as usize;
             let state = *STATES.get(s).ok_or_else(|| format!("state.bin: bad animal state {s}"))?;
             let alive = r.flag()?;
-            if !(0.0..WX as f32).contains(&x) || !(0.0..WY as f32).contains(&y) {
+            if !(0.0..d.wx as f32).contains(&x) || !(0.0..d.wy as f32).contains(&y) {
                 return Err(format!("state.bin: animal {id} off the world at ({x}, {y})"));
             }
             Ok(Animal { id, kind, x, y, energy, age, cooldown, state, alive, traits: NO_TRAITS, handling: 0 })
@@ -202,7 +203,7 @@ fn decode_animals(r: &mut Reader, kind: Kind) -> Result<Vec<Animal>, String> {
         .collect()
 }
 
-fn decode(bytes: &[u8]) -> Result<Decoded, String> {
+fn decode(bytes: &[u8], d: Dims) -> Result<Decoded, String> {
     let mut r = Reader { b: bytes, at: 0 };
     if r.take(8)? != MAGIC {
         return Err("state.bin: bad magic (not an ecosim state file)".into());
@@ -221,8 +222,8 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
     for n in deaths.iter_mut().flatten() {
         *n = r.u32()?;
     }
-    let (moisture, fertility) = (r.f32s(COLS)?, r.f32s(COLS)?);
-    let patches = (0..PATCHES)
+    let (moisture, fertility) = (r.f32s(d.cols())?, r.f32s(d.cols())?);
+    let patches = (0..d.patches())
         .map(|_| {
             Ok(Patch {
                 grass: r.f32()?,
@@ -239,15 +240,15 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
             let id = r.u32()?;
             let (x, y) = (r.u8()?, r.u8()?);
             let (age, dry_ticks, lifespan) = (r.u32()?, r.u32()?, r.u32()?);
-            if x as usize >= WX || y as usize >= WY {
+            if x as usize >= d.wx || y as usize >= d.wy {
                 return Err(format!("state.bin: tree {id} off the world at ({x}, {y})"));
             }
             Ok(Tree { id, x, y, age, dry_ticks, lifespan, alive: r.flag()? })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let mut grazers = decode_animals(&mut r, Kind::Grazer)?;
-    let mut hunters = decode_animals(&mut r, Kind::Hunter)?;
-    let grazer_grid = (0..COLS)
+    let mut grazers = decode_animals(&mut r, Kind::Grazer, d)?;
+    let mut hunters = decode_animals(&mut r, Kind::Hunter, d)?;
+    let grazer_grid = (0..d.cols())
         .map(|_| {
             let n = r.count("grid cell")?;
             (0..n)
@@ -295,15 +296,17 @@ fn decode(bytes: &[u8]) -> Result<Decoded, String> {
 }
 
 /// Terrain height per column from a material grid: the topmost soil or rock voxel.
-fn ground_from_material(material: &[u8]) -> Vec<u8> {
-    (0..COLS)
-        .map(|c| (0..WZ).rev().find(|&z| matches!(material[c + COLS * z], SOIL | ROCK)).unwrap_or(0) as u8)
+fn ground_from_material(material: &[u8], d: Dims) -> Vec<u8> {
+    let cols = d.cols();
+    (0..cols)
+        .map(|c| (0..d.wz).rev().find(|&z| matches!(material[c + cols * z], SOIL | ROCK)).unwrap_or(0) as u8)
         .collect()
 }
 
 impl Sim {
     /// Rebuild a sim from a snapshot directory written with `state.bin`. `params` must be the
-    /// params the run was using at that tick (from its `meta.json`).
+    /// params the run was using at that tick (from its `meta.json`); they give the dimensions, and
+    /// every `.bin` file must have the size they imply.
     ///
     /// Read from the files: light (`light.bin`) and everything in `state.bin`. Recomputed: the
     /// terrain fields from the material grid (and checked against `material.bin` and `height.bin`),
@@ -318,10 +321,11 @@ impl Sim {
             }
             Ok(b)
         };
+        let dims = Dims::of(&params);
         let (material, light, height) =
-            (read("material.bin", VOXELS)?, read("light.bin", VOXELS)?, read("height.bin", COLS)?);
-        let d = decode(&read("state.bin", 0)?)?;
-        let mut world = World::from_heights(&ground_from_material(&material), &params);
+            (read("material.bin", dims.voxels())?, read("light.bin", dims.voxels())?, read("height.bin", dims.cols())?);
+        let d = decode(&read("state.bin", 0)?, dims)?;
+        let mut world = World::from_heights(&ground_from_material(&material, dims), &params);
         if world.material != material || world.height != height {
             return Err(format!(
                 "{}: terrain does not rebuild from material.bin with these params (world.* keys changed?)",
@@ -341,12 +345,12 @@ impl Sim {
             trees: d.trees,
             grazers: d.grazers,
             hunters: d.hunters,
-            trunk_at: vec![NO_TREE; COLS],
-            canopy_cover: vec![false; COLS],
-            grazers_in_patch: vec![0; PATCHES],
+            trunk_at: vec![NO_TREE; dims.cols()],
+            canopy_cover: vec![false; dims.cols()],
+            grazers_in_patch: vec![0; dims.patches()],
             grazer_grid: d.grazer_grid,
-            hunter_grid: vec![Vec::new(); COLS],
-            hunters_in_patch: vec![0; PATCHES],
+            hunter_grid: vec![Vec::new(); dims.cols()],
+            hunters_in_patch: vec![0; dims.patches()],
             tick: d.tick,
             next_id: d.next_id,
             hunter_immigrants: d.hunter_immigrants,
@@ -361,14 +365,16 @@ impl Sim {
 
     /// Recompute every field `state.bin` leaves out from the fields it holds.
     fn recompute_derived(&mut self) {
+        let d = self.world.dims;
         for (i, t) in self.trees.iter().enumerate().filter(|(_, t)| t.alive) {
-            self.trunk_at[t.col()] = i as u32;
+            self.trunk_at[t.col(d)] = i as u32;
         }
-        for c in 0..COLS {
-            self.canopy_cover[c] = !self.canopy_z((c % WX) as i32, (c / WX) as i32).is_empty();
+        for c in 0..d.cols() {
+            let (x, y) = d.xy(c);
+            self.canopy_cover[c] = !self.canopy_z(x as i32, y as i32).is_empty();
         }
         for g in self.grazers.iter().filter(|g| g.alive) {
-            self.grazers_in_patch[patch_of(g.x as usize, g.y as usize)] += 1;
+            self.grazers_in_patch[g.patch(d)] += 1;
         }
         self.rebuild_hunter_grid();
     }
@@ -378,6 +384,7 @@ impl Sim {
 mod tests {
     use super::*;
     use crate::output::{snapshot_dir_name, write_snapshot};
+    use crate::world::sq::*;
     use proptest::prelude::*;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -394,7 +401,7 @@ mod tests {
     }
 
     fn stepped(seed: u64, ticks: u32) -> Sim {
-        stepped_with(Params::load_default(), seed, ticks)
+        stepped_with(Params::load_square(), seed, ticks)
     }
 
     fn stepped_with(params: Params, seed: u64, ticks: u32) -> Sim {
@@ -427,8 +434,8 @@ mod tests {
         prop_assert!(a.hunters_in_patch == b.hunters_in_patch, "hunters_in_patch");
         prop_assert!(a.seek_offsets == b.seek_offsets && a.flee_offsets == b.flee_offsets);
         let (mut ah, mut bh) = (a.hunter_grid.clone(), b.hunter_grid.clone());
-        crate::sim::rebuild_grid(&mut ah, &a.hunters);
-        crate::sim::rebuild_grid(&mut bh, &b.hunters);
+        crate::sim::rebuild_grid(&mut ah, &a.hunters, D);
+        crate::sim::rebuild_grid(&mut bh, &b.hunters, D);
         prop_assert!(ah == bh, "hunter_grid");
         Ok(())
     }
@@ -476,7 +483,7 @@ mod tests {
     /// version 3 and the same size as before handling existed.
     #[test]
     fn restore_regression_mid_handling() {
-        let mut p = Params::load_default();
+        let mut p = Params::load_square();
         p.hunter.handling_ticks = 400;
         let mut a = stepped_with(p, 42, 300);
         while !a.hunters.iter().any(|h| h.alive && h.handling > 0) {
@@ -510,17 +517,17 @@ mod tests {
     #[test]
     fn decode_rejects_corrupt_files() {
         let good = encode(&stepped(1, 20));
-        assert!(decode(&good).is_ok());
+        assert!(decode(&good, D).is_ok());
         let mut bad_magic = good.clone();
         bad_magic[0] = b'X';
-        assert!(decode(&bad_magic).unwrap_err().contains("magic"));
+        assert!(decode(&bad_magic, D).unwrap_err().contains("magic"));
         let mut bad_version = good.clone();
         bad_version[8] = 9;
-        assert!(decode(&bad_version).unwrap_err().contains("state version 9"));
-        assert!(decode(&good[..good.len() - 1]).unwrap_err().contains("truncated"));
+        assert!(decode(&bad_version, D).unwrap_err().contains("state version 9"));
+        assert!(decode(&good[..good.len() - 1], D).unwrap_err().contains("truncated"));
         let mut long = good.clone();
         long.push(0);
-        assert!(decode(&long).unwrap_err().contains("trailing"));
+        assert!(decode(&long, D).unwrap_err().contains("trailing"));
     }
 
     #[test]

@@ -2,6 +2,21 @@
 
 use std::path::Path;
 
+/// `--set` overrides that put the default params back on the 64×64×32 world without rain gradient
+/// or slope (shot 15): the world every manifest, fixture and test fact before shot 15 was made on.
+pub const SQUARE: [&str; 3] = ["world.width=64", "climate.rain_gradient=0", "world.slope_bias=0"];
+
+/// [`SQUARE`] followed by `extra`, as `--set` strings.
+pub fn square_set(extra: &[&str]) -> Vec<String> {
+    SQUARE.iter().chain(extra).map(|s| s.to_string()).collect()
+}
+
+/// The crate's `params.toml` on the square world.
+pub fn square() -> ecosim::Params {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml");
+    ecosim::Params::load_with(&path, &square_set(&[])).unwrap()
+}
+
 /// Bytes of the fire section `state.bin` version 2 appends: total_burnt, then 64 burning counters.
 const STATE_FIRE_BYTES: usize = 4 + 64 * 4;
 
@@ -50,7 +65,7 @@ const STATE_ANIMAL_BYTES: usize = 26;
 /// The default traits of each species, formatted as `series.csv` and `entities.json` write them:
 /// (series means, entities.json fields).
 fn default_traits() -> [([f32; 3], String); 2] {
-    let p = ecosim::Params::load_default();
+    let p = square();
     [ecosim::animals::Kind::Grazer, ecosim::animals::Kind::Hunter].map(|k| {
         let t = p.default_traits(k);
         let json = format!(

@@ -740,3 +740,53 @@ The shot's code is in, but its defaults are not. No cell meets the acceptance, s
   - **Sibling cases.** The sibling pins four (P, L) cases. It checks that seasons plus independent noise on both species don't pass, and that hunters leading by less than P/4 give a negative lag and no pass (three cases). It also pins the pass rule's boundaries.
 - **Known delay.** `prop_signature_finds_the_delay` and `signature_regression_delay_edges_extinct_and_flat` are kept, now over 60001 ticks with 9000/5700/3100/1300-tick cycles. None of those periods is a whole number of years, so seasonal removal doesn't erase them. The correlation bound drops from 0.97 to 0.95, because the cut moving average at the end is now 6000 ticks.
 - **Removed.** `prop_signature_period_is_the_cycle` and `signature_period_regression_lobes_edges_and_one_peak` tested the lobe-spacing period, which no longer exists.
+
+## World dimensions, rain gradient and slope (shot 15)
+
+The world size is now a parameter. `[world] width`, `depth`, `height` and `patch` (defaults 64, 64, 32, 8 when absent) replace every hard-coded size, and `climate.rain_gradient` and `world.slope_bias` (both 0 when absent) tilt rain and terrain west to east. The reference world becomes a 256×64×32 strip with gradient 0.6 and slope bias 4. At 64×64×32, patch 8, gradient 0 and slope 0 every run is byte-identical to shot 14.
+
+**Dimensions**
+- **`world::Dims`** (`wx`, `wy`, `wz`, `patch`) is built from the params (`Dims::of`) and carried by `World`. Index helpers that were free functions over constants (`cidx`, `vidx`, `patch_of`, bounds checks) are now its methods. Nothing is sized from a constant any more.
+- **Loader checks.** `Params::check_dims` runs on every load and override. `patch` must be at least 1, `width` and `depth` must be multiples of `patch` in 1..=256, and `height` must be in 2..=256.
+  - **Why 256.** Tree positions, event columns and patch coordinates, and `height.bin` are stored as u8. 256 is the most they hold, and the strip is 256 wide.
+  - The error names the key, as `--set` errors already do.
+- **Missing keys.** The keys have serde defaults: 64, 64, 32, 8 and 0, 0. So a `meta.json` from before this shot reads as the square world, and old snapshots restore and fork unchanged.
+- **`meta.json` `dims`** gains `patch`: `{x, y, z, patch}`, with x = width, y = depth, z = height. `patch` is added to the existing object rather than a new key, so readers that look at `dims.x/y/z` keep working. `format_version` stays 3: no file is added or removed, and on the square world every file is the same. The ecoview loader checks `dims` against 64×64×32 and rejects the strip. That is the renderer's shot (16).
+- **Snapshot sizes on read.** `Sim::restore` checks `material.bin` and `light.bin` against x·y·z and `height.bin` against x·y from the params it restores with, and `state.bin` decodes its column and patch sections at those sizes. A file of the wrong size is an error. `forced_grazer_extinction_on_the_strip_runs_to_the_end` restores a strip snapshot onto square-world params and expects the error.
+- **Unit tests stay on the square world.** A `cfg(test)` module `world::sq` holds the 64×64×32 dims and the old index helpers, and `Params::load_square()` is the default params on that world. Their facts and literals were measured there. The strip gets its own tests: brute-force `patch_dist` on a 128×32 strip and on the seed-42 reference terrain, strip index coverage, and slope tilt.
+- **The value-noise lattice** is `(wx/period + 1) × (wy/period + 1)` (rounded up) points, drawn row by row. On 64×64 that is the same size and order as before, which the identity test confirms.
+- **Events** store the patch as (patch_x, patch_y), not as an index. The `spread` detail is the source patch index `patch_x + patches_x·patch_y`, which is `+ 8·patch_y` on the square world as before. `unlit_burnout` tracks lit patches in a `BTreeSet`.
+
+**Rain gradient and slope**
+- **Rain.** Rain at column x is `rain × (1 + rain_gradient × (2x/(width − 1) − 1))`, clamped at 0 (`abiotic::rain_at`). West (x = 0) is dry, east is wet. `update_soil` checks `rain_gradient == 0` once, outside the column loop. At 0 it runs the old loop unchanged, so no float operation differs.
+- **Gradient range.** The loader accepts `rain_gradient` in [-1, 1] only. In that range the clamp never bites, rain is in [0, 2 × rain], and a row's total is exactly width × rain because the west–east term is odd about the middle. So the two properties the shot asks for hold for every accepted gradient. Beyond ±1 the clamp would add rain to the row, and the sweep only needs 0–1.
+- **Slope.** Height normalisation adds `slope_bias × (1 − 2x/(width − 1))` before rounding and clamping, so at slope 4 the west edge sits about 4 voxels higher and the east edge about 4 lower. It is also skipped at 0.
+
+**Runtime invariant**
+- **Limit.** The check's limit scales with world area: 30 s per 64×64 of columns, never below 30 s and capped at 90 s (`check::runtime_limit_ms`). The area comes from `meta.json` `dims`, defaulting to 64×64 when absent.
+- **Why.** The shot sets the strip's budget at 20k ticks in under 90 s release. The strip has 4× the columns and runs in about 45 s on this machine and on CI, which the old flat 30 s would fail. The square world keeps exactly the old limit and line text (`run time < 30 s`). Other sizes print `run time < 30 s per 64x64, at most 90 s`. Speeding the sim up is shot 15a's.
+
+**Manifests, golden files and fixtures (regenerated once, in the shot-15 commit)**
+- **`tests/data/s42-64-manifest.sha256`** is the shot-14 manifest, copied unchanged. `square_world_reproduces_the_shot_14_manifest` runs seed 42 at the square settings (`common::SQUARE`: `world.width=64`, `climate.rain_gradient=0`, `world.slope_bias=0`, plus depth, height and patch set explicitly) and matches it byte for byte, and checks `meta.json` `dims`.
+- **Identity tests on the square world.** The older identity tests (pre-fire, pre-shot-10, pre-shot-11, old hunting economics) and the tests whose documented facts were measured on the square world now run there through `common::SQUARE`. That covers drought, carrying capacity, the forced extinctions and the format tests. The old-hunting test compares with `s42-64-manifest.sha256`.
+- **Regenerated for the strip:** `tests/data/s42-manifest.sha256` and `tests/data/s42-check.txt`, both from `runs/s42` at the new defaults.
+- **Fixtures stay square.** `fixtures/s42-mini` (v1) and `fixtures/s42-mini-v2` stay on the square world, because they are what `scripts/sync-data.sh` hands the renderer and the renderer rejects other dims until shot 16. The v1 fixture can't be rewritten anyway: the v1 writer is gone.
+  - Only `s42-mini-v2/meta.json` changed: its params gain the new keys, `dims` gains `patch`, and `overrides` lists the square settings it is now generated with. Every other file of it is byte-identical.
+  - Shot 16 moves the renderer's fixture to the strip.
+- **ecoview CI pin.** The ecoview job's generate step (`.github/workflows/ci.yml`, "run s42 and sync") is pinned to the square world with `--set world.width=64 --set climate.rain_gradient=0 --set world.slope_bias=0`, next to the existing format-version pin. Shot 16 removes both.
+
+**CI: the seed matrix**
+- **Why.** On the strip, a seed's 20k run takes about 45 s and the 60k long run about 140 s on the CI runner, 7× the square world. The sweep-harness tests that run seed 42 in debug grow the same way. Run one after another, the ecosim job would take about 13 minutes against the shot's 10.
+- **The split.** The job becomes three that run in parallel, as the shot allows ("or the seed matrix is used"):
+  - `ecosim`: fmt, clippy, docs, debug tests, and the cross-profile test. `cargo test --release` builds the release binary itself.
+  - `ecosim-coverage`: coverage, with its own cache.
+  - `ecosim-sims`: a matrix over seeds 1, 2 and 3. Each builds release and runs and checks its seed; seed 1 also runs the long run, and seed 2 the baseline sweep.
+- **What stays the same.** Every step and command is unchanged. The step order in the file still satisfies `tests/ci.rs`. `just ci` still runs every step in sequence: about 8 minutes without coverage on this machine (the local gate), plus coverage.
+- **Baseline test.** `baseline_margins_equal_check_margins` runs on the square world to keep the coverage run short.
+
+**Signature test**
+- **New case.** `prop_signature_recovers_a_6000_tick_lag_on_a_long_cycle`, with the sibling `signature_regression_6000_tick_lag_on_a_14000_tick_cycle`: hunters trail a 12500–14000-tick cycle by 6000 ticks, under the 4000-tick season and a trend. The check recovers the lag within 200 and the period within 500. The check itself is unchanged.
+- **Limits found while writing it.**
+  - With the 25000-tick amplitude envelope that the shot-14c cases use, the hunter autocorrelation's peak moves by up to 600 ticks on these long cycles: 14600 for 14000.
+  - Periods of 15000–16000 read up to 550 short even under slower envelopes (40000 and 60000). The window holds only three or four such cycles, and the 12000-tick detrend removes part of each.
+  - So the case uses a 60000-tick envelope and periods of 12500–14000, where 200 draws stay within 500. The shot's "a hunter cycle over 12000 ticks" is read as that range.

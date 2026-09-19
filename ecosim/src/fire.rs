@@ -8,7 +8,7 @@
 use crate::events::EventKind;
 use crate::params::FireParams;
 use crate::sim::Sim;
-use crate::world::{patch_of, PATCHES, PATCHES_X, PATCH_SIZE};
+use crate::world::Dims;
 use rand::Rng;
 
 /// Ticks between ignition updates.
@@ -43,19 +43,19 @@ pub fn spread_prob(fp: &FireParams, moisture: f32, fuel: f32) -> f32 {
 }
 
 /// The 4-neighbour patches of `p` that exist, in (+x, −x, +y, −y) order.
-pub fn patch_neighbours(p: usize) -> impl Iterator<Item = usize> {
-    let (px, py) = ((p % PATCHES_X) as i32, (p / PATCHES_X) as i32);
-    let rows = (PATCHES / PATCHES_X) as i32;
+pub fn patch_neighbours(d: Dims, p: usize) -> impl Iterator<Item = usize> {
+    let (px, py) = (d.patch_xy(p).0 as i32, d.patch_xy(p).1 as i32);
     [(1, 0), (-1, 0), (0, 1), (0, -1)].into_iter().filter_map(move |(dx, dy)| {
         let (nx, ny) = (px + dx, py + dy);
-        (nx >= 0 && ny >= 0 && nx < PATCHES_X as i32 && ny < rows).then(|| nx as usize + PATCHES_X * ny as usize)
+        d.patch_in_bounds(nx, ny).then(|| nx as usize + d.patches_x() * ny as usize)
     })
 }
 
 /// Centre of patch `p` in column coordinates (between columns, so no column sits on it).
-pub fn patch_centre(p: usize) -> (f32, f32) {
-    let half = PATCH_SIZE as f32 / 2.0 - 0.5;
-    (((p % PATCHES_X) * PATCH_SIZE) as f32 + half, ((p / PATCHES_X) * PATCH_SIZE) as f32 + half)
+pub fn patch_centre(d: Dims, p: usize) -> (f32, f32) {
+    let half = d.patch as f32 / 2.0 - 0.5;
+    let (px, py) = d.patch_xy(p);
+    ((px * d.patch) as f32 + half, (py * d.patch) as f32 + half)
 }
 
 impl Sim {
@@ -66,7 +66,7 @@ impl Sim {
             return 0.0;
         }
         let (fp, pa) = (&self.params.fire, &self.patches[p]);
-        let canopy = self.canopy_columns(p) as f32 / (PATCH_SIZE * PATCH_SIZE) as f32;
+        let canopy = self.canopy_columns(p) as f32 / (self.world.dims.patch * self.world.dims.patch) as f32;
         pa.grass * 0.5 + pa.shrub + pa.detritus * fp.detritus_weight + canopy * fp.canopy_weight
     }
 
@@ -77,7 +77,7 @@ impl Sim {
 
     /// True while the patch under column (x, y) burns.
     pub fn burning_at(&self, x: usize, y: usize) -> bool {
-        self.is_burning(patch_of(x, y))
+        self.is_burning(self.world.dims.patch_of(x, y))
     }
 
     /// Set patch `p` burning; `from` is the burning neighbour it caught from, or None for an ignition.
@@ -95,9 +95,10 @@ impl Sim {
     /// Patches ignited here burn from the next tick. With `base_rate` 0 nothing ever burns, so the
     /// phase makes no draws and no writes.
     pub fn update_fire(&mut self, t: u32) {
-        let burning: Vec<usize> = (0..PATCHES).filter(|&p| self.is_burning(p)).collect();
+        let d = self.world.dims;
+        let burning: Vec<usize> = (0..d.patches()).filter(|&p| self.is_burning(p)).collect();
         for &p in &burning {
-            for q in patch_neighbours(p) {
+            for q in patch_neighbours(d, p) {
                 if self.is_burning(q) {
                     continue;
                 }
@@ -114,7 +115,7 @@ impl Sim {
             }
         }
         if self.params.fire.base_rate > 0.0 && t.is_multiple_of(FIRE_EVERY) {
-            for p in 0..PATCHES {
+            for p in 0..d.patches() {
                 let pr =
                     ignition_prob(&self.params.fire, self.patches[p].temperature, self.patch_moisture(p), self.fuel(p));
                 let u: f32 = self.rng.gen();
@@ -143,7 +144,8 @@ impl Sim {
         if fp.tree_kill > 0.0 {
             for i in 0..self.trees.len() {
                 let t = &self.trees[i];
-                if t.alive && patch_of(t.x as usize, t.y as usize) == p && self.rng.gen::<f32>() < fp.tree_kill {
+                let tp = self.world.dims.patch_of(t.x as usize, t.y as usize);
+                if t.alive && tp == p && self.rng.gen::<f32>() < fp.tree_kill {
                     self.kill_tree(i, "burnt");
                 }
             }
@@ -157,11 +159,11 @@ mod tests {
     use super::*;
     use crate::animals::{Animal, Cause, Kind, State};
     use crate::params::Params;
-    use crate::world::{cidx, COLS, WX};
+    use crate::world::sq::*;
     use proptest::prelude::*;
 
     fn fire_params() -> FireParams {
-        Params::load_default().fire
+        Params::load_square().fire
     }
 
     /// Heights for one patch kind: 0 water, 1 rock, 2 soil, 3 mixed (per-column from `mix`).
@@ -239,7 +241,7 @@ mod tests {
     /// A patch that burns out in a tick has grass = shrub = 0 when the tick ends, and each burn-out
     /// counts once in `total_burnt`.
     fn bare_after_burn_out(seed: u64, ticks: u32, spread: f32, base_rate: f32) -> Result<(), TestCaseError> {
-        let mut p = Params::load_default();
+        let mut p = Params::load_square();
         (p.fire.spread, p.fire.base_rate, p.fire.temp_min) = (spread, base_rate, -50.0);
         let mut sim = Sim::new(p, seed);
         let mut burnt = 0;
@@ -390,7 +392,7 @@ mod tests {
     /// With base_rate 0 the other fire params don't matter: no draw, no write, identical runs.
     #[test]
     fn rate_zero_makes_no_draws_and_no_writes() {
-        let mut a = Params::load_default();
+        let mut a = Params::load_square();
         a.fire.base_rate = 0.0;
         let mut b = a.clone();
         b.fire = FireParams { base_rate: 0.0, temp_min: -100.0, spread: 10.0, animal_damage: 50.0, ..b.fire };

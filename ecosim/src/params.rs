@@ -61,6 +61,34 @@ pub struct WorldParams {
     pub canopy_absorb: u8,
     /// Entity compaction interval in ticks.
     pub compact_every: u32,
+    /// Columns along x (west to east). A multiple of `patch`, at most 256.
+    #[serde(default = "default_side")]
+    pub width: u32,
+    /// Columns along y. A multiple of `patch`, at most 256.
+    #[serde(default = "default_side")]
+    pub depth: u32,
+    /// Voxels along z (up), at most 256.
+    #[serde(default = "default_height")]
+    pub height: u32,
+    /// Patch edge length in columns.
+    #[serde(default = "default_patch")]
+    pub patch: u32,
+    /// Terrain tilt: the height normalisation adds `slope_bias × (1 − 2x/(width − 1))` before
+    /// clamping, so the west (dry) edge sits higher. 0 leaves the terrain untouched.
+    #[serde(default)]
+    pub slope_bias: f32,
+}
+
+/// The dimensions a params document without them means: the 64×64×32 world, 8×8 patches, which
+/// every run before shot 15 used (so its `meta.json` restores and forks as it was).
+fn default_side() -> u32 {
+    64
+}
+fn default_height() -> u32 {
+    32
+}
+fn default_patch() -> u32 {
+    8
 }
 
 /// Seasons, rain, soil moisture and fertility.
@@ -93,6 +121,10 @@ pub struct ClimateParams {
     pub initial_moisture: f32,
     /// Fertility of every soil column at tick 0.
     pub initial_fertility: f32,
+    /// West–east rain gradient: rain at column x is `rain × (1 + rain_gradient × (2x/(width − 1) − 1))`,
+    /// clamped at 0, so the west edge is drier and the east edge wetter. 0 is uniform rain.
+    #[serde(default)]
+    pub rain_gradient: f32,
 }
 
 /// Seasonal forcing. Temperature is `temp_base + amplitude·sin(2π t / year_len)`.
@@ -375,9 +407,35 @@ impl Params {
         Params::from_value(root)
     }
 
-    /// Deserialize a parsed params document.
+    /// Deserialize a parsed params document and check the world dimensions.
     pub fn from_value(root: toml::Value) -> Result<Params, String> {
-        root.try_into().map_err(|e| format!("params: {e}"))
+        let p: Params = root.try_into().map_err(|e| format!("params: {e}"))?;
+        p.check_dims()?;
+        Ok(p)
+    }
+
+    /// The world dimensions must tile into whole patches, and fit the u8 column coordinates and
+    /// heights that trees, events and `height.bin` store. The rain gradient must be in [-1, 1], where
+    /// rain never clamps below 0 and a row's total is the uniform one.
+    pub fn check_dims(&self) -> Result<(), String> {
+        let w = &self.world;
+        let err = |m: String| Err(format!("params: [world] {m}"));
+        if w.patch == 0 {
+            return err("patch must be at least 1".into());
+        }
+        for (name, v) in [("width", w.width), ("depth", w.depth)] {
+            if v == 0 || v > 256 || v % w.patch != 0 {
+                return err(format!("{name} = {v} must be a multiple of patch = {} in 1..=256", w.patch));
+            }
+        }
+        if !(2..=256).contains(&w.height) {
+            return err(format!("height = {} must be in 2..=256", w.height));
+        }
+        let g = self.climate.rain_gradient;
+        if !(-1.0..=1.0).contains(&g) {
+            return Err(format!("params: [climate] rain_gradient = {g} must be in [-1, 1]"));
+        }
+        Ok(())
     }
 
     /// Read and parse a params file.
@@ -395,6 +453,17 @@ impl Params {
     pub fn load_default() -> Params {
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml");
         Params::load(&p).expect("load params.toml")
+    }
+
+    /// The default params on the 64×64×32 world with uniform rain and flat terrain bias: the
+    /// world the unit tests were written for.
+    #[cfg(test)]
+    pub(crate) fn load_square() -> Params {
+        let mut p = Params::load_default();
+        (p.world.width, p.world.depth, p.world.height, p.world.patch) = (64, 64, 32, 8);
+        p.world.slope_bias = 0.0;
+        p.climate.rain_gradient = 0.0;
+        p
     }
 
     /// The traits an animal of this species starts with: every initial animal and every immigrant.
@@ -526,6 +595,51 @@ mod tests {
         out
     }
 
+    /// An integer for `key` drawn from `i`: `i` itself, except that the world dimensions are mapped
+    /// into the values `check_dims` accepts with the other dimensions at their defaults.
+    fn dim_value(key: &str, i: u8) -> u32 {
+        match key {
+            "world.width" | "world.depth" => 8 * (1 + i as u32 % 32),
+            "world.height" => 2 + i as u32 % 255,
+            "world.patch" => 1 << (i % 4),
+            _ => i as u32,
+        }
+    }
+
+    #[test]
+    fn dims_that_do_not_tile_are_rejected_naming_the_key() {
+        for (bad, key) in [
+            ("world.width=100", "width"),
+            ("world.depth=0", "depth"),
+            ("world.width=264", "width"),
+            ("world.patch=0", "patch"),
+            ("world.patch=5", "width"),
+            ("world.height=1", "height"),
+            ("climate.rain_gradient=1.5", "rain_gradient"),
+            ("climate.rain_gradient=-1.01", "rain_gradient"),
+        ] {
+            let e = Params::from_toml_str_with(&defaults(), &[bad.into()]).unwrap_err();
+            assert!(e.contains(key), "{bad}: {e}");
+        }
+        let p = Params::from_toml_str_with(&defaults(), &["world.width=64".into(), "world.patch=16".into()]).unwrap();
+        assert_eq!((p.world.width, p.world.depth, p.world.patch), (64, 64, 16));
+    }
+
+    /// A params document from before shot 15 (no dimension, gradient or slope keys) reads as the
+    /// 64×64×32 world, patch 8, uniform rain and no tilt: old `meta.json` files restore unchanged.
+    #[test]
+    fn missing_dims_default_to_the_square_world() {
+        let mut t: toml::Table = defaults().parse().unwrap();
+        let w = t["world"].as_table_mut().unwrap();
+        for k in ["width", "depth", "height", "patch", "slope_bias"] {
+            w.remove(k);
+        }
+        t["climate"].as_table_mut().unwrap().remove("rain_gradient");
+        let p = Params::from_value(toml::Value::Table(t)).unwrap();
+        let sq = Params::load_square();
+        assert_eq!(serde_json::to_string(&p).unwrap(), serde_json::to_string(&sq).unwrap());
+    }
+
     /// `v` as it reads back from `Params` through JSON: f32 fields hold the nearest f32.
     fn as_stored(key: &str, v: f64) -> serde_json::Value {
         serde_json::json!(if key == "hunter.kill_prob" { v } else { v as f32 as f64 })
@@ -547,8 +661,15 @@ mod tests {
     /// value. Integers are drawn from `ints` (0..=255 fits every integer field), numbers from `floats`.
     fn set_round_trips(key: &str, old: &toml::Value, ints: &[u8], floats: &[f64]) -> Result<(), TestCaseError> {
         let (text, want) = match old {
-            toml::Value::Integer(_) => (ints[0].to_string(), serde_json::json!(ints[0])),
-            toml::Value::Float(_) => (floats[0].to_string(), as_stored(key, floats[0])),
+            toml::Value::Integer(_) => {
+                let i = dim_value(key, ints[0]);
+                (i.to_string(), serde_json::json!(i))
+            }
+            toml::Value::Float(_) => {
+                // The gradient is accepted in [-1, 1] only.
+                let f = if key == "climate.rain_gradient" { floats[0] / 1.0e4 } else { floats[0] };
+                (f.to_string(), as_stored(key, f))
+            }
             toml::Value::Array(a) => {
                 let xs = &floats[..a.len()];
                 let text = xs.iter().map(f64::to_string).collect::<Vec<_>>().join(", ");

@@ -2,7 +2,6 @@
 
 use crate::params::{CoverSpecies, Curve};
 use crate::sim::Sim;
-use crate::world::{PATCHES, PATCHES_X};
 
 /// Piecewise-linear suitability in [0, 1]: 0 at/below min and at/above max,
 /// linear up to 1 at low-opt, 1 through high-opt, linear down to max.
@@ -63,7 +62,7 @@ impl Sim {
 
     /// Producer update for patches with `p % 10 == tick % 10`.
     pub fn update_producers(&mut self, tick: u32) {
-        for p in 0..PATCHES {
+        for p in 0..self.world.dims.patches() {
             if p as u32 % 10 == tick % 10 {
                 self.update_patch_cover(p);
             }
@@ -104,13 +103,7 @@ impl Sim {
         }
 
         if self.patches[p].shrub > cp.shrub_spread_threshold {
-            let (px, py) = ((p % PATCHES_X) as i32, (p / PATCHES_X) as i32);
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let (nx, ny) = (px + dx, py + dy);
-                if nx < 0 || ny < 0 || nx >= PATCHES_X as i32 || ny >= (PATCHES / PATCHES_X) as i32 {
-                    continue;
-                }
-                let q = nx as usize + PATCHES_X * ny as usize;
+            for q in crate::fire::patch_neighbours(self.world.dims, p) {
                 if !self.world.patch_soil[q].is_empty() {
                     self.patches[q].shrub = self.patches[q].shrub.max(cp.shrub_spread_seed);
                 }
@@ -123,7 +116,7 @@ impl Sim {
 mod tests {
     use super::*;
     use crate::params::CoverSpecies;
-    use crate::world::COLS;
+    use crate::world::sq::*;
     use proptest::prelude::*;
 
     #[test]

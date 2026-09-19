@@ -172,7 +172,7 @@ The steps run in this order:
 ### Output files
 - **`meta.json`**, with keys in this order (serde struct order):
   - `format_version`: 1
-  - `dims`: `{x: 64, y: 64, z: 32}`
+  - `dims`: `{x: 64, y: 64, z: 32}` on the original square world. Since sim shot 15 it is `{x, y, z, patch}` from `[world] width, depth, height, patch`: `{x: 256, y: 64, z: 32, patch: 8}` on the reference strip. Every `.bin` size follows from it.
   - `seed`, `ticks`, `snapshot_every`, `year_len`, `water_level`: 10
   - `snapshots`: an array of snapshot ticks
   - `species`

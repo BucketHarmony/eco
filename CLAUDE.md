@@ -33,7 +33,7 @@ The build runs natively on Windows (not the Linux container the SAD assumes). Th
 - Every verification step is a single command that exits non-zero on failure.
 - Everything must run headless: no GPU, display server, external service, or account.
 - Features the SAD defers are left out entirely. Don't add `TODO` hooks, stubs, or plugin interfaces for them.
-- Scale is fixed: 64×64×32 voxels, 64 patches (8×8 columns each), 2 ground-cover species, 1 tree species, 2 animal species, 20,000 ticks.
+- Species and run length are fixed: 2 ground-cover species, 1 tree species, 2 animal species, 20,000 ticks. World dimensions come from params (`[world] width`, `depth`, `height`, `patch`) and are recorded in `meta.json`'s `dims` (`x`, `y`, `z`, `patch`); since shot 15 the reference world is a 256×64×32 strip with 8×8-column patches, and 64×64×32 is the old square world (ecosim/DECISIONS.md, shot 15).
 
 ## ecosim (Rust, single crate: lib + `ecosim` CLI binary)
 
@@ -51,7 +51,7 @@ Done means `cargo test --release` passes and `ecosim check` passes on seeds 1, 2
 
 Architecture points that span modules:
 - **Three tiers with different update rates.**
-  - Voxel fields are flat `Vec<u8>`, indexed `x + 64*(y + 64*z)`, with z up. Light is recomputed per column, only when a tree is planted or dies. Moisture and fertility update every 10 ticks, on surface voxels only.
+  - Voxel fields are flat `Vec<u8>`, indexed `x + width*(y + depth*z)`, with z up. Light is recomputed per column, only when a tree is planted or dies. Moisture and fertility update every 10 ticks, on surface voxels only.
   - Patch fields (grass, shrub, detritus, temperature) update every 10 ticks, staggered so about 6 patches update per tick.
   - Trees update every 50 ticks and animals every tick. Entities are stored as `Vec<Animal>` and `Vec<Tree>` with an `alive` flag and periodic compaction. Don't use an ECS crate, chunking, or an octree.
 - **Fixed tick order:** animals → producers → moisture/fertility (every 10 ticks) → temperature/season (every 100) → snapshot (every N) → stats row.
@@ -87,8 +87,8 @@ The run directory is the only interface between the two projects. Its full forma
 - `series.csv` has one row per tick.
 - `events.csv` (version 3) has one row per event: `tick,kind,species,patch_x,patch_y,x,y,cause,detail`. The kinds and field meanings are in SAD 1's run directory format.
 - Each snapshot is a `snap_NNNNNN/` directory (tick zero-padded to 6 digits) with:
-  - `material.bin` and `light.bin`: 131072 bytes each, x-fastest
-  - `moisture.bin`, `fertility.bin`, and `height.bin`: 4096 bytes each
+  - `material.bin` and `light.bin`: x·y·z bytes each (from `meta.json` `dims`), x-fastest
+  - `moisture.bin`, `fertility.bin`, and `height.bin`: x·y bytes each
   - `patches.json` and `entities.json`
 - All integers are little-endian.
 

@@ -18,8 +18,16 @@ pub const TREE_ANCHOR: u32 = 5000;
 pub const LONG_TICKS: u32 = 60_000;
 /// Start of the `check --long` population band window and the tick its bounds are relative to.
 pub const LONG_BAND_FROM: u32 = 20_000;
-/// Runtime invariant limit for a 20000-tick run, in milliseconds.
+/// Runtime invariant limit for a 20000-tick run on the 64×64 world, in milliseconds.
 pub const RUNTIME_LIMIT_MS: u64 = 30_000;
+/// Ceiling of the area-scaled runtime limit (shot 15: 20k ticks on the strip in under 90 s).
+pub const RUNTIME_CAP_MS: u64 = 90_000;
+
+/// Runtime limit for a world of `cols` columns: [`RUNTIME_LIMIT_MS`] per 64×64 of area, never below
+/// it and never above [`RUNTIME_CAP_MS`].
+pub fn runtime_limit_ms(cols: u64) -> u64 {
+    (RUNTIME_LIMIT_MS * cols / 4096).clamp(RUNTIME_LIMIT_MS, RUNTIME_CAP_MS)
+}
 
 /// Number of fire columns `series.csv` gained in shot 9.
 const FIRE_FIELDS: usize = 2;
@@ -169,8 +177,8 @@ pub struct Series {
 
 /// Where the runtime invariant gets its wall time.
 pub enum Timing {
-    /// Wall time from `timing.json`.
-    Ms(u64),
+    /// Wall time from `timing.json` and the limit for the run's world size (from `meta.json`).
+    Ms(u64, u64),
     /// `timing.json` absent or unreadable: the runtime invariant fails.
     Missing,
     /// Not evaluated (sweeps: wall time isn't comparable across parallel jobs).
@@ -184,11 +192,18 @@ impl Series {
         let mature_at_10000 = (rows.len() > 10_000).then(|| mature_trees_at(run_dir, 10_000));
         let text = fs::read_to_string(run_dir.join("timing.json")).unwrap_or_default();
         let timing = match serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v["wall_ms"].as_u64()) {
-            Some(ms) => Timing::Ms(ms),
+            Some(ms) => Timing::Ms(ms, runtime_limit_ms(meta_cols(run_dir))),
             None => Timing::Missing,
         };
         Ok(Series { rows, mature_at_10000, timing })
     }
+}
+
+/// Columns of the run's world from `meta.json`'s `dims`; 4096 (64×64) when absent or unreadable.
+fn meta_cols(run_dir: &Path) -> u64 {
+    let text = fs::read_to_string(run_dir.join("meta.json")).unwrap_or_default();
+    let v = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+    v["dims"]["x"].as_u64().unwrap_or(64) * v["dims"]["y"].as_u64().unwrap_or(64)
 }
 
 /// Reads one series column from a row.
@@ -396,17 +411,17 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
         (tn as f64, need, margin_at_least(tn as f64, need)),
     );
 
-    // 7. Runtime under 30 s.
-    let limit = RUNTIME_LIMIT_MS as f64;
+    // 7. Runtime under 30 s (per 64×64 of area, at most 90 s).
     match series.timing {
-        Timing::Ms(ms) => out.push(
+        Timing::Ms(ms, limit_ms) => out.push(
             "runtime",
-            "run time < 30 s",
-            ms < RUNTIME_LIMIT_MS,
+            if limit_ms == RUNTIME_LIMIT_MS { "run time < 30 s" } else { "run time < 30 s per 64x64, at most 90 s" },
+            ms < limit_ms,
             format!("{ms} ms"),
-            (ms as f64, limit, margin_at_most(ms as f64, limit)),
+            (ms as f64, limit_ms as f64, margin_at_most(ms as f64, limit_ms as f64)),
         ),
         Timing::Missing => {
+            let limit = RUNTIME_LIMIT_MS as f64;
             out.push("runtime", "run time < 30 s", false, "timing.json missing".into(), (f64::NAN, limit, -1.0))
         }
         Timing::Excluded => {}
@@ -982,10 +997,15 @@ mod tests {
     /// constant-amplitude sinusoid correlates as well at delay ± period as at delay, which would
     /// make pp_lag a tie between lobes. The seed sets the cycle's and the envelope's phases.
     fn cycle_with_seasons(period: f64, delay: i32, seed: u64) -> Vec<StatsRow> {
+        cycle_under(period, delay, seed, 25_000.0)
+    }
+
+    /// [`cycle_with_seasons`] with the amplitude envelope on an `envelope`-tick cycle.
+    fn cycle_under(period: f64, delay: i32, seed: u64, envelope: f64) -> Vec<StatsRow> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let (a, b) = (rng.gen_range(0.0..std::f64::consts::TAU), rng.gen_range(0.0..std::f64::consts::TAU));
         let w = |t: i32, p: f64| t as f64 / p * std::f64::consts::TAU;
-        let cycle = |t: i32| (1.0 + 0.6 * libm::sin(w(t, 25_000.0) + a)) * libm::sin(w(t, period) + b);
+        let cycle = |t: i32| (1.0 + 0.6 * libm::sin(w(t, envelope) + a)) * libm::sin(w(t, period) + b);
         let season = |t: i32| libm::sin(w(t, YEAR as f64));
         let g = |t: i32| 600.0 + 150.0 * cycle(t) + 120.0 * season(t) + t as f64 / 600.0;
         let h = |t: i32| 100.0 + 40.0 * cycle(t - delay) - 15.0 * season(t + 700) - t as f64 / 3000.0;
@@ -1044,6 +1064,39 @@ mod tests {
         assert!(Signature::Cycle { lag: 50, corr: 0.5, period: Some(200) }.pass());
         assert!(!Signature::Cycle { lag: 100, corr: 0.5, period: Some(200) }.pass());
         assert!(!Signature::Cycle { lag: 50, corr: 0.3, period: Some(200) }.pass());
+    }
+
+    /// Shot 15's case: hunters 6000 ticks behind a grazer cycle longer than 12000 ticks, under the
+    /// 4000-tick season and a trend. The check recovers the lag within 200 and the period within 500.
+    /// Envelope of the long-cycle case. Over the 55000-tick window a 25000-tick envelope moves the
+    /// hunter autocorrelation's peak by up to 600 ticks on a 13000–16000-tick cycle, and periods of
+    /// 15000 and more read up to 550 short even under a slow envelope (DECISIONS.md, shot 15); at
+    /// 60000 and periods 12500–14000 the estimate stays within 500.
+    const ENVELOPE: f64 = 60_000.0;
+    fn long_lag_recovered(period: i32, seed: u64) -> Result<(), TestCaseError> {
+        let s = signature(&cycle_under(period as f64, 6000, seed, ENVELOPE), YEAR);
+        let Signature::Cycle { lag, period: Some(got), .. } = s else {
+            return Err(TestCaseError::fail(format!("{s:?}")));
+        };
+        prop_assert!((lag - 6000).abs() <= 200, "lag {} for 6000 on a {}-tick cycle", lag, period);
+        prop_assert!((got - period).abs() <= 500, "period {} for {}", got, period);
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(8)))]
+
+        #[test]
+        fn prop_signature_recovers_a_6000_tick_lag_on_a_long_cycle(p in 12_500i32..=14_000, seed in 0u64..1_000_000) {
+            long_lag_recovered(p, seed)?;
+        }
+    }
+
+    #[test]
+    fn signature_regression_6000_tick_lag_on_a_14000_tick_cycle() {
+        for (p, seed) in [(14_000, 1), (12_500, 2), (13_500, 3)] {
+            long_lag_recovered(p, seed).unwrap();
+        }
     }
 
     #[test]
@@ -1148,7 +1201,7 @@ mod tests {
                 traits: Default::default(),
             })
             .collect();
-        Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms) }
+        Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms, RUNTIME_LIMIT_MS) }
     }
 
     /// The invariants a violation may break: all but `tick_10000`, which needs a run under 10000 ticks.
@@ -1177,7 +1230,7 @@ mod tests {
             "fertility_band" => rows[t].fertility_mean = if side { 39.9 } else { 220.1 },
             "grass_band" => rows[t].grass_mean = if side { 0.049 } else { 0.951 },
             "tree_growth" => rows[20_000].trees = rows[0].trees,
-            "runtime" => s.timing = Timing::Ms(30_000 + t as u64),
+            "runtime" => s.timing = Timing::Ms(30_000 + t as u64, RUNTIME_LIMIT_MS),
             "mature_trees_10k" => s.mature_at_10000 = Some(Ok(t % 35)),
             "animals_10k" => rows[10_000].hunters = 1,
             _ => unreachable!("{key}"),

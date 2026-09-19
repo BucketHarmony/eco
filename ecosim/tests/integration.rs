@@ -1,10 +1,11 @@
 //! Integration tests from SAD 1 and the addendum. They load the crate's own `params.toml`
-//! (so tuning applies) and drive the library directly; only the determinism test shells out.
+//! (so tuning applies) and drive the library directly; only the determinism test shells out. Tests
+//! whose facts were measured on the 64×64 world run there (`common::SQUARE`); the rest run on the
+//! default reference strip.
 
 use ecosim::output::{
     run, run_with as run_opts, write_meta, write_snapshot, RunOptions, FORMAT_VERSION, SERIES_HEADER,
 };
-use ecosim::world::{COLS, WX, WY, WZ};
 use ecosim::{Params, Sim};
 use serde_json::Value;
 use std::fs;
@@ -69,7 +70,7 @@ fn determinism_debug_and_release_binaries_agree() {
 
 #[test]
 fn drought_kills_grass_by_tick_5000() {
-    let mut p = Params::load_default();
+    let mut p = common::square();
     p.climate.rain_base = 0.0;
     p.climate.rain_amp = 0.0;
     p.climate.pond_moisture = 0.0;
@@ -84,7 +85,7 @@ fn drought_kills_grass_by_tick_5000() {
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn hunters_disabled_grazers_stay_within_30pct_of_capacity() {
-    let mut p = Params::load_default();
+    let mut p = common::square();
     p.hunter.start_count = 0;
     p.hunter.immigration_floor = 0;
     let mut sim = Sim::new(p, 42);
@@ -106,6 +107,8 @@ fn read_json(p: &Path) -> Value {
     serde_json::from_slice(&fs::read(p).unwrap()).unwrap()
 }
 
+/// On the reference strip: `meta.json` carries the four dimensions and every `.bin` file has the
+/// size they imply.
 #[test]
 fn snapshot_round_trips_through_reader() {
     let mut sim = Sim::new(Params::load_default(), 3);
@@ -119,7 +122,9 @@ fn snapshot_round_trips_through_reader() {
 
     let meta = read_json(&dir.join("meta.json"));
     assert_eq!(meta["format_version"], FORMAT_VERSION);
-    assert_eq!(meta["dims"]["x"], WX);
+    let d = sim.world.dims;
+    assert_eq!(meta["dims"], serde_json::json!({"x": 256, "y": 64, "z": 32, "patch": 8}));
+    let (wx, wy, cols) = (d.wx, d.wy, d.cols());
     assert_eq!(meta["snapshots"].as_array().unwrap().len(), 4);
     assert_eq!(meta["overrides"], serde_json::json!(["hunter.kill_prob=0.2"]));
     assert_eq!(meta["params"]["season"]["amplitude"], sim.params.season.amplitude as f64);
@@ -128,9 +133,9 @@ fn snapshot_round_trips_through_reader() {
     assert_eq!(fs::read(snap.join("material.bin")).unwrap(), sim.world.material);
     assert_eq!(fs::read(snap.join("light.bin")).unwrap(), sim.world.light);
     assert_eq!(fs::read(snap.join("height.bin")).unwrap(), sim.world.height);
-    assert_eq!(sim.world.material.len(), WX * WY * WZ);
+    assert_eq!(sim.world.material.len(), d.voxels());
     for f in ["moisture.bin", "fertility.bin"] {
-        assert_eq!(fs::read(snap.join(f)).unwrap().len(), COLS);
+        assert_eq!(fs::read(snap.join(f)).unwrap().len(), cols);
     }
     let moist = fs::read(snap.join("moisture.bin")).unwrap();
     for (c, &m) in moist.iter().enumerate() {
@@ -155,8 +160,8 @@ fn snapshot_round_trips_through_reader() {
     assert_eq!(count("hunter"), sim.count_hunters());
     for e in ents {
         let (x, y) = (e["x"].as_f64().unwrap(), e["y"].as_f64().unwrap());
-        assert!((0.0..WX as f64).contains(&x) && (0.0..WY as f64).contains(&y));
-        let col = x as usize + WX * y as usize;
+        assert!((0.0..wx as f64).contains(&x) && (0.0..wy as f64).contains(&y));
+        let col = x as usize + wx * y as usize;
         assert_eq!(e["z"].as_u64().unwrap(), sim.world.height[col] as u64 + 1);
     }
 }
@@ -176,8 +181,21 @@ fn full_run_writes_series_header_and_one_row_per_tick() {
     assert!(!dir.join("snap_000250").exists());
 }
 
-/// Seed 1 for 20000 ticks with `set` applied, a snapshot every 1000, into `dir`. Returns the last row.
+/// The crate's `params.toml` on the square world with `set` applied.
+fn square_with(set: &[String]) -> Params {
+    let set: Vec<&str> = set.iter().map(String::as_str).collect();
+    Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &common::square_set(&set)).unwrap()
+}
+
+/// Seed 1 for 20000 ticks on the square world with `set` applied, a snapshot every 1000, into `dir`.
+/// Returns the last row.
 fn run_with(dir: &Path, set: &[String]) -> ecosim::StatsRow {
+    let set: Vec<&str> = set.iter().map(String::as_str).collect();
+    run_on(dir, &common::square_set(&set))
+}
+
+/// Seed 1 for 20000 ticks with `set` applied, a snapshot every 1000, into `dir`. Returns the last row.
+fn run_on(dir: &Path, set: &[String]) -> ecosim::StatsRow {
     let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), set).unwrap();
     let s = run(params, 1, 20_000, 1000, set, dir).unwrap();
     assert_eq!(s.rows.len(), 20_001);
@@ -193,13 +211,15 @@ fn assert_valid_run(dir: &Path) -> String {
     let meta = read_json(&dir.join("meta.json"));
     let snaps = meta["snapshots"].as_array().unwrap();
     assert_eq!(snaps.len(), 21);
+    let dim = |k: &str| meta["dims"][k].as_u64().unwrap() as usize;
+    let (cols, voxels) = (dim("x") * dim("y"), dim("x") * dim("y") * dim("z"));
     for t in snaps {
         let snap = dir.join(format!("snap_{:06}", t.as_u64().unwrap()));
-        for (f, len) in [("material.bin", WX * WY * WZ), ("light.bin", WX * WY * WZ), ("height.bin", COLS)] {
+        for (f, len) in [("material.bin", voxels), ("light.bin", voxels), ("height.bin", cols)] {
             assert_eq!(fs::read(snap.join(f)).unwrap().len(), len, "{}/{f}", snap.display());
         }
         for f in ["moisture.bin", "fertility.bin"] {
-            assert_eq!(fs::read(snap.join(f)).unwrap().len(), COLS);
+            assert_eq!(fs::read(snap.join(f)).unwrap().len(), cols);
         }
         let finite = |v: &Value| v.as_f64().is_some_and(f64::is_finite);
         let patches = read_json(&snap.join("patches.json"));
@@ -249,6 +269,41 @@ fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
     assert!(text.contains("extinction: hunters at tick"), "{text}");
 }
 
+/// Forced extinction on the reference strip (shot 15): starvation forcing at the default dimensions,
+/// rain gradient and slope. The square world's `energy_cost=1.0` leaves 840 grazers on the strip's
+/// wet east, so this uses 2.0: grazers starve out on seed 1 at tick 3428, hunters at 4582. The run completes 20000 ticks with valid
+/// snapshots of the strip's size, `ecosim stats` names `starved` for the grazers, and the last
+/// snapshot restores onto the strip.
+#[test]
+#[cfg_attr(
+    coverage,
+    ignore = "full-length run on the strip that reaches no line the unit tests miss; runs in `cargo test`"
+)]
+fn forced_grazer_extinction_on_the_strip_runs_to_the_end() {
+    let dir = tmp("forced_extinction_strip");
+    let set: Vec<String> =
+        ["grazer.energy_cost=2.0", "fire.base_rate=0", "disease.grazer_rate=0"].map(String::from).to_vec();
+    let last = run_on(&dir, &set);
+    assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species extinct by the end");
+    assert!(last.trees > 0);
+    let text = assert_valid_run(&dir);
+    assert_eq!(read_json(&dir.join("meta.json"))["dims"], serde_json::json!({"x": 256, "y": 64, "z": 32, "patch": 8}));
+    let grazer =
+        text.lines().find(|l| l.starts_with("extinction: grazers at tick")).unwrap_or_else(|| panic!("{text}"));
+    assert!(grazer.contains("dominant cause: starved"), "{grazer}");
+    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
+    assert_eq!(
+        (sim.tick, sim.world.dims.cols(), sim.count_grazers()),
+        (20_000, 256 * 64, 0),
+        "the last snapshot restores"
+    );
+    assert!(
+        Sim::restore(square_with(&set), &dir.join("snap_020000")).is_err(),
+        "a strip snapshot is not a 64-world one"
+    );
+}
+
 /// Forced extinction by fire: every patch can ignite at any temperature and fire kills any animal
 /// in one tick, so both animal species burn out on seed 1 (hunters at tick 1333, grazers at 1611).
 /// Mutation is off (`heredity.mutation=0`) so fire is the only thing forced: with it on, 709 grazers
@@ -280,11 +335,7 @@ fn forced_fire_extinction_runs_to_the_end_and_is_attributed_to_fire() {
         assert!(line.contains("dominant cause: burnt"), "{line}");
     }
     let snap = dir.join("snap_020000");
-    let sim = Sim::restore(
-        Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap(),
-        &snap,
-    )
-    .unwrap();
+    let sim = Sim::restore(square_with(&set), &snap).unwrap();
     assert_eq!((sim.tick, sim.total_burnt), (20_000, last.total_burnt), "the last snapshot restores");
 }
 
@@ -308,7 +359,7 @@ fn forced_hunter_extinction_by_refractory_runs_to_the_end() {
     let crowded = |rows: &[ecosim::StatsRow]| rows.iter().map(|r| r.deaths[0][3]).sum::<u32>();
     let (all, late) = (crowded(&series), crowded(&series[15_000..]));
     assert!(all > 1000 && late > 0, "grazer crowded deaths {all}, after tick 15000 {late}");
-    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let params = square_with(&set);
     let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
@@ -331,7 +382,7 @@ fn forced_hunter_starvation_by_hunt_cost_runs_to_the_end() {
     assert!(out.status.success());
     let sig = String::from_utf8(out.stdout).unwrap();
     assert!(sig.starts_with("signature: undefined, hunters extinct at tick ") && sig.contains("starved"), "{sig}");
-    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let params = square_with(&set);
     let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
@@ -356,7 +407,7 @@ fn forced_hunter_starvation_by_handling_time_runs_to_the_end() {
     let out = Command::new(env!("CARGO_BIN_EXE_ecosim")).args(["stats", "--signature"]).arg(&dir).output().unwrap();
     let sig = String::from_utf8(out.stdout).unwrap();
     assert!(sig.starts_with("signature: undefined, hunters extinct at tick ") && sig.contains("starved"), "{sig}");
-    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let params = square_with(&set);
     let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
@@ -389,7 +440,7 @@ fn forced_grazer_extinction_under_heredity_runs_to_the_end() {
             assert!(a[k].as_f64().is_some_and(f64::is_finite), "{a}");
         }
     }
-    let params = Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &set).unwrap();
+    let params = square_with(&set);
     let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
     assert_eq!((sim.tick, sim.count_grazers()), (20_000, 0), "the last snapshot restores");
 }
@@ -404,11 +455,13 @@ fn fixture(name: &str) -> PathBuf {
 /// for byte apart from `meta.json` (the version, `forked_from`, the `[fire]`, `[disease]` and
 /// `[heredity]` params, the new immigration and flee keys, and the cooldown's new name) and the new
 /// `state.bin` files. The committed v2 fixture is the same command at the defaults, and is current.
+/// All of it is on the square world (`common::SQUARE`) the fixtures were made on; `meta.json` also
+/// gains the shot-15 dimension keys, the rain gradient and the slope bias.
 #[test]
 fn format_2_and_fire_only_add_to_version_1_files() {
     let v1 = fixture("s42-mini");
     let fresh = tmp("mini_fire_off");
-    let mut p = Params::load_default();
+    let mut p = common::square();
     p.fire.base_rate = 0.0;
     p.disease.grazer_rate = 0.0;
     p.disease.hunter_rate = 0.0;
@@ -440,7 +493,12 @@ fn format_2_and_fire_only_add_to_version_1_files() {
         let o = m.as_object_mut().unwrap();
         o.remove("format_version");
         o.remove("forked_from");
+        o["dims"].as_object_mut().unwrap().remove("patch");
         let params = o["params"].as_object_mut().unwrap();
+        for k in ["width", "depth", "height", "patch", "slope_bias"] {
+            params["world"].as_object_mut().unwrap().remove(k);
+        }
+        params["climate"].as_object_mut().unwrap().remove("rain_gradient");
         params.remove("fire");
         params.remove("disease");
         params.remove("heredity");
@@ -456,11 +514,12 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     // `--format-version 2` still writes the committed v2 fixture byte for byte; format 3 adds only
     // events.csv and the version number.
     let v2 = tmp("mini_v2");
-    run_opts(Params::load_default(), 42, 100, 100, &[], &v2, RunOptions { format_version: 2, ..Default::default() })
+    let set = common::square_set(&[]);
+    run_opts(common::square(), 42, 100, 100, &set, &v2, RunOptions { format_version: 2, ..Default::default() })
         .unwrap();
     assert_eq!(ecosim::check::diff_runs(&fixture("s42-mini-v2"), &v2).unwrap(), Vec::<String>::new());
     let defaults = tmp("mini_defaults");
-    run(Params::load_default(), 42, 100, 100, &[], &defaults).unwrap();
+    run(common::square(), 42, 100, 100, &set, &defaults).unwrap();
     let only = format!("only in {}: events.csv", defaults.display());
     assert_eq!(ecosim::check::diff_runs(&v2, &defaults).unwrap(), [only, "differs: meta.json".to_string()]);
     let (mut a, mut b) = (read_json(&v2.join("meta.json")), read_json(&defaults.join("meta.json")));

@@ -379,3 +379,20 @@ All rounds ran with `disease.hunter_rate=0` and `kill_energy=60`, for 60000 tick
 | `handling_ticks` | 0:200:25 at hunt_cost 1.0 (1, 2, 3) | 1 of 27 cell-seeds persists (200, seed 1). Seeds 2 and 3 lose their hunters to starvation in every cell. |
 | `refractory` | 300:1500:300 at handling 200, hunt_cost 1.0 (1, 2, 3) | 0 of 15. Every cell ends with grazers `eaten` by tick 1400–7000. |
 | `handling_x_cost` | {25, 50, 100, 150} × hunt_cost {0.6, 0.8, 1.0, 1.2} (1, 2, 3, 42) | 7 of 64 cell-seeds persist, and no cell has more than 2 of 4 seeds. None shows pp_corr > 0.3 with 0 < pp_lag < pp_period/2. |
+
+## World dimensions, rain gradient and slope (shot 15)
+
+The shot sets the reference world, and it changed four defaults. The anchor held at every one of them, so no other value changed.
+
+| key | before | after | reason |
+|---|---|---|---|
+| `world.width` | 64 (implicit) | 256 | shot 15 change 5: the reference world is a 256×64×32 strip |
+| `world.depth`, `world.height`, `world.patch` | 64, 32, 8 (implicit) | 64, 32, 8 | made explicit (change 1), no change in value |
+| `climate.rain_gradient` | 0 (new) | 0.6 | change 5: a dry west and a wet east (west edge 0.4 × rain, east edge 1.6 × rain) |
+| `world.slope_bias` | 0 (new) | 4 | change 5: the west edge raised about 4 voxels and the east lowered about 4 |
+
+- **Anchor on the strip (20000 ticks, release).** Seeds 1, 2, 3 and 42 pass every `ecosim check` invariant. The run times are 44.2, 44.4, 58.9 and 50.2 s (the 58.9 s ran alongside the other seeds), against the area-scaled 90 s limit (DECISIONS.md, shot 15).
+  - Minimum grazers are 1478, 2302, 2553 and 2803, and minimum hunters 32, 37, 36 and 34.
+  - Mature trees at tick 10000 are 424, 441, 505 and 515.
+- **Why no anchor change.** The anchor line that could have forced one is "the reference seeds persist at 20k on the strip", and it held.
+- **The sweep** (`sweeps/shot15/`) is `climate.rain_gradient` 0:1.0:0.2 on seeds 1–3. All 18 cells pass, so the default 0.6 sits inside a safe band covering the whole grid.

@@ -5,7 +5,7 @@ use crate::events::{parse_events, Event, EVENTS_FILE, EVENTS_HEADER};
 use crate::params::Params;
 use crate::sim::{Sim, StatsRow};
 use crate::trees::Stage;
-use crate::world::{ColClass, COLS, WX, WY, WZ};
+use crate::world::ColClass;
 use serde::Serialize;
 use std::fmt::Write as _;
 use std::fs;
@@ -29,11 +29,14 @@ pub const SERIES_FIELDS: usize = 35;
 /// Number of trait columns at the end of a `series.csv` line.
 pub const TRAIT_FIELDS: usize = 12;
 
+/// `meta.json`'s `dims`: the world size in columns (x, y) and voxels (z), and the patch edge in
+/// columns. Every `.bin` file of a snapshot has x·y·z (material, light) or x·y (the rest) bytes.
 #[derive(Serialize)]
 struct Dims {
     x: usize,
     y: usize,
     z: usize,
+    patch: usize,
 }
 
 #[derive(Serialize)]
@@ -151,7 +154,7 @@ pub fn format_row(r: &StatsRow) -> String {
 }
 
 fn surface_u8(field: &[f32], sim: &Sim) -> Vec<u8> {
-    (0..COLS)
+    (0..sim.world.dims.cols())
         .map(|c| if sim.world.class[c] == ColClass::Soil { field[c].round().clamp(0.0, 255.0) as u8 } else { 0 })
         .collect()
 }
@@ -166,7 +169,7 @@ fn entities(sim: &Sim) -> Vec<EntityOut> {
             kind: "tree",
             x: t.x,
             y: t.y,
-            z: sim.world.height[t.col()] + 1,
+            z: sim.world.height[t.col(sim.world.dims)] + 1,
             age: t.age,
             stage: sim.tree_stage(t),
             lifespan: t.lifespan,
@@ -181,7 +184,7 @@ fn entities(sim: &Sim) -> Vec<EntityOut> {
                 kind: a.kind,
                 x: a.x,
                 y: a.y,
-                z: sim.world.height[Sim::animal_col(a)] + 1,
+                z: sim.world.height[a.col_index(sim.world.dims)] + 1,
                 energy: a.energy,
                 age: a.age,
                 state: a.state,
@@ -198,7 +201,7 @@ fn entities(sim: &Sim) -> Vec<EntityOut> {
 pub fn write_snapshot(sim: &Sim, run_dir: &Path, state: bool) -> io::Result<()> {
     let dir = run_dir.join(snapshot_dir_name(sim.tick));
     fs::create_dir_all(&dir)?;
-    debug_assert_eq!(sim.world.material.len(), WX * WY * WZ);
+    debug_assert_eq!(sim.world.material.len(), sim.world.dims.voxels());
     fs::write(dir.join("material.bin"), &sim.world.material)?;
     fs::write(dir.join("light.bin"), &sim.world.light)?;
     fs::write(dir.join("moisture.bin"), surface_u8(&sim.moisture, sim))?;
@@ -249,7 +252,7 @@ fn write_meta_info(sim: &Sim, info: &RunInfo, run_dir: &Path) -> io::Result<()> 
     let RunInfo { format_version, seed, ticks, snapshot_every, overrides, forked_from, .. } = *info;
     let meta = Meta {
         format_version,
-        dims: Dims { x: WX, y: WY, z: WZ },
+        dims: Dims { x: sim.world.dims.wx, y: sim.world.dims.wy, z: sim.world.dims.wz, patch: sim.world.dims.patch },
         seed,
         ticks,
         snapshot_every,
@@ -596,7 +599,7 @@ mod tests {
     /// `meta.json`, and that only by `forked_from`.
     fn fork_equals_uninterrupted(seed: u64, ticks: u32, every: u32, at: u32) -> Result<(), TestCaseError> {
         let (parent, child) = (scratch_dir(), scratch_dir());
-        run(Params::load_default(), seed, ticks, every, &[], &parent).unwrap();
+        run(Params::load_square(), seed, ticks, every, &[], &parent).unwrap();
         let s = fork(&ForkSpec { parent: &parent, at, overrides: &[], ticks: ticks - at }, &child).unwrap();
         prop_assert_eq!(s.rows.len() as u32, ticks - at + 1);
         prop_assert_eq!(diff_runs(&parent, &child).unwrap(), vec!["differs: meta.json".to_string()]);
@@ -632,7 +635,7 @@ mod tests {
     #[test]
     fn fork_with_overrides_changes_only_the_future() {
         let (parent, child) = (scratch_dir(), scratch_dir());
-        run(Params::load_default(), 3, 600, 100, &[], &parent).unwrap();
+        run(Params::load_square(), 3, 600, 100, &[], &parent).unwrap();
         let set = ["grazer.energy_cost=10".to_string()];
         let s = fork(&ForkSpec { parent: &parent, at: 200, overrides: &set, ticks: 400 }, &child).unwrap();
         let (pa, ch) = (
@@ -668,7 +671,7 @@ mod tests {
     #[test]
     fn fork_can_switch_handling_on() {
         let (parent, child, grandchild) = (scratch_dir(), scratch_dir(), scratch_dir());
-        run(Params::load_default(), 3, 400, 100, &[], &parent).unwrap();
+        run(Params::load_square(), 3, 400, 100, &[], &parent).unwrap();
         assert!(meta(&parent)["params"]["hunter"].get("handling_ticks").is_none());
         let set = ["hunter.handling_ticks=60".to_string()];
         fork(&ForkSpec { parent: &parent, at: 100, overrides: &set, ticks: 300 }, &child).unwrap();
@@ -694,7 +697,7 @@ mod tests {
         assert!(!out.exists());
 
         let parent = scratch_dir();
-        run(Params::load_default(), 1, 100, 50, &[], &parent).unwrap();
+        run(Params::load_square(), 1, 100, 50, &[], &parent).unwrap();
         let e = err(&parent, 60, &[], &out);
         assert!(e.contains("no snapshot at tick 60"), "{e}");
         assert!(err(&parent, 50, &["grazer.no_such_key=1".into()], &out).contains("grazer.no_such_key"));
@@ -703,7 +706,7 @@ mod tests {
 
         let stateless = scratch_dir();
         let opts = RunOptions { state: false, ..RunOptions::default() };
-        run_with(Params::load_default(), 1, 100, 50, &[], &stateless, opts).unwrap();
+        run_with(Params::load_square(), 1, 100, 50, &[], &stateless, opts).unwrap();
         assert!(!stateless.join("snap_000050/state.bin").exists());
         assert_eq!(diff_runs(&parent, &stateless).unwrap().len(), 3, "only the three state.bin files differ");
         assert!(err(&stateless, 50, &[], &out).contains("no state.bin"));

@@ -8,7 +8,7 @@
 //! | `death` | grazer, hunter | column | `Cause` name | animal id |
 //! | `birth` | grazer, hunter | column | | newborn id |
 //! | `ignition` | | | | |
-//! | `spread` | | | | source patch index (`patch_x + 8·patch_y`) |
+//! | `spread` | | | | source patch index (`patch_x + patches_x·patch_y`, patches_x = width / patch) |
 //! | `burnout` | | | | |
 //! | `germination` | tree | column | | tree id |
 //! | `tree_death` | tree | column | `old_age`, `drought`, `crowded`, `burnt` | tree id |
@@ -20,7 +20,6 @@
 
 use crate::animals::{Cause, Kind};
 use crate::sim::{Deaths, Sim};
-use crate::world::{patch_of, PATCHES_X};
 use std::fmt::Write as _;
 
 /// The file name inside a run directory.
@@ -88,8 +87,8 @@ pub struct Event {
     pub kind: EventKind,
     /// One of `SPECIES`.
     pub species: &'static str,
-    /// Patch index (`patch_x + 8·patch_y`).
-    pub patch: u8,
+    /// Patch coordinates (`patch_x`, `patch_y`).
+    pub patch: (u8, u8),
     /// The column, for events that have one.
     pub col: Option<(u8, u8)>,
     /// A `Cause` name or one of `TREE_CAUSES`; empty for kinds without a cause.
@@ -109,7 +108,7 @@ fn lookup(names: &[&'static str], s: &str, what: &str) -> Result<&'static str, S
 impl Event {
     /// Append this event as one `events.csv` line, newline included.
     pub fn write_line(&self, out: &mut String) {
-        let p = self.patch as usize;
+        let (px, py) = self.patch;
         let (x, y) = (opt(self.col.map(|c| c.0)), opt(self.col.map(|c| c.1)));
         let _ = writeln!(
             out,
@@ -117,8 +116,8 @@ impl Event {
             self.tick,
             self.kind.name(),
             self.species,
-            p % PATCHES_X,
-            p / PATCHES_X,
+            px,
+            py,
             self.cause,
             opt(self.detail)
         );
@@ -136,9 +135,6 @@ impl Event {
             *EventKind::ALL.iter().find(|k| k.name() == f[1]).ok_or_else(|| format!("unknown kind '{}'", f[1]))?;
         let causes: Vec<&'static str> = Cause::ALL.iter().map(|c| c.name()).chain(TREE_CAUSES).chain([""]).collect();
         let (px, py) = (small(f[3])?, small(f[4])?);
-        if px as usize >= PATCHES_X || py as usize >= PATCHES_X {
-            return Err(format!("events.csv: patch ({px}, {py}) is off the world"));
-        }
         let col = match (f[5], f[6]) {
             ("", "") => None,
             (x, y) => Some((small(x)?, small(y)?)),
@@ -147,7 +143,7 @@ impl Event {
             tick: num(f[0])?,
             kind,
             species: lookup(&SPECIES, f[2], "species")?,
-            patch: px + PATCHES_X as u8 * py,
+            patch: (px, py),
             col,
             cause: lookup(&causes, f[7], "cause")?,
             detail: if f[8].is_empty() { None } else { Some(num(f[8])?) },
@@ -184,13 +180,13 @@ pub fn deaths_per_tick(events: &[Event], ticks: usize) -> Result<Vec<Deaths>, St
 /// The first `burnout` without its own earlier `ignition` or `spread` of that patch, if any. A patch
 /// can't be lit while it burns, so each burnout uses up the lighting before it.
 pub fn unlit_burnout(events: &[Event]) -> Option<&Event> {
-    let mut lit = [false; crate::world::PATCHES];
+    let mut lit = std::collections::BTreeSet::new();
     for e in events {
-        let p = e.patch as usize;
         match e.kind {
-            EventKind::Ignition | EventKind::Spread => lit[p] = true,
-            EventKind::Burnout if !lit[p] => return Some(e),
-            EventKind::Burnout => lit[p] = false,
+            EventKind::Ignition | EventKind::Spread => {
+                lit.insert(e.patch);
+            }
+            EventKind::Burnout if !lit.remove(&e.patch) => return Some(e),
             _ => {}
         }
     }
@@ -215,7 +211,9 @@ impl Sim {
     ) {
         if self.log_events {
             let col = col.map(|(x, y)| (x as u8, y as u8));
-            self.events.push(Event { tick: self.tick, kind, species, patch: patch as u8, col, cause, detail });
+            let (px, py) = self.world.dims.patch_xy(patch);
+            let patch = (px as u8, py as u8);
+            self.events.push(Event { tick: self.tick, kind, species, patch, col, cause, detail });
         }
     }
 
@@ -228,7 +226,7 @@ impl Sim {
         cause: &'static str,
         id: u32,
     ) {
-        self.log_with(kind, species, patch_of(x, y), Some((x, y)), cause, Some(id));
+        self.log_with(kind, species, self.world.dims.patch_of(x, y), Some((x, y)), cause, Some(id));
     }
 }
 
@@ -266,7 +264,7 @@ mod tests {
     }
 
     fn busy_params(b: &Busy) -> Params {
-        let mut p = Params::load_default();
+        let mut p = Params::load_square();
         p.fire.base_rate = b.fire_rate;
         p.fire.temp_min = -50.0;
         p.fire.temp_full = -40.0;
@@ -410,11 +408,13 @@ mod tests {
         assert_eq!(unlit_burnout(&events), None);
         for e in events.iter().filter(|e| e.kind == EventKind::Spread) {
             let from = e.detail.unwrap() as usize;
-            assert!(crate::fire::patch_neighbours(from).any(|q| q == e.patch as usize), "{e:?}");
+            let d = crate::world::sq::D;
+            let is_source = |q: usize| d.patch_xy(q) == (e.patch.0 as usize, e.patch.1 as usize);
+            assert!(crate::fire::patch_neighbours(d, from).any(is_source), "{e:?}");
         }
         // A burnout with no ignition before it is caught.
         let lone =
-            Event { tick: 3, kind: EventKind::Burnout, species: "", patch: 9, col: None, cause: "", detail: None };
+            Event { tick: 3, kind: EventKind::Burnout, species: "", patch: (1, 1), col: None, cause: "", detail: None };
         assert_eq!(unlit_burnout(&[lone]), Some(&lone));
         let lit = Event { kind: EventKind::Ignition, tick: 1, ..lone };
         assert_eq!(unlit_burnout(&[lit, lone]), None);
@@ -442,7 +442,15 @@ mod tests {
         let species = prop::sample::select(SPECIES.to_vec());
         let causes: Vec<&'static str> = Cause::ALL.iter().map(|c| c.name()).chain(TREE_CAUSES).chain([""]).collect();
         let col = prop::option::of((any::<u8>(), any::<u8>()));
-        (any::<u32>(), kinds, species, 0u8..64, col, prop::sample::select(causes), prop::option::of(any::<u32>()))
+        (
+            any::<u32>(),
+            kinds,
+            species,
+            (any::<u8>(), any::<u8>()),
+            col,
+            prop::sample::select(causes),
+            prop::option::of(any::<u32>()),
+        )
             .prop_map(|(tick, kind, species, patch, col, cause, detail)| Event {
                 tick,
                 kind,
@@ -468,14 +476,21 @@ mod tests {
 
     #[test]
     fn event_line_regression_empty_fields_and_bad_lines() {
-        let e =
-            Event { tick: 7, kind: EventKind::Ignition, species: "", patch: 63, col: None, cause: "", detail: None };
+        let e = Event {
+            tick: 7,
+            kind: EventKind::Ignition,
+            species: "",
+            patch: (7, 7),
+            col: None,
+            cause: "",
+            detail: None,
+        };
         let mut line = String::new();
         e.write_line(&mut line);
         assert_eq!(line, "7,ignition,,7,7,,,,\n");
         assert_eq!(Event::parse(line.trim_end()), Ok(e));
         for bad in
-            ["7,ignition,,7,7,,,", "7,fire,,7,7,,,,", "7,death,cow,0,0,1,1,eaten,3", "7,death,grazer,8,0,1,1,eaten,3"]
+            ["7,ignition,,7,7,,,", "7,fire,,7,7,,,,", "7,death,cow,0,0,1,1,eaten,3", "7,death,grazer,256,0,1,1,eaten,3"]
         {
             assert!(Event::parse(bad).is_err(), "{bad}");
         }
@@ -484,7 +499,7 @@ mod tests {
             tick: 5,
             kind: EventKind::Death,
             species: "grazer",
-            patch: 0,
+            patch: (0, 0),
             col: None,
             cause: "eaten",
             detail: None,

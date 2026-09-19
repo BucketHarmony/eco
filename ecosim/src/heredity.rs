@@ -88,7 +88,7 @@ mod tests {
     use super::*;
     use crate::params::Params;
     use crate::sim::{flee_offsets, offsets_within};
-    use crate::world::{patch_of, COLS};
+    use crate::world::sq::*;
     use proptest::prelude::*;
 
     /// The clamp: a newborn's trait lies in [0.25, 4] × the species default for any parent value,
@@ -100,7 +100,7 @@ mod tests {
     }
 
     fn sim_with(seed: u64, set: impl Fn(&mut Params)) -> Sim {
-        let mut p = Params::load_default();
+        let mut p = Params::load_square();
         set(&mut p);
         Sim::new(p, seed)
     }
@@ -165,7 +165,7 @@ mod tests {
     /// Each grazer's flee offsets (the prefix of `flee_offsets` within its distance) are exactly
     /// `offsets_within(distance)`, for every distance the clamp allows.
     fn flee_prefix_is_offsets_within(r: f32) -> Result<(), TestCaseError> {
-        let all = flee_offsets(&Params::load_default());
+        let all = flee_offsets(&Params::load_square());
         let n = all.partition_point(|&(_, _, d2)| (d2 as f32).sqrt() <= r);
         prop_assert_eq!(&all[..n], &offsets_within(r)[..]);
         Ok(())

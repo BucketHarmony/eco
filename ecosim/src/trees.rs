@@ -3,7 +3,7 @@
 use crate::events::EventKind;
 use crate::producers::suitability;
 use crate::sim::{Sim, NO_TREE};
-use crate::world::{cidx, in_bounds, patch_of};
+use crate::world::Dims;
 use rand::Rng;
 use serde::Serialize;
 
@@ -41,8 +41,8 @@ pub struct Tree {
 impl Tree {
     /// Index of the trunk column.
     #[inline]
-    pub fn col(&self) -> usize {
-        cidx(self.x as usize, self.y as usize)
+    pub fn col(&self, d: Dims) -> usize {
+        d.cidx(self.x as usize, self.y as usize)
     }
 }
 
@@ -65,11 +65,11 @@ impl Sim {
 
     /// True if no live trunk is closer than `min_spacing` (Chebyshev) to (x, y).
     pub fn spacing_ok(&self, x: i32, y: i32) -> bool {
-        let r = self.params.tree.min_spacing - 1;
+        let (r, d) = (self.params.tree.min_spacing - 1, self.world.dims);
         for dy in -r..=r {
             for dx in -r..=r {
                 let (nx, ny) = (x + dx, y + dy);
-                if in_bounds(nx, ny) && self.trunk_at[cidx(nx as usize, ny as usize)] != NO_TREE {
+                if d.in_bounds(nx, ny) && self.trunk_at[d.cidx(nx as usize, ny as usize)] != NO_TREE {
                     return false;
                 }
             }
@@ -79,19 +79,20 @@ impl Sim {
 
     /// Distinct canopy voxel z values over column (x, y), from live young and mature trees.
     pub fn canopy_z(&self, x: i32, y: i32) -> Vec<u8> {
+        let d = self.world.dims;
         let mut zs: Vec<u8> = Vec::new();
         for dy in -1..=1 {
             for dx in -1..=1 {
                 let (tx, ty) = (x + dx, y + dy);
-                if !in_bounds(tx, ty) {
+                if !d.in_bounds(tx, ty) {
                     continue;
                 }
-                let ti = self.trunk_at[cidx(tx as usize, ty as usize)];
+                let ti = self.trunk_at[d.cidx(tx as usize, ty as usize)];
                 if ti == NO_TREE {
                     continue;
                 }
                 let t = &self.trees[ti as usize];
-                let h = self.world.height[t.col()];
+                let h = self.world.height[t.col(d)];
                 match self.tree_stage(t) {
                     Stage::Sapling => {}
                     Stage::Young => {
@@ -113,15 +114,15 @@ impl Sim {
 
     /// Recompute light and canopy cover for the 3×3 columns around a trunk.
     pub fn refresh_canopy_columns(&mut self, x: u8, y: u8) {
-        let absorb = self.params.world.canopy_absorb;
+        let (absorb, d) = (self.params.world.canopy_absorb, self.world.dims);
         for dy in -1..=1 {
             for dx in -1..=1 {
                 let (cx, cy) = (x as i32 + dx, y as i32 + dy);
-                if !in_bounds(cx, cy) {
+                if !d.in_bounds(cx, cy) {
                     continue;
                 }
                 let zs = self.canopy_z(cx, cy);
-                self.canopy_cover[cidx(cx as usize, cy as usize)] = !zs.is_empty();
+                self.canopy_cover[d.cidx(cx as usize, cy as usize)] = !zs.is_empty();
                 self.world.set_column_light(cx as usize, cy as usize, &zs, absorb);
             }
         }
@@ -136,7 +137,7 @@ impl Sim {
         let (mean, jitter) = (tp.max_age as f32, tp.lifespan_jitter);
         let u: f32 = self.rng.gen_range(-1.0..=1.0);
         let lifespan = (mean * (1.0 + jitter * u)).round().max(0.0) as u32;
-        self.trunk_at[cidx(x, y)] = self.trees.len() as u32;
+        self.trunk_at[self.world.dims.cidx(x, y)] = self.trees.len() as u32;
         self.trees.push(Tree { id, x: x as u8, y: y as u8, age, dry_ticks: 0, lifespan, alive: true });
         self.refresh_canopy_columns(x as u8, y as u8);
         id
@@ -163,11 +164,11 @@ impl Sim {
         let (x, y, col, id) = {
             let t = &mut self.trees[i];
             t.alive = false;
-            (t.x, t.y, t.col(), t.id)
+            (t.x, t.y, t.col(self.world.dims), t.id)
         };
         self.log_at(EventKind::TreeDeath, "tree", (x as usize, y as usize), cause, id);
         self.trunk_at[col] = NO_TREE;
-        self.patches[patch_of(x as usize, y as usize)].detritus += self.params.tree.death_detritus;
+        self.patches[self.world.dims.patch_of(x as usize, y as usize)].detritus += self.params.tree.death_detritus;
         self.refresh_canopy_columns(x, y);
     }
 
@@ -175,14 +176,15 @@ impl Sim {
     /// around its trunk): mature trees with trunks within Chebyshev 2, young trees within 1.
     pub fn crowding(&self, i: usize) -> usize {
         let (x, y) = (self.trees[i].x as i32, self.trees[i].y as i32);
+        let d = self.world.dims;
         let mut n = 0;
         for dy in -2..=2i32 {
             for dx in -2..=2i32 {
                 let (tx, ty) = (x + dx, y + dy);
-                if (dx == 0 && dy == 0) || !in_bounds(tx, ty) {
+                if (dx == 0 && dy == 0) || !d.in_bounds(tx, ty) {
                     continue;
                 }
-                let ti = self.trunk_at[cidx(tx as usize, ty as usize)];
+                let ti = self.trunk_at[d.cidx(tx as usize, ty as usize)];
                 if ti == NO_TREE {
                     continue;
                 }
@@ -201,11 +203,11 @@ impl Sim {
 
     /// Germination probability on a soil column: f_L(surface light)·f_M(moisture)·f_T(patch temp).
     pub fn germination_prob(&self, x: usize, y: usize) -> f32 {
-        let c = cidx(x, y);
+        let c = self.world.dims.cidx(x, y);
         let tp = &self.params.tree;
         suitability(&self.params.tree_light_curve(), self.world.surface_light(c) as f32)
             * suitability(&tp.moisture, self.moisture[c])
-            * suitability(&tp.temp, self.patches[patch_of(x, y)].temperature)
+            * suitability(&tp.temp, self.patches[self.world.dims.patch_of(x, y)].temperature)
     }
 
     fn try_seed(&mut self, i: usize) {
@@ -233,7 +235,7 @@ impl Sim {
                 continue;
             }
             let before = self.tree_stage(&self.trees[i]);
-            let c = self.trees[i].col();
+            let c = self.trees[i].col(self.world.dims);
             self.trees[i].age += tp.update_every;
             self.moisture[c] = (self.moisture[c] - tp.moisture_draw).max(0.0);
             if self.moisture[c] < tp.dry_moisture {
@@ -273,8 +275,9 @@ impl Sim {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::sq::*;
     use crate::world::tests::terrain;
-    use crate::world::{ColClass, COLS, WX, WY};
+    use crate::world::ColClass;
     use proptest::prelude::*;
 
     fn bare_sim() -> Sim {

@@ -11,3 +11,5 @@ sweeps/shot09/*/cells/
 sweeps/shot09/canopy_runs/
 sweeps/shot10/*/cells/
 sweeps/shot11/*/cells/
+sweeps/atlas/*/cells/
+sweeps/atlas/*/flips/*/cells/

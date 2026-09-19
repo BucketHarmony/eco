@@ -149,3 +149,9 @@ hunter_threshold = 4
 [heredity]
 # Heritable animal traits (shot 11). mutation 0 switches it off: newborns copy their parent, no draws.
 mutation = 0.05
+
+[rng]
+# Random stream (shot 14). The seed alone makes the terrain; the stream drives everything after it,
+# so other values replay the same world with independent dynamics. 0 is the stream every earlier
+# run used, and is not written to meta.json.
+stream = 0

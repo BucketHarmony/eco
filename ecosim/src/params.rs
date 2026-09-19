@@ -36,6 +36,9 @@ pub struct Params {
     pub disease: DiseaseParams,
     /// `[heredity]`
     pub heredity: HeredityParams,
+    /// `[rng]`. Left out of `meta.json` at the default stream, so default runs print as before.
+    #[serde(default, skip_serializing_if = "RngParams::is_default")]
+    pub rng: RngParams,
 }
 
 /// Terrain generation and world-level settings.
@@ -323,6 +326,23 @@ pub struct HeredityParams {
     pub mutation: f32,
 }
 
+/// The random stream. Every run draws from one `ChaCha8Rng` seeded from `--seed`. The terrain is
+/// generated first, on stream 0; the rng then switches to `stream` (at the same word position) for
+/// the initial populations and every tick. So one seed keeps its world, and each stream is an
+/// independent replicate of the dynamics on it. Stream 0 is what every run used before the key existed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RngParams {
+    /// ChaCha stream number (0 = the default stream).
+    pub stream: u64,
+}
+
+impl RngParams {
+    fn is_default(&self) -> bool {
+        *self == RngParams::default()
+    }
+}
+
 /// Density-dependent ("crowded") mortality. Per animal update, an animal in a patch holding n of
 /// its species dies with p = rate · max(0, n − threshold) / threshold. A rate of 0 switches it off.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -499,6 +519,14 @@ mod tests {
         serde_json::json!(if key == "hunter.kill_prob" { v } else { v as f32 as f64 })
     }
 
+    /// `p` as JSON with every section present: `meta.json` leaves `[rng]` out at stream 0, so it is
+    /// put back here and every leaf, `rng.stream` included, is compared exactly.
+    fn stored(p: &Params) -> serde_json::Value {
+        let mut v = serde_json::to_value(p).unwrap();
+        v["rng"] = serde_json::to_value(&p.rng).unwrap();
+        v
+    }
+
     fn lookup<'a>(json: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
         key.split('.').fold(json, |j, k| &j[k])
     }
@@ -517,8 +545,7 @@ mod tests {
             other => return Err(TestCaseError::fail(format!("{key}: unexpected leaf type {other:?}"))),
         };
         let set = Params::from_toml_str_with(&defaults(), &[format!("{key}={text}")]).map_err(TestCaseError::fail)?;
-        let (mut got, base) =
-            (serde_json::to_value(&set).unwrap(), serde_json::to_value(Params::load_default()).unwrap());
+        let (mut got, base) = (stored(&set), stored(&Params::load_default()));
         prop_assert_eq!(lookup(&got, key), &want, "{} = {}", key, text);
         let (section, field) = key.split_once('.').unwrap();
         got[section][field] = base[section][field].clone();

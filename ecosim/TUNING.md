@@ -349,3 +349,7 @@ The whole grid, 0:0.2:0.025, passes on seeds 1–3 (`sweeps/shot11/FINDINGS.md`)
 
 ### Final
 No value changed. Mutation stays at its starting value of 0.05, and no other parameter was touched.
+
+## Collapse atlas (shot 14)
+
+No parameter changed. The shot adds `[rng] stream = 0`, which leaves every default run byte-identical, and reports the atlas in `sweeps/atlas/ATLAS.md`.

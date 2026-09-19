@@ -1,0 +1,9 @@
+# shot 14 atlas sweeps, release binary (2026-09-19)
+ecosim sweep --param climate.rain_amp --range 0:8:1 --param hunter.kill_prob --range 0.1:0.5:0.1 --seeds 1,2,3 --jobs 22 --out sweeps/atlas/rain_x_kill
+rain_x_kill rc=0 wall=64s
+ecosim sweep --param grazer.energy_cost --range 0.04:0.16:0.02 --param fire.base_rate --range 0:0.004:0.001 --seeds 1,2,3 --jobs 22 --out sweeps/atlas/energy_x_fire
+energy_x_fire rc=0 wall=86s
+ecosim sweep --param tree.crowding_mortality --range 0:0.05:0.01 --param disease.grazer_rate --range 0:0.01:0.002 --seeds 1,2,3 --jobs 22 --out sweeps/atlas/crowd_x_disease
+crowd_x_disease rc=0 wall=143s
+# stream reruns of the flipping cells: for each, ecosim sweep --param rng.stream --values 1,2,3,4,5 --set K1=V1 --set K2=V2 --seeds 1,2,3 --jobs 8 --out sweeps/atlas/<grid>/flips/K1=V1_K2=V2
+flip reruns: 19 cells x 15 runs, xargs -P 3 (wall about 30 min on a loaded machine)

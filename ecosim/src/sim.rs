@@ -142,6 +142,10 @@ impl Sim {
     pub fn new(params: Params, seed: u64) -> Sim {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let world = World::generate(&params, &mut rng);
+        // The terrain comes from the seed alone; the stream varies everything drawn after it.
+        if params.rng.stream != 0 {
+            rng.set_stream(params.rng.stream);
+        }
         Sim::with_world(params, rng, world)
     }
 

@@ -423,3 +423,33 @@ fn version_1_runs_still_check_stat_and_diff_but_do_not_fork() {
     assert!(err.contains("format_version 1") && err.contains("can't be forked"), "{err}");
     assert!(!dir.exists());
 }
+
+/// `rng.stream` (shot 14). Stream 0 is the stream every earlier run drew from: params with it set
+/// explicitly give a byte-identical run directory, and `meta.json` carries no `rng` section at 0.
+/// Another stream keeps the seed's terrain but is a different run on it, recorded in `meta.json`.
+#[test]
+fn rng_stream_0_is_the_default_stream_and_others_differ() {
+    let (a, b, c) = (tmp("stream_default"), tmp("stream_0"), tmp("stream_5"));
+    let with = |s: &str| {
+        Params::from_toml_str_with(
+            &fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml")).unwrap(),
+            &[s.to_string()],
+        )
+        .unwrap()
+    };
+    run(Params::load_default(), 42, 300, 100, &[], &a).unwrap();
+    run(with("rng.stream=0"), 42, 300, 100, &[], &b).unwrap();
+    run(with("rng.stream=5"), 42, 300, 100, &[], &c).unwrap();
+    assert_eq!(ecosim::check::diff_runs(&a, &b).unwrap(), Vec::<String>::new());
+    let (ma, mb, mc) =
+        (read_json(&a.join("meta.json")), read_json(&b.join("meta.json")), read_json(&c.join("meta.json")));
+    assert!(ma["params"].get("rng").is_none() && mb["params"].get("rng").is_none());
+    assert_eq!(mc["params"]["rng"]["stream"], 5);
+    let differs = ecosim::check::diff_runs(&a, &c).unwrap();
+    assert!(
+        differs.contains(&"differs: series.csv".to_string())
+            && differs.contains(&"differs: snap_000000/entities.json".to_string()),
+        "{differs:?}"
+    );
+    assert!(!differs.iter().any(|d| d.ends_with("height.bin")), "{differs:?}");
+}

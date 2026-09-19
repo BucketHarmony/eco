@@ -577,3 +577,26 @@ These were regenerated in their own commit:
 - `runs/s42` (gitignored)
 
 `fixtures/s42-mini` (v1) is unchanged. ecoview's copy in `ecoview/public/` is stale: it lacks the trait columns and fields. The renderer's shot 12 re-syncs it.
+
+## Collapse atlas (shot 14)
+
+A report-only shot. No rule, default or file format changed. The atlas is `sweeps/atlas/ATLAS.md`.
+
+**`rng.stream`**
+- **The new key is `[rng] stream`, default 0.** `Sim::new` seeds the ChaCha8 rng from `--seed` and generates the terrain on stream 0. It then calls `set_stream(stream)`, only when the stream isn't 0, and draws the initial trees and animals and every tick from there.
+- **The stream switches after the terrain on purpose.** A seed keeps its world, and each stream is an independent replicate of the dynamics on that world. That is what separates a seed-to-seed flip caused by the terrain from one that is noise. Switching before the terrain would make every stream a new world, and the two causes couldn't be told apart.
+- **Stream 0 changes nothing.** `set_stream` isn't called at 0, so no draw moves. The key is also left out of `meta.json` at 0 (`skip_serializing_if`, with `serde(default)` when reading), so default runs are byte-identical to the manifest, `meta.json` included, and older `meta.json` files still fork.
+  - Forks restore the stream from `state.bin`, which has always recorded it.
+  - `--set rng.stream=N` on a fork is rejected, because the key isn't in the parent's params at 0. A fork continues its parent's stream by design.
+- **Test.** `rng_stream_0_is_the_default_stream_and_others_differ` checks three things. Explicit stream 0 gives a byte-identical run directory with no `rng` in `meta.json`. Stream 5 changes the series and entities. It records `rng.stream` in `meta.json` and never changes `height.bin`. The manifest test covers the default run at 20 000 ticks.
+
+**Atlas definitions** (`sweeps/atlas/atlas.py`, which reads the gitignored per-cell series)
+- **Outcome classes.** A cell-seed is *persist* when neither animal species reaches 0 at any tick. It is *grazer* or *hunter* collapse when only that species reaches 0, and *both* when both do. Reaching 0 once counts, which is the `first_extinction` rule. With every immigration floor at 0, no species comes back.
+- **Trees aren't a class.** The prompt names four outcomes. A † marks cells in which trees reach 0.
+- **Dominant cause.** For each first collapse, the cause is the one with the most deaths in the 500 ticks ending at its extinction tick. This is the `ecosim stats` rule. The grid shows the most common (first species, cause) over the cell's collapsed seeds.
+- **Region.** A 4-connected set of cells in which all three seeds have the same outcome.
+- **Flip.** A cell whose three seeds don't all have the same outcome.
+- **Noise test.** Every flipping cell is rerun on streams 1–5 for each of seeds 1–3, which gives 6 replicates per seed with stream 0 included.
+  - A flip is *seed-determined* when every seed repeats its stream-0 outcome on all 5 extra streams. Then the world, not the draws, decides the outcome.
+  - It is *noise* when any seed changes outcome across its streams.
+- **Output layout.** The reruns use `ecosim sweep --param rng.stream --values 1,2,3,4,5` with the cell's two values as `--set`. Their output goes to `sweeps/atlas/<grid>/flips/<cell>/`. `sweep.csv` and `sweep.md` are committed, and the per-cell series are gitignored like every other sweep's.

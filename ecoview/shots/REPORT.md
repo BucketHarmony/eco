@@ -17,3 +17,26 @@
 | `11_traits_t20000_top.png` | Grazers blue below the default cost, red above | **PASS.** The ground is the material colour, hunters are gray, and grazers are a mix of blue, pale and red dots, with more blue than red (425 below 1, 248 above), matching the series mean of 0.964. No species-yellow grazers are left. |
 
 **Expectation wording.** The SAD's "grazer curve oscillating, hunter curve lagging it, tree curve rising" still holds. Since ecosim shot 10, crowding mortality, not starvation, is the main cause of death, and the chart's third panel shows it.
+
+## Performance
+
+`tests/e2e/perf.spec.ts` (runs in `npm test`) on `runs/s42` at tick 10000, 64×64×32. Draw is 60 back-to-back renders of one view through `window.__ecoviewBench`, each completed with `gl.finish()` plus a one-pixel readback. Step is `__ecoviewGoto(tick)` → `__ecoviewReady` over ticks 10000–14900, which is what Play sees. The numbers are from this machine (win32-x64, Chromium 153.0.8010.12, ANGLE on Vulkan SwiftShader). CI's numbers are in `DECISIONS.md` and in the `ecoview-perf` artifact.
+
+**These come from SwiftShader, a software GPU running on the CPU.** They measure the viewer's own cost and catch regressions. They are not the frame rate on a real graphics card, which would be far higher.
+
+| Overlay | iso median / p95 ms | iso fps | top median / p95 ms | top fps |
+| --- | --- | --- | --- | --- |
+| material | 46.75 / 49.1 | 21.4 | 45.25 / 48.0 | 22.1 |
+| light | 47.0 / 49.0 | 21.3 | 34.8 / 36.7 | 28.7 |
+| moisture | 46.15 / 48.7 | 21.7 | 34.4 / 36.9 | 29.1 |
+| fertility | 45.9 / 48.9 | 21.8 | 34.35 / 37.2 | 29.1 |
+| temperature | 46.7 / 48.3 | 21.4 | 34.65 / 36.8 | 28.9 |
+| fire | 46.65 / 48.7 | 21.4 | 34.4 / 36.5 | 29.1 |
+| crowding | 46.7 / 49.0 | 21.4 | 34.45 / 36.6 | 29.0 |
+| traits | 46.2 / 49.0 | 21.6 | 34.2 / 37.2 | 29.2 |
+
+| Step (50 snapshots) median / p95 | Step fps | First load |
+| --- | --- | --- |
+| 66.5 / 126.2 ms | 15.0 | 220 ms |
+
+The gates are a median draw of at most 250 ms per pair and a median step of at most 1000 ms.

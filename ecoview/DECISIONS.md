@@ -188,3 +188,29 @@ The job sets its own `defaults.run.working-directory: ecoview`, which overrides 
 - **Which reference.** It is `shots/reference/02` when `PLATFORM` matches this machine, otherwise the fresh `shots/02` from `npm run shot`. CI runs Linux against Windows references, so a hard reference check there would fail on platform drift alone (Shot 6). `PLATFORM` moved from `shot-ref.mjs` to `chromium.mjs` so both scripts share it.
 - **Measured on this machine:** 201 frames in 31.5 s, and frame 100 vs reference 02 at 0.000%. A mutation check that compared against `03_light` instead failed at 41%.
 - **CI.** The ecoview job installs ffmpeg, runs `npm run film:check` after the screenshots, and uploads `film/s42-material.mp4` as the `ecoview-film` artifact. The job timeout went from 8 to 12 minutes to fit the apt install and the film.
+
+## Frame-rate and scrub performance (shot 28)
+
+**The spec.** `tests/e2e/perf.spec.ts` runs in `npm test`, writes `perf/perf.json` (gitignored), and CI uploads the file as the `ecoview-perf` artifact.
+- **Draw rate.** `runs/s42` at tick 10000, every overlay in the viewer (the prompt's seven plus `temperature`) with the `iso` and `top` cameras, so 16 pairs. The spec switches through the `#overlay` and `#cam` selects on a single page load, waits for `__ecoviewReady`, then calls `window.__ecoviewBench(60)`.
+- **The bench hook** is in `main.ts`. For each frame it calls the same `render()` that on-demand drawing uses, then `gl.finish()`, then reads one pixel with `readPixels`. `finish()` alone isn't guaranteed to block until Chromium's GPU process has finished, and the readback is. The hook runs only when it is called. It redraws the unchanged scene, so it leaves the canvas as it was and never touches `__ecoviewReady`. There is still no render loop, and all 11 references pass `shot:check` at 0.000%.
+- **Step rate.** 50 consecutive snapshots, ticks 10000–14900, material/iso. Each step is timed in the page from `__ecoviewGoto(tick)` until `__ecoviewReady` is true, polled with `setTimeout(0)`. Every step fetches and parses a new snapshot, because the 8-entry cache holds none of them, and that is what a viewer sees when they press Play.
+- **First load** is timed in Node, from `page.goto` until `__ecoviewReady`. It includes fetching and parsing the 20,001-row `series.csv`.
+- **Summary.** The median, the p95 (nearest rank) and fps = 1000 / median, rounded to 0.01.
+- **World size.** Shot 16 hasn't landed, so `runs/` has only the 64×64×32 world, and `perf.json` records `world: "64x64x32"`.
+
+**Thresholds.** The test fails only if a pair's median draw is over 250 ms or the median step is over 1000 ms, which are the prompt's numbers. The first pair over the draw gate stops the measurement, so a gross regression fails on the gate within seconds instead of on the 5-minute test timeout. `perf.json` is written either way.
+
+**Baseline.** SwiftShader is a software GPU, so these numbers measure the viewer's own cost and catch regressions. They are not real-world fps on a graphics card.
+
+| | Local (win32-x64, Chromium 153.0.8010.12, ANGLE Vulkan SwiftShader) | CI (ubuntu-latest, linux-x64, same Chromium and GL string), run 35442074573 |
+| --- | --- | --- |
+| Draw, iso (8 overlays), median / p95 | 45.9–47.0 / ≤49.1 ms (≈21.5 fps) | 52.3–56.8 / ≤73.3 ms (≈18.5 fps) |
+| Draw, top, material, median / p95 | 45.3 / 48.0 ms | 46.9 / 58.5 ms |
+| Draw, top, field overlays (7), median / p95 | 34.2–34.8 / ≤37.2 ms (≈29 fps) | 34.0–37.9 / ≤44.4 ms (≈28 fps) |
+| Step, median / p95 | 66.5 / 126.2 ms (15.0 fps) | 94.5 / 184.0 ms (10.6 fps) |
+| First load | 220 ms | 227 ms |
+
+Top on a field overlay is cheaper because canopies are not drawn there (see "Canopies are hidden in the top camera on field overlays"). Both gates have plenty of headroom on the slower machine, CI: 4.4× for draw (250 against 56.75 ms, fertility/iso) and 10.6× for step (1000 against 94.45 ms).
+
+**Mutation check.** A 300 ms busy-wait added at the top of `render()` turned the spec red on the gate: `draw material/iso`, 344.05 ms against ≤ 250. The sleep was reverted. Before the early stop was added, the same mutation failed only on the test timeout, after 5 minutes.

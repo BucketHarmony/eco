@@ -13,6 +13,8 @@ declare global {
   interface Window {
     __ecoviewReady: boolean;
     __ecoviewError?: string;
+    /** Moves to the snapshot nearest `tick` without reloading the page (used by scripts/film.mjs). */
+    __ecoviewGoto: (tick: number) => void;
   }
 }
 
@@ -206,5 +208,7 @@ initControls(ui, {
   onSnapshotIndex: stepTo,
   onPlayToggle: togglePlay,
 });
+
+window.__ecoviewGoto = (tick) => void apply({ ...state, tick });
 
 void apply(state);

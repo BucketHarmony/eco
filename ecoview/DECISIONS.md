@@ -168,3 +168,23 @@ The job sets its own `defaults.run.working-directory: ecoview`, which overrides 
 - A mutation check confirmed the traits test fails when blue and red are swapped.
 - The tests decode the screenshot with `pngjs`, typed by a small `tests/pngjs.d.ts` rather than a new `@types` dependency.
 - Unit tests cover the new colour functions, `grazersPerPatch` and the optional series columns.
+
+## Time-lapse export (shot 13)
+
+**Command.** `npm run film -- --run runs/s42 --overlay material --cam iso --every 100 --fps 12 --out film/s42-material.mp4` builds, serves `dist/` on port 4175 (so it can run beside the test and shot servers), captures the frames and encodes them. `--every` is in ticks: a frame is every snapshot whose tick is a multiple of it, so the command above gives 201 frames (ticks 0–20000). `--limit N` keeps the first N frames and `--max-seconds S` fails the export if it runs longer. `film/` is gitignored.
+
+**Frames**
+- **One page load, then stepping.** The script loads the run once and moves between snapshots through `window.__ecoviewGoto(tick)`, a four-line hook in `main.ts` that calls the same `apply()` the slider uses. Reloading the page per frame would re-fetch and re-parse the 20,001-row series every time. Each frame waits for `__ecoviewReady`, as the screenshot script does.
+- **The caption bar sits under the view, not on it.** The film page's viewport is 1280×832, and the script adds a fixed 960×32 dark bar at y 800 with `tick N   grazers G   hunters H   trees T`, read from `series.csv` by header name. A frame is the 960×832 clip at the origin. So "crop the caption bar" means taking the top 960×800, which is exactly `#view`, and no part of the world is covered. The bar is added by the script, not the app, so the app has no film mode.
+- Frames are PNGs in `<out without .mp4>-frames/NNNNN.png`, with `frames.json` recording the options and the tick of every frame.
+- **Encoding** is `ffmpeg -framerate FPS -c:v libx264 -pix_fmt yuv420p -crf 20 -preset medium`. H.264 in yuv420p plays everywhere, and 960 and 832 are both even. The PNG frames are the deterministic artefact. The MP4 is not claimed to be byte-identical across ffmpeg builds.
+- **ffmpeg** has to be on PATH. On Linux and in CI it's `apt-get install ffmpeg`, and on Windows `winget install Gyan.FFmpeg`. A missing ffmpeg fails with that hint.
+
+**Checks**
+- **Determinism.** `tests/e2e/film.spec.ts` captures 20 frames of `runs/s42` (every 1000 ticks) twice, each in a fresh browser context, and requires the PNG bytes to match frame for frame. It also requires the 20 hashes to be distinct, so two identical blank sets can't pass. It runs in `npm test` and needs no ffmpeg.
+- **`npm run film:check`** makes the s42 film with `--max-seconds 180`, then `scripts/film-check.mjs` checks it:
+  - `ffprobe` counts one MP4 frame per PNG;
+  - frame 100 is tick 10000, and with the caption cropped off it is compared with `02_material_t10000_iso.png` cropped to `#view`. The comparison uses pixelmatch at threshold 0.1 and allows at most 2% of pixels to differ, as `shot-ref.mjs` does.
+- **Which reference.** It is `shots/reference/02` when `PLATFORM` matches this machine, otherwise the fresh `shots/02` from `npm run shot`. CI runs Linux against Windows references, so a hard reference check there would fail on platform drift alone (Shot 6). `PLATFORM` moved from `shot-ref.mjs` to `chromium.mjs` so both scripts share it.
+- **Measured on this machine:** 201 frames in 31.5 s, and frame 100 vs reference 02 at 0.000%. A mutation check that compared against `03_light` instead failed at 41%.
+- **CI.** The ecoview job installs ffmpeg, runs `npm run film:check` after the screenshots, and uploads `film/s42-material.mp4` as the `ecoview-film` artifact. The job timeout went from 8 to 12 minutes to fit the apt install and the film.

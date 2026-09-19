@@ -7,6 +7,7 @@ import path from 'node:path';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
 import { SHOTS } from './shots.mjs';
+import { PLATFORM } from './chromium.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const shots = path.join(root, 'shots');
@@ -14,7 +15,6 @@ const refDir = path.join(shots, 'reference');
 const diffDir = path.join(shots, 'diff');
 const THRESHOLD = 0.1;
 const MAX_DIFF = 0.02;
-export const PLATFORM = `${process.platform}-${process.arch} swiftshader`;
 
 const mode = process.argv[2];
 if (mode === 'accept') {

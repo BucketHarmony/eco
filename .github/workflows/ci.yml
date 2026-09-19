@@ -101,12 +101,12 @@ jobs:
           ./target/release/ecosim run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000
           ./target/release/ecosim check --long ci-runs/long-s1
 
-  # ecoview gate: build the seed-42 run it renders, then build, unit + scenario tests, and screenshots.
+  # ecoview gate: build the seed-42 run it renders, then build, unit + scenario tests, screenshots and the s42 film.
   # shot:check compares against references rendered on the platform in shots/reference/PLATFORM, so it
   # runs only on a matching runner; elsewhere it is skipped with a notice (ecoview/DECISIONS.md, Shot 6).
   ecoview:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     defaults:
       run:
         working-directory: ecoview
@@ -161,6 +161,19 @@ jobs:
           else
             echo "::notice title=shot:check skipped::references were rendered on $ref, this runner is $here"
           fi
+
+      # The film check compares frame 100 with shots/reference/02 on a matching platform, else with the fresh shots/02.
+      - name: film
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          npm run film:check
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ecoview-film
+          path: ecoview/film/s42-material.mp4
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         if: always()

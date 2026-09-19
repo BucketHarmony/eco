@@ -676,20 +676,25 @@ fn deseasonalise(x: &[f64], year_len: u32) -> Vec<f64> {
 /// pp_period: the lag of the first positive local maximum of `h`'s autocorrelation after the
 /// autocorrelation has first fallen below 0, searching lags `SIG_LAG_STEP`..=`SIG_MAX_PERIOD` in
 /// `SIG_LAG_STEP`s. A local maximum is strictly above the lag before it and at least the lag after
-/// it. `None` when there is none (or the series is too short to reach one).
+/// it. `None` when there is none (or the series is too short to reach one). Lags are computed one
+/// at a time and the search stops at the first match, since each costs a pass over the window.
 fn hunter_period(h: &[f64]) -> Option<i32> {
-    let ac: Vec<Option<f64>> = (SIG_LAG_STEP..=SIG_MAX_PERIOD + SIG_LAG_STEP)
-        .step_by(SIG_LAG_STEP as usize)
-        .map(|lag| {
-            let k = lag as usize;
-            (k + 2 <= h.len()).then(|| pearson(&h[..h.len() - k], &h[k..])).flatten()
-        })
-        .collect();
-    let neg = ac.iter().position(|c| c.is_some_and(|c| c < 0.0))?;
-    (neg + 1..ac.len() - 1).find_map(|i| {
-        let (prev, c, next) = (ac[i - 1]?, ac[i]?, ac[i + 1]?);
-        (c > 0.0 && c > prev && c >= next).then_some((i as i32 + 1) * SIG_LAG_STEP)
-    })
+    let ac = |lag: i32| {
+        let k = lag as usize;
+        (k + 2 <= h.len()).then(|| pearson(&h[..h.len() - k], &h[k..])).flatten()
+    };
+    let (mut fell, mut prev, mut cur) = (false, None, None);
+    for lag in (SIG_LAG_STEP..=SIG_MAX_PERIOD + SIG_LAG_STEP).step_by(SIG_LAG_STEP as usize) {
+        let next = ac(lag);
+        if let (true, Some(p), Some(c), Some(n)) = (fell, prev, cur, next) {
+            if c > 0.0 && c > p && c >= n {
+                return Some(lag - SIG_LAG_STEP);
+            }
+        }
+        fell |= next.is_some_and(|n| n < 0.0);
+        (prev, cur) = (cur, next);
+    }
+    None
 }
 
 /// The predator–prey signature (`ecosim stats --signature`, sweep columns `pp_lag`, `pp_corr`,

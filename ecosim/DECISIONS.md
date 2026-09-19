@@ -153,6 +153,10 @@ All of these are behaviour-preserving, and the manifest is unchanged.
   - `map_or(true, …)` became `is_none_or`.
   - Indexed loops became iterators.
 - **No `#[allow]` was needed anywhere**, including `too_many_arguments`.
+- **The sim's trigonometry goes through the pure-Rust `libm` crate.** The first CI run on Linux failed the manifest test: seed 42 diverged from the Windows run at tick 12300.
+  - Cause: `f32::sin` and `f32::cos` call the platform's C math library (MSVC on Windows, glibc on Linux), and the two differ in the last bit for some inputs. The calls are in season temperature, rain, and seed-dispersal angles. One flipped `.round()` in seed placement moves a tree, and the runs diverge from there.
+  - Fix: `libm::sinf` and `libm::cosf` give the same bits on every platform. On Windows they reproduce the old output exactly: the s42 manifest still matches, and seeds 1–3 are byte-identical. So `runs/s42`, the fixtures and ecoview's copy stay valid, and the manifest was not regenerated.
+  - Guard: `clippy.toml` disallows `f32::{sin, cos, tan, exp, ln, powf}`, so a new platform math call fails step 2. `sqrt`, `powi` and basic arithmetic are exact IEEE operations and stay as they are.
 - **Dead code was deleted rather than tested.** Coverage found three `pub fn`s that nothing in the crate or its CLI called: `Params::from_toml_str`, `Sim::count_mature_trees` and `World::count_class`. All three were removed.
 
 **Properties I tried to state and couldn't** (or stated only in a weaker form)

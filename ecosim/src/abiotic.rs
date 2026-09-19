@@ -32,7 +32,7 @@ impl Sim {
     /// Rain added to every soil column on a soil update: rain_base − rain_amp·sin(2π·tick/year_len).
     pub fn rain(&self, tick: u32) -> f32 {
         let c = &self.params.climate;
-        c.rain_base - c.rain_amp * (2.0 * PI * tick as f32 / c.year_len as f32).sin()
+        c.rain_base - c.rain_amp * libm::sinf(2.0 * PI * tick as f32 / c.year_len as f32)
     }
 
     /// Evaporation amount for a column, from its patch temperature.
@@ -106,7 +106,8 @@ impl Sim {
     /// Patch temperature: base + amp·sin(2π·tick/year_len) − canopy_cool·canopy_fraction.
     pub fn update_temperature(&mut self, tick: u32) {
         let cl = &self.params.climate;
-        let season = cl.temp_base + self.params.season.amplitude * (2.0 * PI * tick as f32 / cl.year_len as f32).sin();
+        let season =
+            cl.temp_base + self.params.season.amplitude * libm::sinf(2.0 * PI * tick as f32 / cl.year_len as f32);
         for p in 0..PATCHES {
             let (px, py) = (p % 8, p / 8);
             let mut covered = 0;

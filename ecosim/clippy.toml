@@ -1,0 +1,9 @@
+# Platform libm results differ between MSVC and glibc; sim math goes through the `libm` crate (DECISIONS.md).
+disallowed-methods = [
+    { path = "f32::sin", reason = "platform-dependent; use libm::sinf" },
+    { path = "f32::cos", reason = "platform-dependent; use libm::cosf" },
+    { path = "f32::tan", reason = "platform-dependent; use libm::tanf" },
+    { path = "f32::exp", reason = "platform-dependent; use libm::expf" },
+    { path = "f32::ln", reason = "platform-dependent; use libm::logf" },
+    { path = "f32::powf", reason = "platform-dependent; use libm::powf" },
+]

@@ -171,8 +171,8 @@ impl Sim {
         let (x, y) = (self.trees[i].x as f32, self.trees[i].y as f32);
         let r = self.params.tree.seed_radius * self.rng.gen::<f32>().sqrt();
         let theta = 2.0 * std::f32::consts::PI * self.rng.gen::<f32>();
-        let tx = (x + r * theta.cos()).round() as i32;
-        let ty = (y + r * theta.sin()).round() as i32;
+        let tx = (x + r * libm::cosf(theta)).round() as i32;
+        let ty = (y + r * libm::sinf(theta)).round() as i32;
         if !self.world.is_soil(tx, ty) || !self.spacing_ok(tx, ty) {
             return;
         }

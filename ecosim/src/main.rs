@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
+use ecosim::bundle::Bundle;
 use ecosim::check::{self, check_run, check_run_long, diff_runs, signature_line, stats_report};
-use ecosim::output::{fork, run_profiled, run_with, ForkSpec, RunOptions, FORMAT_VERSION};
+use ecosim::output::{fork, run_profiled, run_with, ForkSpec, RunOptions, BUNDLE_FORMAT_VERSION, FORMAT_VERSION};
 use ecosim::sweep::{baseline, margin_table, parse_range, parse_values, sweep, ParamSpec, SweepConfig};
 use ecosim::Params;
 use std::path::{Path, PathBuf};
@@ -33,9 +34,14 @@ enum Cmd {
         /// Write `state.bin` into every snapshot, so the run can be forked (`--snapshot-state false` to skip).
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         snapshot_state: bool,
-        /// Run directory format: 3 writes `events.csv`; 2 writes the version-2 directory without it.
-        #[arg(long, default_value_t = FORMAT_VERSION, value_parser = clap::value_parser!(u32).range(2..=3))]
-        format_version: u32,
+        /// Build the world from this world bundle instead of noise terrain (`docs/SCENE-CONTRACT.md`).
+        /// The bundle sets `[world] width` and `depth`, and the run directory is format version 4.
+        #[arg(long, value_name = "BUNDLE_DIR")]
+        world: Option<PathBuf>,
+        /// Run directory format: 3 (the default) writes `events.csv`; 2 writes the version-2
+        /// directory without it; 4 is a `--world` run's, and is its default.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=4))]
+        format_version: Option<u32>,
         /// Write the wall time of each tick phase to this JSON file, which must lie outside --out.
         /// The run directory is the same with and without it.
         #[arg(long, value_name = "FILE")]
@@ -172,7 +178,7 @@ fn inside(file: &Path, dir: &Path) -> bool {
 
 fn main() -> ExitCode {
     match Cli::parse().cmd {
-        Cmd::Run { seed, ticks, out, snapshot_every, params, set, snapshot_state, format_version, profile } => {
+        Cmd::Run { seed, ticks, out, snapshot_every, params, set, snapshot_state, world, format_version, profile } => {
             if snapshot_every == 0 {
                 eprintln!("--snapshot-every must be > 0");
                 return ExitCode::FAILURE;
@@ -181,14 +187,32 @@ fn main() -> ExitCode {
                 eprintln!("--profile must be outside the run directory --out");
                 return ExitCode::FAILURE;
             }
-            let p = match Params::load_with(&params, &set) {
+            let format_version =
+                format_version.unwrap_or(if world.is_some() { BUNDLE_FORMAT_VERSION } else { FORMAT_VERSION });
+            if world.is_some() != (format_version == BUNDLE_FORMAT_VERSION) {
+                eprintln!(
+                    "--format-version {BUNDLE_FORMAT_VERSION} is the world-bundle format: use it with --world, and only with it"
+                );
+                return ExitCode::FAILURE;
+            }
+            let bundle = match world.as_deref().map(Bundle::load).transpose() {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let p = match Params::load_with(&params, &set).and_then(|mut p| {
+                // The bundle's own dimensions win over the params file and any --set of them.
+                bundle.as_ref().map_or(Ok(()), |b| b.apply_to(&mut p)).map(|()| p)
+            }) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("{e}");
                     return ExitCode::FAILURE;
                 }
             };
-            let opts = RunOptions { state: snapshot_state, format_version };
+            let opts = RunOptions { state: snapshot_state, format_version, bundle: bundle.as_ref() };
             let result = match &profile {
                 None => run_with(p, seed, ticks, snapshot_every, &set, &out, opts),
                 Some(file) => run_profiled(p, seed, ticks, snapshot_every, &set, &out, opts).and_then(|(s, prof)| {

@@ -138,6 +138,19 @@ Later versions only add files (`ecosim/DECISIONS.md` has the details). Version 2
 - `detail`: the entity's id for entity kinds (the newborn's for `birth`); for `spread`, the source patch index `patch_x + 8·patch_y`; empty for `ignition` and `burnout`.
 - Tick 0 has no events. The file is appended at each snapshot, so rows up to a snapshot's tick are on disk when its directory is.
 
+Version 4 is a run whose world was built from a world bundle (`ecosim run --world`, `docs/SCENE-CONTRACT.md`) rather than from noise. Everything above is unchanged; the bundle's static ground grid is added once at the run root, not per snapshot:
+
+```
+runs/g1/
+  world/
+    ground_h.bin      gw·gd × f32 LE, x-fastest, metres above the crop minimum
+    medium.bin        gw·gd × u8, an index into meta.json's world.media
+    building_h.bin    gw·gd × f32 LE, roof height above ground, 0 where there is no roof
+    pipes.json        [{id, inlet: [x, y], outlet: [x, y], capacity_m3h, illustrative}], metres from the SW corner
+```
+
+`meta.json` gains `"world": {"name", "ground_cell_m", "ground_width", "ground_depth", "media": [...]}`, where `ground_width` × `ground_depth` is the ground grid (`gw`, `gd` above) and `media` maps a `medium.bin` code to its name. The ground grid is finer than the ecology grid: `ground_width = dims.x / ground_cell_m`, with cell (0, 0) at the south-west corner, x east and y north, the same orientation as the voxel fields.
+
 ### Debug loop and tests
 
 Claude Code's loop is: `cargo build` → `cargo test` → `ecosim run` on seeds 1, 2, 3 → `ecosim check` on each → read failures → adjust `params.toml` or code → repeat. No step needs a human.

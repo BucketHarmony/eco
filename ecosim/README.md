@@ -22,6 +22,7 @@ ecosim diff runs/a runs/b                    # byte-compare two run directories
 ecosim fork runs/s1 --at 10000 --ticks 10000 --out runs/f1 [--set key=value ...]   # continue from a snapshot
 ecosim sweep --baseline --seeds 1,2,3        # margin table; see `ecosim sweep --help`
 ecosim run --seed 42 --ticks 2000 --out runs/p --profile p.json   # also write wall time per tick phase (outside --out)
+ecosim run --world bundles/capitol --seed 1 --ticks 20000 --out runs/g1   # build the world from a world bundle instead of noise
 cargo bench --bench tick                     # ticks/s on 64x64 and 256x64 against benches/baseline.json
 ```
 
@@ -63,6 +64,25 @@ Both CI and `just` set `PROPTEST_RNG_SEED`, so the property tests explore the sa
 ## Snapshots and forks
 
 Each snapshot directory holds `state.bin` beside the renderer's files (`format_version` 2). `state.bin` is the exact sim state: RNG position, full-precision fields and every entity. `ecosim fork` restores it and continues the run into a new directory, optionally with `--set` overrides from that tick on. The new directory is a complete run directory: rows and snapshots before the fork tick are copied from the parent, and `meta.json` records `forked_from`. With no overrides, a fork is byte-identical to the uninterrupted run from the fork tick on. `ecosim run --snapshot-state false` skips `state.bin`. Format-1 directories still work with `check`, `stats` and `diff`, but can't be forked. `sweeps/fork-demo/` has an example; the layout and the design calls are in `DECISIONS.md`.
+
+## World bundles
+
+`ecosim run --world <dir>` builds the world from a **world bundle** instead of procedural noise: real
+ground height, a surface medium per ground cell (lawn, bed, gravel, asphalt, roof, water, ...) and
+building heights, exported from a tagged Blender scene. The format is `../docs/SCENE-CONTRACT.md`,
+which is authoritative; this ecosim reads version 2 of it.
+
+The bundle has two grids. The ecology grid keeps its 1 m columns, so every species parameter keeps
+its units, and the bundle's `size_m` sets `[world] width` and `depth`. The ground grid is finer
+(0.5 m in the Capitol bundle), and is carried at full resolution in the world state. A column's
+surface layer is `[bundle] base_z + round(the mean ground height under it)`; it is Rock when more
+than half of its ground cells are sealed (`roof`, `asphalt`, `concrete`), Water when more than half
+are `water`, otherwise soil. A roof shades the columns north of it, `[bundle] shade_slope` columns
+per metre of height.
+
+A bundle run writes `format_version` 4 (`--format-version` picks 2, 3 or 4 explicitly; 4 needs
+`--world` and `--world` needs 4). It cannot be forked: `ecosim fork` rebuilds the terrain, and only
+the bundle has it. `DECISIONS.md` (shot G1) has the design calls.
 
 ## Behaviour guard
 

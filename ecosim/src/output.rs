@@ -1,6 +1,7 @@
 //! Run directory writer: meta.json, series.csv, events.csv, snap_NNNNNN/, timing.json.
 
 use crate::animals::{Animal, State};
+use crate::bundle::Bundle;
 use crate::events::{parse_events, Event, EVENTS_FILE, EVENTS_HEADER};
 use crate::params::Params;
 use crate::profile::{lap, Phase, Profile, Profiler};
@@ -14,10 +15,14 @@ use std::io;
 use std::path::Path;
 use std::time::Instant;
 
-/// `meta.json` format version; readers reject any other value. Version 2 added `state.bin` to each
-/// snapshot and `forked_from` to `meta.json`; version 3 added `events.csv`. Every other file keeps
-/// its version-1 bytes.
+/// `meta.json` format version of a noise-world run; readers reject any other value. Version 2 added
+/// `state.bin` to each snapshot and `forked_from` to `meta.json`; version 3 added `events.csv`.
+/// Every other file keeps its version-1 bytes.
 pub const FORMAT_VERSION: u32 = 3;
+
+/// `meta.json` format version of a run on a world bundle (`ecosim run --world`). Version 4 adds the
+/// run root's `world/` directory and `meta.json`'s `world` object; a noise world never writes it.
+pub const BUNDLE_FORMAT_VERSION: u32 = 4;
 
 /// The first line of `series.csv`. Columns 11–20 are that tick's deaths by species and cause,
 /// grazers then hunters, causes in `Cause` order; 21–22 are the fire columns; the last 12 are the
@@ -38,6 +43,28 @@ struct Dims {
     y: usize,
     z: usize,
     patch: usize,
+}
+
+/// `meta.json`'s `world`: the ground grid the run's `world/` files are on (format version 4).
+#[derive(Serialize)]
+struct WorldMeta<'a> {
+    name: &'a str,
+    ground_cell_m: f32,
+    ground_width: usize,
+    ground_depth: usize,
+    media: Vec<&'static str>,
+}
+
+impl<'a> WorldMeta<'a> {
+    fn of(b: &'a Bundle) -> WorldMeta<'a> {
+        WorldMeta {
+            name: &b.name,
+            ground_cell_m: b.ground.cell_m(),
+            ground_width: b.ground.width,
+            ground_depth: b.ground.depth,
+            media: b.ground.media.iter().map(|m| m.name()).collect(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -63,6 +90,9 @@ struct Meta<'a> {
     /// otherwise, so a run with animals writes exactly the `meta.json` it always did.
     #[serde(skip_serializing_if = "Option::is_none")]
     animals: Option<bool>,
+    /// The bundle the world was loaded from (format version 4); absent for a noise world.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    world: Option<WorldMeta<'a>>,
     snapshots: Vec<u32>,
     species: Vec<Species>,
     params: &'a Params,
@@ -238,6 +268,7 @@ pub fn write_meta(
         snapshots,
         overrides,
         forked_from: None,
+        bundle: None,
     };
     write_meta_info(sim, &info, run_dir)
 }
@@ -251,6 +282,8 @@ struct RunInfo<'a> {
     snapshots: Vec<u32>,
     overrides: &'a [String],
     forked_from: Option<&'a ForkedFrom>,
+    /// The bundle a format-4 run was built from.
+    bundle: Option<&'a Bundle>,
 }
 
 fn write_meta_info(sim: &Sim, info: &RunInfo, run_dir: &Path) -> io::Result<()> {
@@ -264,6 +297,7 @@ fn write_meta_info(sim: &Sim, info: &RunInfo, run_dir: &Path) -> io::Result<()> 
         year_len: sim.params.climate.year_len,
         water_level: sim.params.world.water_level,
         animals: (!sim.params.animals.enabled).then_some(false),
+        world: info.bundle.map(WorldMeta::of),
         snapshots: info.snapshots.clone(),
         species: species_list(),
         params: &sim.params,
@@ -341,17 +375,20 @@ pub fn series_csv(rows: &[StatsRow]) -> String {
 
 /// How `run_with` writes a run directory.
 #[derive(Debug, Clone, Copy)]
-pub struct RunOptions {
+pub struct RunOptions<'a> {
     /// Write `state.bin` into every snapshot (`ecosim run --snapshot-state`).
     pub state: bool,
     /// 3 (`FORMAT_VERSION`) writes `events.csv`; 2 writes the version-2 directory without it
-    /// (`ecosim run --format-version 2`), for readers that know only versions 1 and 2.
+    /// (`ecosim run --format-version 2`), for readers that know only versions 1 and 2; 4
+    /// (`BUNDLE_FORMAT_VERSION`) is the bundle world's, and needs `bundle`.
     pub format_version: u32,
+    /// The world bundle to build the world from (`ecosim run --world`), instead of noise terrain.
+    pub bundle: Option<&'a Bundle>,
 }
 
-impl Default for RunOptions {
+impl Default for RunOptions<'_> {
     fn default() -> Self {
-        RunOptions { state: true, format_version: FORMAT_VERSION }
+        RunOptions { state: true, format_version: FORMAT_VERSION, bundle: None }
     }
 }
 
@@ -388,7 +425,7 @@ pub fn run_with(
     snapshot_every: u32,
     overrides: &[String],
     out: &Path,
-    opts: RunOptions,
+    opts: RunOptions<'_>,
 ) -> io::Result<RunSummary> {
     run_inner(params, &RunSpec { seed, ticks, snapshot_every, overrides }, out, opts, None)
 }
@@ -402,7 +439,7 @@ pub fn run_profiled(
     snapshot_every: u32,
     overrides: &[String],
     out: &Path,
-    opts: RunOptions,
+    opts: RunOptions<'_>,
 ) -> io::Result<(RunSummary, Profile)> {
     let dims = crate::world::Dims::of(&params);
     let mut prof = Profiler::start();
@@ -423,15 +460,29 @@ fn run_inner(
     params: Params,
     spec: &RunSpec,
     out: &Path,
-    opts: RunOptions,
+    opts: RunOptions<'_>,
     mut prof: Option<&mut Profiler>,
 ) -> io::Result<RunSummary> {
     let &RunSpec { seed, ticks, snapshot_every, overrides } = spec;
     assert!(snapshot_every > 0, "snapshot_every must be > 0");
-    assert!(matches!(opts.format_version, 2 | FORMAT_VERSION), "format_version must be 2 or {FORMAT_VERSION}");
+    assert_eq!(
+        opts.bundle.is_some(),
+        opts.format_version == BUNDLE_FORMAT_VERSION,
+        "format_version {BUNDLE_FORMAT_VERSION} is the bundle world's, and only its"
+    );
+    assert!(
+        matches!(opts.format_version, 2 | FORMAT_VERSION | BUNDLE_FORMAT_VERSION),
+        "format_version must be 2, {FORMAT_VERSION} or {BUNDLE_FORMAT_VERSION}"
+    );
     let start = Instant::now();
     prepare_dir(out)?;
-    let mut sim = Sim::new(params, seed);
+    let mut sim = match opts.bundle {
+        None => Sim::new(params, seed),
+        Some(b) => Sim::from_bundle(params, seed, b).map_err(io::Error::other)?,
+    };
+    if let Some(b) = opts.bundle {
+        b.write_world_dir(out)?;
+    }
     let snapshots = (0..=ticks).filter(|t| t % snapshot_every == 0).collect();
     let info = RunInfo {
         format_version: opts.format_version,
@@ -441,6 +492,7 @@ fn run_inner(
         snapshots,
         overrides,
         forked_from: None,
+        bundle: opts.bundle,
     };
     write_meta_info(&sim, &info, out)?;
     sim.log_events = opts.format_version >= 3;
@@ -548,6 +600,13 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
                 parent.display()
             ))
         }
+        Some(v) if v == BUNDLE_FORMAT_VERSION as u64 => {
+            return Err(format!(
+                "{}: format_version {v} runs are built from a world bundle, whose ground grid and building \
+                 shade a snapshot does not carry; rerun the bundle with `ecosim run --world`",
+                parent.display()
+            ))
+        }
         v => return Err(format!("{}: unsupported format_version {v:?}", parent.display())),
     }
     let (base, params) = fork_params(parent, &meta, spec.overrides)?;
@@ -605,6 +664,7 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
         snapshots: snapshots.collect(),
         overrides: spec.overrides,
         forked_from: Some(&from),
+        bundle: None,
     };
     write_meta_info(&sim, &info, out).map_err(io)?;
     let mut log =
@@ -778,9 +838,12 @@ mod tests {
         assert!(err(&stateless, 50, &[], &out).contains("no state.bin"));
 
         let mut m = meta(&parent);
-        m["format_version"] = 4.into();
+        m["format_version"] = 5.into();
         fs::write(parent.join("meta.json"), serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(err(&parent, 50, &[], &out).contains("unsupported format_version"));
+        m["format_version"] = BUNDLE_FORMAT_VERSION.into();
+        fs::write(parent.join("meta.json"), serde_json::to_vec(&m).unwrap()).unwrap();
+        assert!(err(&parent, 50, &[], &out).contains("built from a world bundle"));
         m["format_version"] = 2.into();
         fs::write(parent.join("meta.json"), serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(err(&parent, 50, &[], &out).contains("no events.csv"));

@@ -26,6 +26,9 @@ pub struct Params {
     pub shrub: CoverSpecies,
     /// `[tree]`
     pub tree: TreeParams,
+    /// `[bundle]`. Left out of `meta.json` at its defaults, so noise-world runs print as before.
+    #[serde(default, skip_serializing_if = "BundleParams::is_default")]
+    pub bundle: BundleParams,
     /// `[animals]`. Left out of `meta.json` when animals are enabled, so default runs print as before.
     #[serde(default, skip_serializing_if = "AnimalsParams::is_default")]
     pub animals: AnimalsParams,
@@ -92,6 +95,31 @@ fn default_height() -> u32 {
 }
 fn default_patch() -> u32 {
     8
+}
+
+/// A world loaded from a bundle (`ecosim run --world`, `../docs/SCENE-CONTRACT.md`). A noise world
+/// ignores every key here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BundleParams {
+    /// Ecology layers under the bundle's lowest ground: a column's surface layer is
+    /// `base_z + round(mean ground height)`, in 1 m layers.
+    pub base_z: u8,
+    /// Shadow length in columns per metre of building height, cast due north (the sun sits due
+    /// south; 1.0 is a 45° altitude). 0 turns building shade off.
+    pub shade_slope: f32,
+}
+
+impl Default for BundleParams {
+    fn default() -> Self {
+        BundleParams { base_z: 8, shade_slope: 1.0 }
+    }
+}
+
+impl BundleParams {
+    fn is_default(&self) -> bool {
+        *self == BundleParams::default()
+    }
 }
 
 /// Seasons, rain, soil moisture and fertility.
@@ -670,13 +698,14 @@ mod tests {
         serde_json::json!(if key == "hunter.kill_prob" { v } else { v as f32 as f64 })
     }
 
-    /// `p` as JSON with every section present: `meta.json` leaves `[rng]` out at stream 0 and
-    /// `[animals]` out when they are enabled, so both are put back here and every leaf is compared
-    /// exactly.
+    /// `p` as JSON with every section present: `meta.json` leaves `[rng]` out at stream 0,
+    /// `[animals]` out when they are enabled and `[bundle]` out at its defaults, so all three are
+    /// put back here and every leaf is compared exactly.
     fn stored(p: &Params) -> serde_json::Value {
         let mut v = serde_json::to_value(p).unwrap();
         v["rng"] = serde_json::to_value(&p.rng).unwrap();
         v["animals"] = serde_json::to_value(&p.animals).unwrap();
+        v["bundle"] = serde_json::to_value(&p.bundle).unwrap();
         v
     }
 

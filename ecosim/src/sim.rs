@@ -1,6 +1,7 @@
 //! Simulation state and the fixed tick order.
 
 use crate::animals::{Animal, Kind, CAUSES};
+use crate::bundle::Bundle;
 use crate::events::Event;
 use crate::heredity::{trait_stats, TraitStats, Traits, TRAIT_CLAMP};
 use crate::params::Params;
@@ -153,6 +154,18 @@ impl Sim {
             rng.set_stream(params.rng.stream);
         }
         Sim::with_world(params, rng, world)
+    }
+
+    /// Generate the world from a bundle (`ecosim run --world`) and place the initial populations.
+    /// The terrain is the bundle's, so unlike [`Sim::new`] the seed draws nothing for it; the
+    /// bundle's dimensions must already be in `params` (`Bundle::apply_to`).
+    pub fn from_bundle(params: Params, seed: u64, bundle: &Bundle) -> Result<Sim, String> {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let world = World::from_bundle(bundle, &params)?;
+        if params.rng.stream != 0 {
+            rng.set_stream(params.rng.stream);
+        }
+        Ok(Sim::with_world(params, rng, world))
     }
 
     /// A tick-0 sim on a given world, with initial trees and animals placed using `rng`.

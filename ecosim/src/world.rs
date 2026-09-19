@@ -1,5 +1,6 @@
 //! Voxel world: terrain generation, materials, column classes and the light field.
 
+use crate::bundle::{Bundle, Ground, Medium};
 use crate::params::Params;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -137,6 +138,22 @@ pub struct World {
     /// Walking distance (8-connected steps over soil) from each column to the nearest soil
     /// column of each patch: `patch_dist[p * cols + c]`, `UNREACHABLE` if there is no path.
     pub patch_dist: Vec<u16>,
+    /// Lowest z per column that a building does **not** shade: voxels below it are dark whatever
+    /// the canopy does. 0 (nothing shaded) in a noise world, which has no buildings.
+    pub shade_top: Vec<u8>,
+    /// The bundle's ground grid at full resolution, or `None` in a noise world.
+    pub ground_grid: Option<Ground>,
+}
+
+/// What tops a column, beyond the soil-over-rock fill every column gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Top {
+    /// Whatever the fill left: soil, unless `soil_depth` is 0.
+    Terrain,
+    /// A rock cap: the noise world's high ground, or a bundle column that is mostly sealed.
+    Rock,
+    /// A water surface: the noise world's flooding, or a bundle column that is mostly water.
+    Water,
 }
 
 /// Marks a patch that cannot be walked to from a column.
@@ -236,6 +253,41 @@ pub fn generate_heights(params: &Params, rng: &mut ChaCha8Rng) -> Vec<u8> {
         .collect()
 }
 
+/// Shade cast by roofs, as `World::shade_top`.
+///
+/// The sun sits due south at a fixed altitude, so a roof whose top is at absolute z `t` darkens the
+/// columns north of it: `dy` columns away, the grazing ray is at `t − dy / shade_slope`, and every
+/// voxel at or below it is dark, so the shadow ends after `shade_slope × height` columns.
+/// `shade_slope = 1` is a 45° sun. The roof's own column is dark to its full height, so a building
+/// is opaque where it stands. At 0 nothing is shaded and the field stays all zeroes, as it is in a
+/// noise world.
+fn building_shade(d: Dims, heights: &[u8], building: &[f32], shade_slope: f32) -> Vec<u8> {
+    let mut shade = vec![0u8; d.cols()];
+    if shade_slope.is_nan() || shade_slope <= 0.0 {
+        return shade;
+    }
+    let top_z = (d.wz - 1) as f32;
+    for y in 0..d.wy {
+        for x in 0..d.wx {
+            let bh = building[d.cidx(x, y)];
+            if bh <= 0.0 {
+                continue;
+            }
+            let top = heights[d.cidx(x, y)] as f32 + bh;
+            let reach = (bh * shade_slope).floor().min(d.wy as f32) as usize;
+            for dy in 0..=reach {
+                if y + dy >= d.wy {
+                    break;
+                }
+                let blocked = ((top - dy as f32 / shade_slope).floor() + 1.0).clamp(0.0, top_z) as u8;
+                let t = d.cidx(x, y + dy);
+                shade[t] = shade[t].max(blocked);
+            }
+        }
+    }
+    shade
+}
+
 impl World {
     /// Generate terrain from the seeded RNG and build the world.
     pub fn generate(params: &Params, rng: &mut ChaCha8Rng) -> World {
@@ -243,10 +295,18 @@ impl World {
         World::from_heights(&heights, params)
     }
 
-    /// Build materials, column classes and initial (canopy-free) light from terrain heights.
+    /// Build materials, column classes and initial (canopy-free) light from terrain heights, in the
+    /// noise world's way: a rock cap at `rock_top_height` and flooding up to `water_level`.
     pub fn from_heights(heights: &[u8], params: &Params) -> World {
+        World::build(heights, params, None, vec![0; Dims::of(params).cols()])
+    }
+
+    /// The shared builder. `tops` replaces the noise world's height rules with an explicit top per
+    /// column (a bundle world: media decide, not heights), and `shade_top` is the building shade.
+    fn build(heights: &[u8], params: &Params, tops: Option<&[Top]>, shade_top: Vec<u8>) -> World {
         let d = Dims::of(params);
         assert_eq!(heights.len(), d.cols());
+        assert_eq!(shade_top.len(), d.cols());
         let wp = &params.world;
         let mut material = vec![AIR; d.voxels()];
         let mut height = vec![0u8; d.cols()];
@@ -260,12 +320,21 @@ impl World {
                     let soil_layer = z + wp.soil_depth as usize > h;
                     material[d.vidx(x, y, z)] = if soil_layer { SOIL } else { ROCK };
                 }
-                if h >= wp.rock_top_height as usize {
-                    material[d.vidx(x, y, h)] = ROCK;
-                }
-                let wl = wp.water_level as usize;
-                for z in (h + 1)..=wl.min(d.wz - 1) {
-                    material[d.vidx(x, y, z)] = WATER;
+                match tops {
+                    None => {
+                        if h >= wp.rock_top_height as usize {
+                            material[d.vidx(x, y, h)] = ROCK;
+                        }
+                        let wl = wp.water_level as usize;
+                        for z in (h + 1)..=wl.min(d.wz - 1) {
+                            material[d.vidx(x, y, z)] = WATER;
+                        }
+                    }
+                    Some(t) => match t[c] {
+                        Top::Terrain => {}
+                        Top::Rock => material[d.vidx(x, y, h)] = ROCK,
+                        Top::Water => material[d.vidx(x, y, h)] = WATER,
+                    },
                 }
                 let top = (0..d.wz).rev().find(|&z| material[d.vidx(x, y, z)] != AIR).unwrap_or(0);
                 height[c] = top as u8;
@@ -298,6 +367,8 @@ impl World {
             class,
             patch_soil,
             patch_dist,
+            shade_top,
+            ground_grid: None,
         };
         for y in 0..d.wy {
             for x in 0..d.wx {
@@ -305,6 +376,65 @@ impl World {
             }
         }
         w
+    }
+
+    /// Build the world a bundle describes (`ecosim run --world`).
+    ///
+    /// A column's surface layer is `[bundle] base_z + round(the mean ground height of the ground
+    /// cells under it)`, filled below exactly as the noise world fills terrain. The media decide
+    /// what tops it: Rock when more than half its ground cells are sealed (`roof`, `asphalt`,
+    /// `concrete`), otherwise Water when more than half are `water`, otherwise soil. A tie is
+    /// neither. Roofs then cast shade (`building_shade`). The bundle's dimensions must already be
+    /// in `params` (`Bundle::apply_to`).
+    pub fn from_bundle(b: &Bundle, params: &Params) -> Result<World, String> {
+        let d = Dims::of(params);
+        if (d.wx, d.wy) != (b.size_m, b.size_m) {
+            return Err(format!(
+                "{}: the bundle is {} m across but [world] is {}×{} columns",
+                b.dir.display(),
+                b.size_m,
+                d.wx,
+                d.wy
+            ));
+        }
+        let (base, top_z, n) = (params.bundle.base_z as i32, (d.wz - 1) as i32, b.cells_per_column());
+        let mut heights = vec![0u8; d.cols()];
+        let mut tops = vec![Top::Terrain; d.cols()];
+        let mut building = vec![0f32; d.cols()];
+        for y in 0..d.wy {
+            for x in 0..d.wx {
+                let (mut sum, mut sealed, mut water, mut roof) = (0.0f32, 0usize, 0usize, 0.0f32);
+                for i in b.ground.cells_of(x, y) {
+                    sum += b.ground_h[i];
+                    let m = b.ground.medium_at(i);
+                    sealed += m.is_sealed() as usize;
+                    water += (m == Medium::Water) as usize;
+                    roof = roof.max(b.building_h[i]);
+                }
+                let h = base + (sum / n as f32).round() as i32;
+                if !(0..=top_z).contains(&h) {
+                    return Err(format!(
+                        "{}: column ({x}, {y}) has surface layer {h}, which does not fit under [world] height = {}",
+                        b.dir.display(),
+                        d.wz
+                    ));
+                }
+                let c = d.cidx(x, y);
+                heights[c] = h as u8;
+                tops[c] = if 2 * sealed > n {
+                    Top::Rock
+                } else if 2 * water > n {
+                    Top::Water
+                } else {
+                    Top::Terrain
+                };
+                building[c] = roof;
+            }
+        }
+        let shade = building_shade(d, &heights, &building, params.bundle.shade_slope);
+        let mut w = World::build(&heights, params, Some(&tops), shade);
+        w.ground_grid = Some(b.ground.clone());
+        Ok(w)
     }
 
     /// Whether (x, y) is inside the world and a soil column.
@@ -321,14 +451,16 @@ impl World {
         self.light[self.dims.vidx(x, y, z)]
     }
 
-    /// Recompute one column's light: solids are 0; air and water get
+    /// Recompute one column's light: solids are 0, and so is anything a building shades
+    /// (`shade_top`, always 0 in a noise world); the rest of the air and water gets
     /// 255 − absorb × (canopy voxels strictly above), saturating at 0.
     /// `canopy_z` lists the distinct canopy voxel z values in this column.
     pub fn set_column_light(&mut self, x: usize, y: usize, canopy_z: &[u8], absorb: u8) {
+        let shade = self.shade_top[self.dims.cidx(x, y)] as usize;
         for z in 0..self.dims.wz {
             let i = self.dims.vidx(x, y, z);
             let m = self.material[i];
-            self.light[i] = if m == SOIL || m == ROCK {
+            self.light[i] = if m == SOIL || m == ROCK || z < shade {
                 0
             } else {
                 let above = canopy_z.iter().filter(|&&cz| cz as usize > z).count() as u32;

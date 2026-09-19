@@ -3,6 +3,7 @@
 
 pub mod abiotic;
 pub mod animals;
+pub mod bundle;
 pub mod check;
 pub mod events;
 pub mod fire;

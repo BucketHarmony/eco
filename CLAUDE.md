@@ -83,13 +83,14 @@ Architecture points that span modules:
 ## The run directory contract
 
 The run directory is the only interface between the two projects. Its full format is in SAD 1 under "Run directory format". The key points:
-- `meta.json` must contain `format_version` (currently 3; versions 2 and 3 only add files: `state.bin` per snapshot in 2, `events.csv` in 3). `ecosim run --format-version 2` still writes version 2 for readers that know only 1 and 2.
+- `meta.json` must contain `format_version` (currently 3 for a noise world, 4 for a world built from a bundle; each version only adds files: `state.bin` per snapshot in 2, `events.csv` in 3, `world/` in 4). `ecosim run --format-version 2` still writes version 2 for readers that know only 1 and 2.
 - `series.csv` has one row per tick.
 - `events.csv` (version 3) has one row per event: `tick,kind,species,patch_x,patch_y,x,y,cause,detail`. The kinds and field meanings are in SAD 1's run directory format.
 - Each snapshot is a `snap_NNNNNN/` directory (tick zero-padded to 6 digits) with:
   - `material.bin` and `light.bin`: x·y·z bytes each (from `meta.json` `dims`), x-fastest
   - `moisture.bin`, `fertility.bin`, and `height.bin`: x·y bytes each
   - `patches.json` and `entities.json`
+- A bundle run (`ecosim run --world <dir>`, format version 4) also writes `world/{ground_h.bin, medium.bin, building_h.bin, pipes.json}` once at the run root, and a `world` object in `meta.json` describing the ground grid. The bundle format is `docs/SCENE-CONTRACT.md`; the ecology grid stays at 1 m columns, the ground grid is finer.
 - All integers are little-endian.
 
 If you change the format, update both projects and the SAD together.

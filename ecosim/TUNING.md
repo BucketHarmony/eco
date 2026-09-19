@@ -402,3 +402,23 @@ The shot sets the reference world, and it changed four defaults. The anchor held
 **No default changed.** The shot added one key, `animals.enabled`, and its default is `true`, which is what every run before this shot did. Every committed manifest and fixture is byte-identical, and seeds 1, 2, 3 and 42 pass `ecosim check` with the same numbers as before.
 
 The shot prompt says not to retune anything to compensate for the missing grazing pressure, and the measurements say nothing needs it: with animals off, mean grass cover rises 8–16%, while shrub cover, tree counts and mature-tree counts stay inside the seed-to-seed spread, and no seed loses a species. The sweep over `animals.enabled` (both values, seeds 1–3, 20000 ticks) passes 6 of 6 cells. Numbers and the event-log cause breakdown are in `sweeps/G0/FINDINGS.md`.
+
+## World bundles (shot G1)
+
+**No default changed.** The shot adds a `[bundle]` section whose two keys are read only by a run
+built from a world bundle (`ecosim run --world`). A noise run never reads them, and the section is
+left out of `meta.json` at its defaults (`skip_serializing_if`, the pattern `[rng]` and `[animals]`
+already use), so every committed manifest and fixture is byte-identical and seeds 1, 2, 3 and 42
+pass `ecosim check` with the same numbers as before.
+
+| key | value | why |
+|---|---|---|
+| `bundle.base_z` | 8 | Soil layers below the crop's lowest ground. The bundle's heights are metres above that minimum, so a column's surface layer is `8 + round(its mean ground height)`. Same headroom the noise world's terrain sits on, and it leaves 24 of the 32 layers for ground, buildings and canopy. |
+| `bundle.shade_slope` | 1.0 | Columns of shadow per metre of roof height: a fixed sun due south at `atan(1.0)` = 45°, about the equinox noon sun at the reference site's latitude. 0 turns building shade off. |
+
+No acceptance line forced either value; both are new knobs on a path no run took before this shot.
+The acceptance that pins `base_z` is "a slope gives surface layers `8 + round(h)`", from the shot
+prompt, and the one that pins `shade_slope > 0` is "a tall block shades the columns on its shadow
+side and not the others". Both are tested on synthetic bundles in `src/bundle.rs` and
+`src/world.rs`; there is no sweep, because neither key affects a noise run and there is no real
+bundle in the repo until G2.

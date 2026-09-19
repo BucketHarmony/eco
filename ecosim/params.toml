@@ -88,6 +88,16 @@ temp = [-3.0, 2.0, 26.0, 31.0]
 immigration_floor = 0
 immigration_interval = 500
 
+[bundle]
+# A world loaded from a bundle (shot G1, `../docs/SCENE-CONTRACT.md`). These keys are ignored by a
+# noise world, and are not written to meta.json at their defaults.
+# Ecology layers under the bundle's lowest ground: a column's surface layer is base_z + round(its
+# mean ground height in metres), so base_z sets how much soil sits below the lowest ground.
+base_z = 8
+# Building shade: a roof of height h metres darkens the h × shade_slope columns north of it, to a
+# level falling by 1 m per 1/shade_slope columns. 1.0 is a 45° sun due south; 0 turns shade off.
+shade_slope = 1.0
+
 [animals]
 # The animal tier (shot G0). false leaves grazers and hunters out of the run entirely: none are
 # placed, none immigrate, and the animal phase is skipped, so it draws nothing from the RNG.

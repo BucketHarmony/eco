@@ -859,3 +859,85 @@ Each check sits **outside** the loop it guards, so an animals-off run draws noth
 **`ecosim fork --set animals.enabled=…` does not work on a parent run that had animals.** `fork` reads the parent's `meta.json` params, and an animals-on parent has no `[animals]` section there, so the key is rejected as unknown. This is the same limitation `hunter.handling_ticks` has, and it is left alone on purpose: whether a run has animals is a decision taken when the world is built, not one to change from a mid-run snapshot. Forking an animals-**off** parent does work, because its `meta.json` does carry the section; the fork starts with no animals in its state, so any that appear come in through immigration.
 
 **The sweep.** `sweeps/G0/` is `animals.enabled` over `true, false` on seeds 1–3 at 20000 ticks; 6/6 cells pass, 46.6 s wall on 6 jobs. `sweep.md` calls the two-value band "fragile" because its rule is "fewer than 3 grid values"; a boolean can never have three, so the label carries no meaning here.
+
+## World bundles: a world from real ground (shot G1)
+
+**The direction.** The project is moving toward an urban garden planner: plants, water and soil
+nutrients on real ground (operator decision, 2026-09-19 evening). Shots G1–G7 are that work.
+Predator–prey is parked: the animal tier stays in the code and in `params.toml`, unchanged and
+untuned, and the garden runs simply switch it off (`--set animals.enabled=false`, shot G0).
+
+This lifts one piece of the SAD's scope, which says the world is procedural: "terrain from 2-D
+value noise". It stays true of a default run — noise is still how `ecosim run` builds a world, and
+every committed manifest, fixture and reference run is byte-identical. A **world bundle** is a
+second source of terrain, chosen with `ecosim run --world <dir>`, and nothing else about the sim
+changes: the same tick order, the same fields, the same species.
+
+**The format is not ours to define.** Bundle v2 is specified by the scene contract, copied verbatim
+into the repo as `../docs/SCENE-CONTRACT.md` and authoritative there. `bundle.rs` reads version 2
+and refuses every other version by number, rather than guessing at a compatible subset: a bundle
+that this ecosim half-understands would produce a world nobody could reason about.
+
+**Two grids, not one.** The ecology grid keeps 1 m columns (`ECO_CELL_M`), because every species
+parameter in `params.toml` — seed radius, move distance, flee distance, patch size — is written in
+those units, and rescaling the world would silently rescale all of them. The ground grid is the
+bundle's own (0.5 m at the Capitol), and is kept at full resolution in `World::ground_grid` for the
+surface water and nutrient work in G4–G6. One column covers `ratio² = (1 / ground_cell_m)²` ground
+cells, and `ground_cell_m` must divide 1 m exactly, so the mapping is a whole block of cells with no
+partial coverage anywhere. `Bundle::apply_to` sets `[world] width` and `depth` from `size_m` and
+then runs the normal `check_dims`, so a bundle whose size is not a multiple of `[world] patch` is
+rejected with the message that rule always gave.
+
+**Surface layer = `base_z + round(mean ground height)`.** The mean over the column's ground cells,
+not the minimum or the maximum: it is the only choice that makes a smooth slope monotone in the
+column index without a bias up or down. `[bundle] base_z` (8) is soil below the crop's lowest
+ground, so there is something to root into and to drain through; the bundle's heights are metres
+above the crop minimum, so the two add. A column whose top does not fit under `[world] height`
+is an error naming the column, not a clamp — a silently flattened building or hill is worse than a
+failed run.
+
+**Media decide what tops a column, not heights.** More than half the column's ground cells sealed
+(`roof`, `asphalt`, `concrete`) makes it Rock, which the whole sim already treats as unplantable
+and impassable to roots; otherwise more than half `water` makes it a Water column; otherwise soil.
+Strictly more than half, so a 2 × 2 column split two-and-two is neither Rock nor Water but soil —
+the tie goes to the living surface, because a half-paved cell does have somewhere for a plant to
+be. The noise world's two height rules (`rock_top_height` and flooding to `water_level`) are
+**not** applied to a bundle world: the bundle says where the water is, and a quantile rule layered
+on top of real data would invent ponds the scene does not have.
+
+**Building shade is a per-column floor on light.** The SAD's light model has no sun direction: light
+falls straight down, `255 − canopy_absorb × canopy above`. A building is not canopy, and giving it
+canopy voxels would have made it shade only its own footprint, which is exactly the columns that are
+already Rock — so the acceptance "a tall block shades the columns on its shadow side and not the
+others" would have been unobservable. Instead each column gets `shade_top`, the highest voxel a
+building darkens; `set_column_light` treats every voxel at or below it as dark, whatever the canopy
+does. A roof of height `h` shades the `h × shade_slope` columns **north** of it (+y), the shadow
+falling by 1 m of blocked height per `1/shade_slope` columns: a fixed sun due south at
+`atan(shade_slope)` above the horizon, 45° at the default `shade_slope = 1.0`, which is about
+Lansing's equinox noon sun. A fixed sun, not a moving one, because the sim has no time of day and
+the rest of the light model has no direction at all; a real sun path belongs with a real light
+model, and this shot was not asked for one. `shade_slope = 0` turns shade off. A noise world has no
+buildings, so its `shade_top` is all zeros and its light is bit-identical to before.
+
+**`format_version` 4, and the ground written once.** The ground grid is static for the whole run, so
+repeating it in 201 snapshot directories would multiply a 256 × 256-cell grid by 201 for no
+information. It goes in `world/` at the run root, with `meta.json.world` describing it, and the
+snapshot directories keep exactly the files they had. Version 4 only adds files, like 2 and 3 before
+it, so a version-3 reader that checks `format_version` sees a version it does not know, and one that
+reads the ecology grid finds it where it always was. `--format-version 4` and `--world` require each
+other: a format-4 run directory without `world/` would be a lie about its own contents.
+
+**A bundle run cannot be forked.** `ecosim fork` restores `state.bin` and rebuilds the terrain from
+the parent's params with `World::from_heights` — noise terrain, which a bundle world is not, and the
+parent's `meta.json` does not carry the bundle. Rather than rebuild a wrong world, `fork` rejects
+format 4 by name and says to rerun the bundle with `ecosim run --world`. Making forks work would
+mean either storing the whole ground grid in `state.bin` or resolving the bundle path from
+`meta.json`; both are a shot's worth of work that nothing yet needs.
+
+**Trees, shrubs and pipes are validated on load and then ignored.** They are used from G3 (plants)
+and G6 (drains). Validating them at load is not a stub for those shots: a bad export must fail at
+the bundle, in one message naming the file and the offending entry, rather than halfway through a
+20000-tick run. A pipe `outlet` is allowed past the crop edge, since that is how a drain leaves the
+world; every other position must be inside it. `Pipe.id` is a `String` rather than an index because
+the contract says it is the scene's object name, and the name is what a person reading `pipes.json`
+next to the scene will match on.

@@ -17,6 +17,10 @@
       .row { display: flex; align-items: center; gap: 8px; }
       #readout { font-variant-numeric: tabular-nums; }
       #chart { width: 300px; height: 500px; border: 1px solid #cfd4d9; background: #fff; }
+      #legend { display: flex; flex-wrap: wrap; gap: 2px 8px; }
+      #legend[hidden] { display: none; }
+      .chip { display: inline-flex; align-items: center; gap: 4px; }
+      .chip i { width: 10px; height: 10px; border: 1px solid #8a8f94; }
       #status { color: #555; word-break: break-all; }
       #status.error { color: #b00020; font-weight: 600; }
     </style>
@@ -30,6 +34,7 @@
       <input id="slider" type="range" min="0" max="0" step="1" value="0" />
       <div class="row"><button id="play" type="button">Play</button><span id="readout">tick –</span></div>
       <canvas id="chart" width="300" height="500"></canvas>
+      <div id="legend" hidden></div>
       <div id="status">Loading…</div>
     </aside>
     <script type="module" src="/src/main.ts"></script>

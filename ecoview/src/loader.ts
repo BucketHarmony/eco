@@ -15,9 +15,12 @@ export interface Species {
 
 /**
  * Format versions this reader accepts. Version 2 adds `state.bin` (ignored here) and `forked_from`; version 3
- * adds `events.csv`.
+ * adds `events.csv`; version 4 adds the `world/` ground grid of a run built from a world bundle.
  */
-export const FORMAT_VERSIONS = [1, 2, 3];
+export const FORMAT_VERSIONS = [1, 2, 3, 4];
+
+/** The first format version that carries a `world` object and a `world/` directory. */
+export const BUNDLE_VERSION = 4;
 
 export interface ForkedFrom {
   run: string;
@@ -76,6 +79,41 @@ export class Grid {
   }
 }
 
+/** `meta.json` `world` (format 4): the ground grid a bundle world adds under the ecology grid. */
+export interface WorldMeta {
+  name: string;
+  ground_cell_m: number;
+  ground_width: number;
+  ground_depth: number;
+  /** Medium name by code; `medium.bin` holds indexes into this list. */
+  media: string[];
+}
+
+/** One row of `world/pipes.json`: metres from the south-west corner. */
+export interface Pipe {
+  id: string;
+  inlet: [number, number];
+  outlet: [number, number];
+  capacity_m3h: number;
+  illustrative: boolean;
+}
+
+/** A bundle world's ground grid, read once per run from `world/` (format 4). */
+export interface WorldData {
+  meta: WorldMeta;
+  /** Ground-grid sizes and index helper, `x + width*y` with cell (0, 0) at the south-west corner. */
+  gw: number;
+  gd: number;
+  cell: number;
+  /** Metres above the crop minimum. */
+  ground_h: Float32Array;
+  /** Index into `meta.media`. */
+  medium: Uint8Array;
+  /** Roof height above ground, 0 where there is no roof. */
+  building_h: Float32Array;
+  pipes: Pipe[];
+}
+
 export interface Meta {
   format_version: number;
   dims: Dims;
@@ -88,6 +126,8 @@ export interface Meta {
   species: Species[];
   /** Version 2 only: the run a fork continues, or null for a run started at tick 0. */
   forked_from?: ForkedFrom | null;
+  /** Version 4 only: the ground grid of the world bundle the run was built from. */
+  world?: WorldMeta;
 }
 
 export const SERIES_COLUMNS = [
@@ -187,6 +227,8 @@ export interface Snapshot {
   entities: Entity[];
   /** 1 for each patch with a `burnout` event since the previous snapshot; all 0 for a run without `events.csv`. */
   burnt: Uint8Array;
+  /** The run's ground grid (format 4), so the overlays can read it; absent on a noise world. */
+  world?: WorldData;
 }
 
 export interface Run {
@@ -198,6 +240,8 @@ export interface Run {
   events: RunEvent[];
   /** The `burnout` rows of `events`. */
   burnouts: RunEvent[];
+  /** Format 4 only: the bundle world's ground grid, read once per run. */
+  world?: WorldData;
 }
 
 /** Fetches a path relative to the run directory; tests swap in a filesystem reader. */
@@ -217,12 +261,38 @@ async function getBin(fetcher: Fetcher, url: string, len: number): Promise<Uint8
   return buf;
 }
 
+/** `len` little-endian f32s. Read through a DataView, so the file's endianness doesn't depend on the CPU's. */
+async function getF32(fetcher: Fetcher, url: string, len: number): Promise<Float32Array> {
+  const bytes = await getBin(fetcher, url, len * 4);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out = new Float32Array(len);
+  for (let i = 0; i < len; i++) out[i] = view.getFloat32(i * 4, true);
+  return out;
+}
+
 /** The sim's limits (ecosim `Params::check_dims`): sides in 1..=256, width and depth whole patches. */
 function validDims(d: Dims | undefined): d is Dims {
   const side = (v: unknown) => Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 256;
   if (!d || typeof d !== 'object') return false;
   const patch = d.patch ?? 8;
   return side(d.x) && side(d.y) && side(d.z) && side(patch) && d.x % patch === 0 && d.y % patch === 0;
+}
+
+/**
+ * The `world` object of a format-4 run. The ground grid is the ecology grid at a finer cell size
+ * (SAD 1: `ground_width = dims.x / ground_cell_m`), so both sizes are checked against `dims`.
+ */
+function checkWorld(w: WorldMeta | undefined, d: Dims): WorldMeta {
+  if (!w || typeof w !== 'object') throw new Error('meta.json: format_version 4 without a world object');
+  if (!(w.ground_cell_m > 0)) throw new Error(`meta.json: world.ground_cell_m ${String(w.ground_cell_m)}`);
+  for (const [side, dim, n] of [['ground_width', 'x', w.ground_width], ['ground_depth', 'y', w.ground_depth]] as const) {
+    const want = d[dim] / w.ground_cell_m;
+    if (n !== want) throw new Error(`meta.json: world.${side} ${String(n)}, expected ${want} for dims.${dim} ${d[dim]}`);
+  }
+  if (!Array.isArray(w.media) || w.media.length === 0 || w.media.some((m) => typeof m !== 'string')) {
+    throw new Error('meta.json: world.media is not a list of names');
+  }
+  return w;
 }
 
 export function parseMeta(raw: unknown): Meta {
@@ -236,6 +306,7 @@ export function parseMeta(raw: unknown): Meta {
     throw new Error('meta.json: no snapshots');
   }
   if (!Array.isArray(m.species)) throw new Error('meta.json: no species list');
+  if (m.format_version >= BUNDLE_VERSION) m.world = checkWorld(m.world, m.dims);
   return m;
 }
 
@@ -326,6 +397,40 @@ export function joinUrl(base: string, path: string): string {
   return base.endsWith('/') ? base + path : `${base}/${path}`;
 }
 
+/** One `world/pipes.json` row, with the shape the renderer relies on checked. */
+function parsePipe(raw: unknown, i: number): Pipe {
+  const p = raw as Pipe;
+  const at = `world/pipes.json[${i}]`;
+  if (!p || typeof p !== 'object') throw new Error(`${at}: not an object`);
+  for (const end of ['inlet', 'outlet'] as const) {
+    const v = p[end];
+    if (!Array.isArray(v) || v.length !== 2 || v.some((n) => typeof n !== 'number' || !Number.isFinite(n))) {
+      throw new Error(`${at}: ${end} is not an [x, y] pair`);
+    }
+  }
+  return { id: String(p.id), inlet: p.inlet, outlet: p.outlet, capacity_m3h: p.capacity_m3h, illustrative: !!p.illustrative };
+}
+
+/** The static ground grid of a format-4 run: read once per run from `world/`, not per snapshot. */
+export async function loadWorld(base: string, meta: WorldMeta, fetcher: Fetcher = fetch): Promise<WorldData> {
+  const u = (f: string) => joinUrl(joinUrl(base, 'world'), f);
+  const gw = meta.ground_width;
+  const gd = meta.ground_depth;
+  const n = gw * gd;
+  const [ground_h, medium, building_h, pipesRes] = await Promise.all([
+    getF32(fetcher, u('ground_h.bin'), n),
+    getBin(fetcher, u('medium.bin'), n),
+    getF32(fetcher, u('building_h.bin'), n),
+    get(fetcher, u('pipes.json')),
+  ]);
+  const raw = (await pipesRes.json()) as unknown;
+  if (!Array.isArray(raw)) throw new Error(`${u('pipes.json')}: not an array`);
+  for (const code of medium) {
+    if (code >= meta.media.length) throw new Error(`${u('medium.bin')}: code ${code} is not in world.media`);
+  }
+  return { meta, gw, gd, cell: meta.ground_cell_m, ground_h, medium, building_h, pipes: raw.map(parsePipe) };
+}
+
 export async function loadRun(base: string, fetcher: Fetcher = fetch): Promise<Run> {
   const meta = parseMeta(await (await get(fetcher, joinUrl(base, 'meta.json'))).json());
   const series = parseSeries(await (await get(fetcher, joinUrl(base, 'series.csv'))).text());
@@ -333,7 +438,8 @@ export async function loadRun(base: string, fetcher: Fetcher = fetch): Promise<R
     ? parseEvents(await (await get(fetcher, joinUrl(base, 'events.csv'))).text())
     : [];
   const burnouts = events.filter((e) => e.kind === 'burnout');
-  return { base, meta, grid: new Grid(meta.dims), series, events, burnouts };
+  const world = meta.world ? await loadWorld(base, meta.world, fetcher) : undefined;
+  return { base, meta, grid: new Grid(meta.dims), series, events, burnouts, world };
 }
 
 /** The snapshot with the largest tick <= `tick`, clamped to the first and last snapshot. */
@@ -365,7 +471,7 @@ export async function loadSnapshot(run: Run, tick: number, fetcher: Fetcher = fe
   const snaps = run.meta.snapshots;
   const i = snaps.indexOf(tick);
   const burnt = burntPatches(run.burnouts, grid, i > 0 ? snaps[i - 1] : -1, tick);
-  return { tick, grid, material, light, moisture, fertility, height, patches, entities, burnt };
+  return { tick, grid, material, light, moisture, fertility, height, patches, entities, burnt, world: run.world };
 }
 
 export function speciesColor(meta: Meta, name: string, key: 'color' | 'canopy_color' = 'color'): string {

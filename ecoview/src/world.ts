@@ -1,9 +1,9 @@
 // Surface voxels: one InstancedMesh with one top voxel per column, colored by the active overlay.
 import * as THREE from 'three';
-import { SOIL, WATER, type Grid, type Snapshot } from './loader';
+import { SOIL, WATER, type Grid, type Snapshot, type WorldData } from './loader';
 
 export const OVERLAYS = [
-  'material', 'light', 'moisture', 'fertility', 'temperature', 'fire', 'crowding', 'traits',
+  'material', 'light', 'moisture', 'fertility', 'temperature', 'fire', 'crowding', 'traits', 'medium',
 ] as const;
 export type Overlay = (typeof OVERLAYS)[number];
 
@@ -30,6 +30,30 @@ export const COLORS = {
   traitMid: '#ffffff',
   traitHi: '#ff1f1f',
 } as const;
+
+/**
+ * Medium overlay (format 4): one fixed colour per surface medium of the scene contract, in the order
+ * `meta.json` `world.media` lists them. The sim owns the species colours, but a medium is scene geometry
+ * and not a species, so these live here (DECISIONS.md, shot G7). An unknown name falls back to `unknown`.
+ */
+export const MEDIUM_COLORS: Record<string, string> = {
+  soil: '#8b6b47',
+  lawn: '#79b449',
+  bed: '#a8724a',
+  mulch: '#6b4a2b',
+  gravel: '#b9b2a3',
+  concrete: '#d7d3cb',
+  asphalt: '#4a4a4e',
+  roof: '#9a9a9e',
+  water: '#3a6fd8',
+  unknown: '#ff00ff',
+};
+
+/** Light grey of the extruded buildings, lit in the perspective cameras and flat in the top one. */
+export const BUILDING_COLOR = '#c6c6cb';
+/** Storm-drain pipes: dashed, because the Capitol's are illustrative (docs/SCENE-CONTRACT.md). */
+export const PIPE_COLOR = '#1d6fa5';
+export const PIPE_DASH = 2;
 
 /** Fire overlay: a burning patch is brightest at this many ticks left (the sim's `fire.duration` default). */
 export const FIRE_TICKS_FULL = 3;
@@ -85,6 +109,20 @@ export const traitColor = (energyCostMult = 1): RGB => {
   return t < 0 ? lerpRgb(C.traitMid, C.traitLo, -t) : lerpRgb(C.traitMid, C.traitHi, t);
 };
 
+/** Colour of a medium by name, `unknown` magenta for a name this palette doesn't have. */
+export const mediumColor = (name: string): RGB => hexToRgb(MEDIUM_COLORS[name] ?? MEDIUM_COLORS.unknown);
+
+/** The ground cell under the centre of ecology column (x, y). */
+export function groundCell(w: WorldData, x: number, y: number): number {
+  const gx = Math.min(w.gw - 1, Math.floor((x + 0.5) / w.cell));
+  const gy = Math.min(w.gd - 1, Math.floor((y + 0.5) / w.cell));
+  return gx + w.gw * gy;
+}
+
+/** The medium name at the centre of ecology column (x, y). */
+export const mediumAt = (w: WorldData, x: number, y: number): string =>
+  w.meta.media[w.medium[groundCell(w, x, y)]] ?? 'unknown';
+
 const crowdCache = new WeakMap<Snapshot, Uint16Array>();
 
 /** Live grazers per patch, counted once per snapshot. */
@@ -107,6 +145,12 @@ export function columnColor(snap: Snapshot, x: number, y: number, overlay: Overl
   const mat = snap.material[g.voxel(x, y, h)];
   if (overlay === 'light') {
     return lightColor(snap.light[g.voxel(x, y, h + 1)]);
+  }
+  if (overlay === 'medium') {
+    // A noise world has no ground grid, so medium falls back to the material colour.
+    if (snap.world) return mediumColor(mediumAt(snap.world, x, y));
+    const p0 = snap.patches[g.patchOf(x, y)];
+    return mat === WATER ? C.water : mat === SOIL ? soilColor(p0.grass, p0.shrub) : C.rock;
   }
   if (mat === WATER) return C.water;
   const p = g.patchOf(x, y);
@@ -179,3 +223,207 @@ export class World {
   }
 }
 
+
+/** Lifted this far above the surface voxels' top faces so the drape never z-fights them. */
+export const DRAPE_LIFT = 0.02;
+
+/** The medium grid as an RGB texture, one texel per ground cell, nearest-filtered so media stay flat. */
+export function mediumTexture(world: WorldData): THREE.DataTexture {
+  const palette = world.meta.media.map((name) => mediumColor(name));
+  const data = new Uint8Array(world.gw * world.gd * 4);
+  for (let i = 0; i < world.medium.length; i++) {
+    const [r, g, b] = palette[world.medium[i]] ?? mediumColor('unknown');
+    data[4 * i] = r;
+    data[4 * i + 1] = g;
+    data[4 * i + 2] = b;
+    data[4 * i + 3] = 255;
+  }
+  const tex = new THREE.DataTexture(data, world.gw, world.gd, THREE.RGBAFormat);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
+ * The `medium` overlay at the ground grid's resolution (0.5 m at the Capitol), draped on the surface: one
+ * quad per ecology column at the top face of its surface voxel, textured with the whole medium grid. The
+ * columns stay one instance each, so the finer grid costs a texture rather than 4x the instances
+ * (DECISIONS.md, shot G7).
+ */
+export class GroundDrape {
+  readonly mesh: THREE.Mesh;
+  private readonly basic: THREE.MeshBasicMaterial;
+  private readonly lambert: THREE.MeshLambertMaterial;
+  private readonly position: THREE.BufferAttribute;
+  private builtFor = -1;
+
+  constructor(readonly grid: Grid, readonly world: WorldData) {
+    const quads = grid.columns;
+    const position = new THREE.BufferAttribute(new Float32Array(quads * 4 * 3), 3);
+    const uv = new THREE.BufferAttribute(new Float32Array(quads * 4 * 2), 2);
+    const normal = new THREE.BufferAttribute(new Float32Array(quads * 4 * 3), 3);
+    const index = new Uint32Array(quads * 6);
+    for (let q = 0, y = 0; y < grid.y; y++) {
+      for (let x = 0; x < grid.x; x++, q++) {
+        // Corners a, b, c, d anticlockwise seen from above; (a, c, d) and (a, b, c) face up.
+        uv.setXY(4 * q, x / grid.x, y / grid.y);
+        uv.setXY(4 * q + 1, (x + 1) / grid.x, y / grid.y);
+        uv.setXY(4 * q + 2, (x + 1) / grid.x, (y + 1) / grid.y);
+        uv.setXY(4 * q + 3, x / grid.x, (y + 1) / grid.y);
+        for (let k = 0; k < 4; k++) normal.setXYZ(4 * q + k, 0, 1, 0);
+        index.set([4 * q, 4 * q + 2, 4 * q + 3, 4 * q, 4 * q + 1, 4 * q + 2], 6 * q);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', position);
+    geometry.setAttribute('uv', uv);
+    geometry.setAttribute('normal', normal);
+    geometry.setIndex(new THREE.BufferAttribute(index, 1));
+    this.position = position;
+
+    const map = mediumTexture(world);
+    const opts = { map, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 };
+    this.basic = new THREE.MeshBasicMaterial(opts);
+    this.lambert = new THREE.MeshLambertMaterial(opts);
+    this.mesh = new THREE.Mesh(geometry, this.lambert);
+    this.mesh.frustumCulled = false;
+    this.mesh.visible = false;
+  }
+
+  /** Shown only on the `medium` overlay; the quads follow the surface, so they move with the snapshot. */
+  set(snap: Snapshot, overlay: Overlay, lit: boolean): void {
+    this.mesh.visible = overlay === 'medium';
+    this.mesh.material = lit ? this.lambert : this.basic;
+    if (!this.mesh.visible || this.builtFor === snap.tick) return;
+    const g = this.grid;
+    const p = this.position;
+    for (let q = 0, y = 0; y < g.y; y++) {
+      const z0 = g.y - y;
+      for (let x = 0; x < g.x; x++, q++) {
+        const h = snap.height[g.column(x, y)] + 1 + DRAPE_LIFT;
+        p.setXYZ(4 * q, x, h, z0);
+        p.setXYZ(4 * q + 1, x + 1, h, z0);
+        p.setXYZ(4 * q + 2, x + 1, h, z0 - 1);
+        p.setXYZ(4 * q + 3, x, h, z0 - 1);
+      }
+    }
+    p.needsUpdate = true;
+    this.builtFor = snap.tick;
+  }
+}
+
+/**
+ * Roof cells extruded to their building height, as one merged flat-shaded mesh built once per run. Only
+ * exposed faces are emitted - every cell's top, and a side only where the neighbour's top is lower - which
+ * on the Capitol's 24705 roof cells is 71743 quads against the 123525 of a box per cell.
+ */
+export class Buildings {
+  readonly mesh: THREE.Mesh;
+  private readonly lambert: THREE.MeshLambertMaterial;
+  private readonly basic: THREE.MeshBasicMaterial;
+  private built = false;
+
+  constructor(readonly grid: Grid, readonly world: WorldData) {
+    const color = new THREE.Color().setStyle(BUILDING_COLOR, THREE.SRGBColorSpace);
+    this.lambert = new THREE.MeshLambertMaterial({ color, flatShading: true });
+    this.basic = new THREE.MeshBasicMaterial({ color });
+    this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), this.lambert);
+    this.mesh.frustumCulled = false;
+  }
+
+  /** Builds the geometry on the first snapshot; a bundle world's ground never moves after that. */
+  build(snap: Snapshot, lit: boolean): void {
+    this.mesh.material = lit ? this.lambert : this.basic;
+    if (this.built) return;
+    this.built = true;
+    const w = this.world;
+    const g = this.grid;
+    const roof = w.meta.media.indexOf('roof');
+    const verts: number[] = [];
+    // A cell's floor is the top of the surface voxel of the ecology column it sits in, so a building
+    // always stands on the drawn terrain; its roof is that floor plus the bundle's building height.
+    const base = (gx: number, gy: number): number => {
+      const x = Math.min(g.x - 1, Math.floor(gx * w.cell));
+      const y = Math.min(g.y - 1, Math.floor(gy * w.cell));
+      return snap.height[g.column(x, y)] + 1;
+    };
+    const isRoof = (gx: number, gy: number): boolean => w.medium[gx + w.gw * gy] === roof;
+    const topOf = (gx: number, gy: number): number => base(gx, gy) + w.building_h[gx + w.gw * gy];
+    const quad = (a: number[], b: number[], c: number[], d: number[]): void => {
+      verts.push(...a, ...b, ...c, ...a, ...c, ...d);
+    };
+    for (let gy = 0; gy < w.gd; gy++) {
+      for (let gx = 0; gx < w.gw; gx++) {
+        if (!isRoof(gx, gy)) continue;
+        const top = topOf(gx, gy);
+        const x0 = gx * w.cell;
+        const x1 = x0 + w.cell;
+        const z0 = g.y - gy * w.cell;
+        const z1 = z0 - w.cell;
+        quad([x0, top, z0], [x1, top, z0], [x1, top, z1], [x0, top, z1]);
+        // Sides, each from the neighbour's top (its roof, or its ground) up to this cell's.
+        const sides: [number, number, number, number, number, number][] = [
+          [1, 0, x1, z0, x1, z1],
+          [-1, 0, x0, z1, x0, z0],
+          [0, 1, x1, z1, x0, z1],
+          [0, -1, x0, z0, x1, z0],
+        ];
+        for (const [dx, dy, ax, az, bx, bz] of sides) {
+          const nx = gx + dx;
+          const ny = gy + dy;
+          const out = nx < 0 || nx >= w.gw || ny < 0 || ny >= w.gd;
+          const nTop = out ? base(gx, gy) : isRoof(nx, ny) ? topOf(nx, ny) : base(nx, ny);
+          if (nTop >= top) continue;
+          quad([ax, nTop, az], [bx, nTop, bz], [bx, top, bz], [ax, top, az]);
+        }
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    geometry.computeVertexNormals(); // one normal per face: the geometry is not indexed
+    this.mesh.geometry.dispose();
+    this.mesh.geometry = geometry;
+  }
+
+  /** Triangles in the merged mesh, for the tests. */
+  get triangles(): number {
+    return (this.mesh.geometry.getAttribute('position')?.count ?? 0) / 3;
+  }
+}
+
+/** Storm-drain pipes as one dashed line per pipe, inlet to outlet, drawn in the top camera only. */
+export class Pipes {
+  readonly lines: THREE.LineSegments;
+
+  constructor(grid: Grid, world: WorldData) {
+    const pts: number[] = [];
+    // Above the terrain and drawn without depth testing, so a pipe under a building is still visible.
+    const y = grid.z;
+    for (const p of world.pipes) {
+      pts.push(p.inlet[0], y, grid.y - p.inlet[1], p.outlet[0], y, grid.y - p.outlet[1]);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
+    this.lines = new THREE.LineSegments(
+      geometry,
+      new THREE.LineDashedMaterial({
+        color: new THREE.Color().setStyle(PIPE_COLOR, THREE.SRGBColorSpace),
+        dashSize: PIPE_DASH,
+        gapSize: PIPE_DASH,
+        depthTest: false,
+      }),
+    );
+    this.lines.computeLineDistances();
+    this.lines.renderOrder = 10;
+    this.lines.frustumCulled = false;
+    this.lines.visible = false;
+  }
+
+  /** The pipes are illustrative and read only from above, so they show in the top camera alone. */
+  set(top: boolean): void {
+    this.lines.visible = top;
+  }
+}

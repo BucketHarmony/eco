@@ -1,6 +1,6 @@
 # Screenshot verdicts
 
-`npm run shot` against `runs/s42` (seed 42), which since ecoview shot 16 is the reference world at defaults: the 256×64×32 strip with 8×8 patches, format 3 (ecosim shot 15). It produces 11 PNGs. Each verdict comes from viewing the PNG. These PNGs are also the visual-regression references in `shots/reference/`, re-accepted in shot 16 (`REACCEPT-16.md`). The top camera fits the whole strip, so the 4:1 world is letterboxed to rows 280–519 of `#view`, with the page background above and below it.
+`npm run shot` produces 15 PNGs: 01–11 from `runs/s42` (seed 42), which since ecoview shot 16 is the reference world at defaults — the 256×64×32 strip with 8×8 patches, format 3 (ecosim shot 15) — and 12–15 from `runs/capitol-s42`, the Capitol bundle world at format 4 (ecoview shot G7), which are tabled separately below. Each verdict comes from viewing the PNG. These PNGs are also the visual-regression references in `shots/reference/`, re-accepted in shot 16 (`REACCEPT-16.md`). The top camera fits the whole strip, so the 4:1 world is letterboxed to rows 280–519 of `#view`, with the page background above and below it.
 
 | File | Expectation | Verdict |
 | --- | --- | --- |
@@ -17,6 +17,17 @@
 | `11_traits_t20000_top.png` | Grazers blue below the default cost, red above | **PASS.** The ground is the material colour and hunters are gray. Grazers are a near-even mix of blue, pale and red dots (1591 below 1, 1506 above), matching the series mean of 1.005. No species-yellow grazers are left. |
 
 **Expectation wording.** The SAD's "grazer curve oscillating, hunter curve lagging it, tree curve rising" still holds, in a damped form on the larger world. Since ecosim shot 10, crowding mortality, not starvation, is the main cause of death, and the chart's third panel shows it. Burnt ground comes from `events.csv` burnouts since the previous snapshot (DECISIONS.md, shot 16).
+
+## The Capitol (shots 12–15)
+
+`runs/capitol-s42`: the committed `worlds/capitol` bundle over 256 m of the Michigan State Capitol grounds, run at seed 42 for 20000 ticks with `animals.enabled=false` and `climate.rain_gradient=0` (ecosim shot G3a). The world is square, so the top camera fills the view height and the world spans screen x 80–880 of `#view`. The `medium` overlay reads the 0.5 m ground grid through a draped texture, so it shows twice the detail of the 1 m voxel columns underneath it; its legend is the only overlay legend, which is why shots 01–11 are unchanged.
+
+| File | Expectation | Verdict |
+| --- | --- | --- |
+| `12_capitol_medium_t0_iso.png` | Iso, `medium` at t=0: a large grey building block in the centre, asphalt bands along at least two sides | **PASS.** The Capitol reads as a building from the diagonal: the stepped wings, the drum and the ribbed dome all stand above a green lawn, with five office blocks along the north and east streets. Dark asphalt bands run the full length of all four edges, with the pale walks and the circular drive in front of the west steps drawn on the lawn between them. The legend lists all nine media. |
+| `13_capitol_medium_t0_top.png` | Top, `medium` at t=0: the site plan, every medium its palette colour | **PASS.** Straight down it reads as the real grounds: lawn green over most of the site, the cross-shaped Capitol footprint in building grey, pale concrete walks radiating from it to the corners, dark asphalt streets framing all four sides, and dark tree beds scattered over the lawn. The four pipes are dashed blue lines inlet→outlet, drawn only on this camera. |
+| `14_capitol_light_t0_top.png` | Top, `light` at t=0: the buildings' shade | **PASS.** Open ground is white at 255. Solid black blocks sit immediately north of the dome, of both wings and of the north office blocks — the columns those buildings shade all day. The building footprints themselves are the light grey of the extruded roofs; the small scattered black squares are the 79 young trees' own shade. |
+| `15_capitol_material_t20000_iso.png` | Iso, `material` at t=20000: trees on the lawn, none on roof or road | **PASS.** 1982 trees, a closed canopy over the east and south lawns and a thinner stand in the north-west. Not one stands on a roof or in a street: the grey streets, walks and building footprints are bare, because the bundle lays them down as Rock and the sim only plants on Soil. Of the four ground cells under each trunk, 97.9% are lawn, 0.5% asphalt (trunks beside a walk edge) and none roof. |
 
 ## Performance
 

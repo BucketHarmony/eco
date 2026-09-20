@@ -6,7 +6,7 @@ import path from 'node:path';
 import { preview } from 'vite';
 import { chromium } from '@playwright/test';
 import { CHROMIUM_ARGS, VIEWPORT } from './chromium.mjs';
-import { SHOTS } from './shots.mjs';
+import { BUDGET_S, SHOTS } from './shots.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = path.join(root, 'shots');
@@ -31,14 +31,15 @@ try {
     console.error(`page error: ${e.message}`);
   });
   for (const [file, params] of SHOTS) {
-    await page.goto(`http://localhost:${PORT}/?run=runs/s42&${params}`);
+    const start = Date.now();
+    await page.goto(`http://localhost:${PORT}/?${params}`);
     await page.waitForFunction(() => window.__ecoviewReady === true || !!window.__ecoviewError, null, {
-      timeout: 30000,
+      timeout: 60000,
     });
     const err = await page.evaluate(() => window.__ecoviewError);
     if (err) throw new Error(`${file}: ${err}`);
     await page.screenshot({ path: path.join(outDir, file), fullPage: true });
-    console.log(`wrote shots/${file}`);
+    console.log(`wrote shots/${file} (${((Date.now() - start) / 1000).toFixed(1)} s)`);
   }
 } catch (e) {
   failed = true;
@@ -47,5 +48,8 @@ try {
   await browser?.close();
   await new Promise((r) => server.httpServer.close(r));
 }
-console.log(`${SHOTS.length} screenshots in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+const elapsed = (Date.now() - t0) / 1000;
+const inBudget = elapsed <= BUDGET_S;
+if (!inBudget) failed = true;
+console.log(`${inBudget ? 'ok  ' : 'FAIL'} ${SHOTS.length} screenshots in ${elapsed.toFixed(1)} s of ${BUDGET_S} s`);
 process.exit(failed ? 1 : 0);

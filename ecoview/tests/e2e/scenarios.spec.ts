@@ -130,9 +130,9 @@ async function readyEverTrue(page: Page): Promise<boolean> {
   return page.evaluate(() => (window as unknown as { __readyEverTrue: boolean }).__readyEverTrue);
 }
 
-test('a format_version 4 fixture shows the error state and never sets __ecoviewReady', async ({ page }) => {
-  await openWithMeta(page, (m) => ({ ...m, format_version: 4 }));
-  await expect(page.locator('#status')).toContainText('unsupported format_version 4');
+test('a format_version 5 fixture shows the error state and never sets __ecoviewReady', async ({ page }) => {
+  await openWithMeta(page, (m) => ({ ...m, format_version: 5 }));
+  await expect(page.locator('#status')).toContainText('unsupported format_version 5');
   expect(await readyEverTrue(page)).toBe(false);
 });
 

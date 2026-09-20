@@ -2,10 +2,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { loadRun, loadSnapshot, pickSnapshot, speciesColor, type Grid, type Run, type Snapshot } from './loader';
-import { World } from './world';
+import { Buildings, GroundDrape, Pipes, World } from './world';
 import { Entities } from './entities';
 import {
-  drawChart, getControls, initControls, parseParams, syncControls, toSearch,
+  drawChart, drawLegend, getControls, initControls, parseParams, syncControls, toSearch,
   type Cam, type ViewState,
 } from './ui';
 
@@ -44,6 +44,10 @@ scene.add(ambient, sun, sun.target);
 
 let world: World | null = null;
 let entities: Entities | null = null;
+/** Format 4 only: the ground-grid drape, the extruded buildings and the storm drains. */
+let drape: GroundDrape | null = null;
+let buildings: Buildings | null = null;
+let pipes: Pipes | null = null;
 
 /** Where the perspective cameras look: the world's centre at 3/8 of its height (12 of 32). */
 const target = (g: Grid) => new THREE.Vector3(g.x / 2, (g.z * 3) / 8, g.y / 2);
@@ -165,6 +169,14 @@ async function apply(next: ViewState): Promise<void> {
       entities?.group.removeFromParent();
       entities = new Entities(r.meta, r.grid);
       scene.add(entities.group);
+      for (const o of [drape?.mesh, buildings?.mesh, pipes?.lines]) o?.removeFromParent();
+      drape = buildings = pipes = null;
+      if (r.world) {
+        drape = new GroundDrape(r.grid, r.world);
+        buildings = new Buildings(r.grid, r.world);
+        pipes = new Pipes(r.grid, r.world);
+        scene.add(drape.mesh, buildings.mesh, pipes.lines);
+      }
       const t = target(r.grid);
       sun.target.position.copy(t);
       sun.position.set(t.x + 40, t.y + 88, t.z + 60);
@@ -182,6 +194,9 @@ async function apply(next: ViewState): Promise<void> {
     const top = state.cam === 'top';
     world!.setLit(!top);
     world!.build(snap, state.overlay);
+    drape?.set(snap, state.overlay, !top);
+    buildings?.build(snap, !top);
+    pipes?.set(top);
     entities!.build(snap, { fieldOverlay: state.overlay !== 'material', top, traits: state.overlay === 'traits' });
     const m = r.meta;
     drawChart(ui.chart, r.series, {
@@ -190,6 +205,7 @@ async function apply(next: ViewState): Promise<void> {
       tree: speciesColor(m, 'tree'),
     }, snapTick);
     syncControls(ui, state, m.snapshots, snapTick, playing);
+    drawLegend(ui.legend, state.overlay, m.world?.media);
     const fork = m.forked_from ? ` · forked from ${m.forked_from.run} @ tick ${m.forked_from.tick}` : '';
     ui.status.textContent = `${state.run} · seed ${m.seed}${fork} · ${snap.entities.length} entities`;
     ui.status.classList.remove('error');

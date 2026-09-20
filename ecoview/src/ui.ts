@@ -1,5 +1,5 @@
 // Controls, URL-parameter state, and the Canvas 2D population chart.
-import { OVERLAYS, type Overlay } from './world';
+import { OVERLAYS, mediumColor, type Overlay } from './world';
 import { DEATH_CAUSES, type DeathCause, type Series } from './loader';
 
 export const CAMS = ['iso', 'top', 'side'] as const;
@@ -285,6 +285,32 @@ export function drawChart(canvas: HTMLCanvasElement, series: Series, colors: Cha
   canvas.dataset.panels = JSON.stringify(panels);
 }
 
+/**
+ * The `medium` overlay's key: one chip per medium the run's `meta.json` lists, in that order and in the
+ * palette the drape and the columns use. It is hidden on every other overlay and on a run with no ground
+ * grid, so the noise world's sidebar is unchanged (DECISIONS.md, shot G7).
+ */
+export function legendItems(overlay: Overlay, media?: string[]): { label: string; css: string }[] {
+  if (overlay !== 'medium' || !media?.length) return [];
+  return media.map((label) => {
+    const [r, g, b] = mediumColor(label);
+    return { label, css: `rgb(${r}, ${g}, ${b})` };
+  });
+}
+
+export function drawLegend(el: HTMLElement, overlay: Overlay, media?: string[]): void {
+  const items = legendItems(overlay, media);
+  el.hidden = items.length === 0;
+  el.replaceChildren(...items.map(({ label, css }) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    const swatch = document.createElement('i');
+    swatch.style.background = css;
+    chip.append(swatch, document.createTextNode(label));
+    return chip;
+  }));
+}
+
 // ---- controls ----
 
 export interface Controls {
@@ -294,6 +320,7 @@ export interface Controls {
   play: HTMLButtonElement;
   readout: HTMLElement;
   chart: HTMLCanvasElement;
+  legend: HTMLElement;
   status: HTMLElement;
 }
 
@@ -310,6 +337,7 @@ export function getControls(): Controls {
     play: q('play'),
     readout: q('readout'),
     chart: q('chart'),
+    legend: q('legend'),
     status: q('status'),
   };
 }

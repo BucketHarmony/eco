@@ -9,7 +9,11 @@ for f in "$root"/ecosim/fixtures/s42-mini*/meta.json; do
   v=$(grep -o '"format_version": *[0-9]*' "$f" | grep -o '[0-9]*$')
   if [ "${v:-0}" -gt "$best" ]; then best=$v; mini="fixtures/$(basename "$(dirname "$f")")"; fi
 done
-for d in runs/s42 "$mini:fixtures/s42-mini"; do
+# runs/capitol-s42 is the Capitol reference run (ecosim shots G3/G3a, ecoview shot G7). Generate it with
+#   ecosim run --world worlds/capitol --seed 42 --ticks 20000 --out runs/capitol-s42 \
+#     --snapshot-every 1000 --set animals.enabled=false --set climate.rain_gradient=0
+# Every bundle-world run carries those two overrides (MASTER.md, 2026-09-19 21:05).
+for d in runs/s42 runs/capitol-s42 "$mini:fixtures/s42-mini" fixtures/capitol-mini; do
   src="$root/ecosim/${d%%:*}"
   dst="$root/ecoview/public/${d##*:}"
   [ -f "$src/meta.json" ] || { echo "missing $src/meta.json — run ecosim first" >&2; exit 1; }

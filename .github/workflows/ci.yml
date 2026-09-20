@@ -211,7 +211,9 @@ jobs:
           path: ecosim/ci-runs/bench-tick.json
           if-no-files-found: error
 
-  # ecoview gate: build the seed-42 run it renders (the strip, format 3), then build, unit + scenario tests, screenshots and the s42 films (single-view and 2x2 tiled).
+  # ecoview gate: build the two runs it renders (the seed-42 strip at format 3, and the Capitol world
+  # bundle at format 4 for shots 12-15), then build, unit + scenario tests, screenshots and the s42
+  # films (single-view and 2x2 tiled).
   # shot:check compares against references rendered on the platform in shots/reference/PLATFORM, so it
   # runs only on a matching runner; elsewhere it is skipped with a notice (ecoview/DECISIONS.md, Shot 6).
   ecoview:
@@ -237,13 +239,17 @@ jobs:
           key: ${{ runner.os }}-ecoview-cargo-${{ hashFiles('ecosim/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-ecoview-cargo-
 
-      - name: run s42 and sync
+      - name: run s42, run the Capitol and sync
         run: |
           cd ../ecosim
           rm -f target/release/ecosim
           cargo build --release
           # The reference world at defaults: the 256x64 strip, format 3 (ecoview/DECISIONS.md, shot 16).
           ./target/release/ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100
+          # The Capitol reference run, which shots 12-15 render (ecoview/DECISIONS.md, shot G7).
+          # runs/ is gitignored, so the renderer's job regenerates it; every bundle run carries these
+          # two overrides. Snapshots every 1000, since the shots only need t=0 and t=20000.
+          ./target/release/ecosim run --world worlds/capitol --seed 42 --ticks 20000 --out runs/capitol-s42 --snapshot-every 1000 --set animals.enabled=false --set climate.rain_gradient=0
           cd ..
           bash scripts/sync-data.sh
 

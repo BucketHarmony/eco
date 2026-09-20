@@ -141,8 +141,8 @@ describe.each(FIXTURES)('loader on $dir', ({ dir, width, version, waterColumns }
 });
 
 describe('loader formats and dims', () => {
-  it('accepts format_version 1, 2 and 3 only', () => {
-    expect(FORMAT_VERSIONS).toEqual([1, 2, 3]);
+  it('accepts format_version 1 to 4 only', () => {
+    expect(FORMAT_VERSIONS).toEqual([1, 2, 3, 4]);
   });
 
   it('loads a format_version 2 run to the same scene data as version 1, never fetching state.bin', async () => {
@@ -183,10 +183,10 @@ describe('loader formats and dims', () => {
     expect(new Grid({ x: 64, y: 32, z: 16, patch: 16 }).patchOf(40, 20)).toBe(2 + 4 * 1);
   });
 
-  it('throws on format_version 4 and on dims the sim never writes', async () => {
+  it('throws on format_version 5 and on dims the sim never writes', async () => {
     const meta = JSON.parse(await readFile(path.join(PUBLIC, 'fixtures/s42-strip-mini/meta.json'), 'utf8'));
-    expect(() => parseMeta({ ...meta, format_version: 4 })).toThrow(/format_version 4/);
-    const f = fakeFetcher({ '/bad/meta.json': JSON.stringify({ ...meta, format_version: 4 }), '/bad/series.csv': 'tick\n0\n' });
+    expect(() => parseMeta({ ...meta, format_version: 5 })).toThrow(/format_version 5/);
+    const f = fakeFetcher({ '/bad/meta.json': JSON.stringify({ ...meta, format_version: 5 }), '/bad/series.csv': 'tick\n0\n' });
     await expect(loadRun('/bad', f)).rejects.toThrow(/format_version/);
     for (const dims of [
       undefined, { x: 64, y: 64 }, { x: 0, y: 64, z: 32 }, { x: 257, y: 64, z: 32 }, { x: 64.5, y: 64, z: 32 },

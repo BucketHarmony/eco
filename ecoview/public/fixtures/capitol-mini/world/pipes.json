@@ -1,0 +1,6 @@
+[
+  {"id": "pipe_1", "inlet": [15.75, 136.75], "outlet": [0.0, 136.75], "capacity_m3h": 50.0, "illustrative": true},
+  {"id": "pipe_4", "inlet": [91.75, 186.25], "outlet": [91.75, 256.0], "capacity_m3h": 50.0, "illustrative": true},
+  {"id": "pipe_3", "inlet": [28.75, 242.75], "outlet": [28.75, 256.0], "capacity_m3h": 50.0, "illustrative": true},
+  {"id": "pipe_2", "inlet": [142.25, 245.25], "outlet": [142.25, 256.0], "capacity_m3h": 50.0, "illustrative": true}
+]

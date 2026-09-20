@@ -1,6 +1,8 @@
 // Visual regression against shots/reference/. `check` compares the fresh shots/*.png with pixelmatch
 // (threshold 0.1) and fails if more than 2% of any image's pixels differ, writing diffs to shots/diff/.
-// `accept` copies the fresh shots over the references and records the rendering platform.
+// `accept` copies the fresh shots over the references and records the rendering platform; with name
+// substrings after it, only the matching shots are accepted, which is how a shot that adds references
+// avoids a mass re-accept (overnight/MASTER.md).
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -18,10 +20,17 @@ const MAX_DIFF = 0.02;
 
 const mode = process.argv[2];
 if (mode === 'accept') {
+  const only = process.argv.slice(3);
+  const take = SHOTS.filter(([file]) => only.length === 0 || only.some((s) => file.includes(s)));
+  if (only.length && take.length === 0) {
+    console.error(`no shot matches ${only.join(' ')}`);
+    process.exit(2);
+  }
   await mkdir(refDir, { recursive: true });
-  for (const [file] of SHOTS) await copyFile(path.join(shots, file), path.join(refDir, file));
-  await writeFile(path.join(refDir, 'PLATFORM'), `${PLATFORM}\n`);
-  console.log(`accepted ${SHOTS.length} references (${PLATFORM})`);
+  for (const [file] of take) await copyFile(path.join(shots, file), path.join(refDir, file));
+  if (only.length === 0) await writeFile(path.join(refDir, 'PLATFORM'), `${PLATFORM}\n`);
+  const which = only.length ? `: ${take.map(([f]) => f).join(', ')}` : '';
+  console.log(`accepted ${take.length} references (${PLATFORM})${which}`);
 } else if (mode === 'check') {
   const recorded = (await readFile(path.join(refDir, 'PLATFORM'), 'utf8')).trim();
   if (recorded !== PLATFORM) {
@@ -50,6 +59,6 @@ if (mode === 'accept') {
     process.exit(1);
   }
 } else {
-  console.error('usage: node scripts/shot-ref.mjs check|accept');
+  console.error('usage: node scripts/shot-ref.mjs check | accept [name-substring ...]');
   process.exit(2);
 }

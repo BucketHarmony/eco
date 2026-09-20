@@ -78,3 +78,23 @@ the chunks. This was a fault in the measurement harness, not in the engine or th
 |---|---|
 | Clean dependency build, `--release`, no `dynamic_linking` | 771 s (12.9 min) |
 | Incremental rebuild of the binary after a one-line edit, `--release` | 6.2–7.3 s |
+
+## CI
+
+Run 35543162641 on `overnight/2026-09-19`, commit 4d36d6d, ubuntu-latest, with no warm cache — the
+`ecoview-native` job's first run ever, so nothing was restored.
+
+| | |
+|---|---|
+| Mesh golden, `--no-default-features` | **6 s including compile** |
+| Same test locally, from a cold `--no-default-features` target | 11 s including compile, 0.03 s to run |
+| Lavapipe screenshots, first attempt | 0/10 — the viewer did not build |
+
+The five golden tests are `golden_flat`, `golden_stepped`, `golden_building`,
+`cell_size_comes_from_the_bundle` and `a_tree_adds_geometry`. Six seconds is what the engine-free split
+buys: the gate compiles `serde`, `serde_json` and `binary-greedy-meshing`, and nothing else.
+
+The lavapipe step failed to build rather than failing to render: `wayland-sys`'s build script needs
+`libwayland-client`, which is not on the runner image. `libwayland-dev` and `libxkbcommon-dev` were added
+to that step's apt line and it was re-measured; the step has `continue-on-error: true` throughout and at
+no point could it affect the gate or the seven jobs beside it.

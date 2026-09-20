@@ -361,7 +361,7 @@ jobs:
       # Measurement only, never a gate. Ten headless screenshots of the stress world on lavapipe.
       - name: software vulkan
         continue-on-error: true
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb mesa-vulkan-drivers libasound2-dev libudev-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb mesa-vulkan-drivers libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
       - name: build the viewer
         continue-on-error: true

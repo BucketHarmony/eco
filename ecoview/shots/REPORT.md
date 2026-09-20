@@ -103,8 +103,9 @@ canvas on every platform and the sidebar only on the platform the references cam
 Linux now runs it instead of skipping it — the hole that let fifteen references go stale until shot E2
 noticed. The Windows references and the Linux CI renders agree **to the pixel** inside `#view` on all
 seventeen; the whole disagreement is the sidebar's text, 5.5–9.0% of it. The numbers, the two options this
-rejected and the proof that a perturbed reference reddens the job are in `DECISIONS.md` under "E5 reference
-screenshots in CI".
+rejected and the proof that a perturbed reference reddens the job — CI run 35539520660, red at `shot:check`
+on one deliberately spoiled reference and green on the other sixteen — are in `DECISIONS.md` under "E5
+reference screenshots in CI".
 
 Re-rendering also measured this machine against itself: two runs of `npm run shot` at the same commit
 differ by 20 pixels of 1,024,000 at pixelmatch threshold 0, and by none at the 0.1 the check uses.

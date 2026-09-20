@@ -668,7 +668,13 @@ compares with `shots/reference/02` everywhere.
 shot:accept` is unchanged, and because the view region is platform-identical a re-accept done locally
 lands green in CI on the same commit. That is the advantage over option 1.
 
-**Proof that it can fail.** PENDING-DRIFT-EXPERIMENT
+**Proof that it can fail.** Commit 0673de5 painted a 200×200 magenta block into the `#view` half of
+`shots/reference/03_light_t10000_top.png` — 40,000 pixels, 3.901% of the page, twice the gate — and
+the Linux CI job went red at the `shot:check` step: run 35539520660, `FAIL 03_light_t10000_top.png:
+view 3.901% of the page (5.201% of the region)`, with the other sixteen rows `ok` and the ecosim jobs
+green. That run is also CI's own copy of the measurement above: every unperturbed row reads `view
+0.000%`, and every sidebar reads 1.375–2.260% of the page, not gated. The PNG was restored byte for
+byte in the next commit (`git checkout d8efdd9 -- …`), which is the commit this shot ends on.
 
 **Where the constants live.** `REGIONS` in `scripts/shot-diff.mjs` is the one definition of the page's
 two rectangles, built from `VIEW` (`film-lib.mjs`) and `VIEWPORT` (`chromium.mjs`).

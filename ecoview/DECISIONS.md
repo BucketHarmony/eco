@@ -396,6 +396,15 @@ SwiftShader:
 
 The thinnest margin is 4.5×, against the 3× the shot asks for.
 
+**And on the runner, where it actually failed.** CI run 35528053254 (all 7 jobs green, the `ecoview` job
+19m52s of its 30-minute budget) reports 16 draw medians of 201.8–383.6 ms, mean 296.4 — so the measured
+frames alone cost **178.3 s for `cam=iso` and 106.2 s for `cam=top`**, 284 s of the old single test's flat
+300 s before any page load or overlay switch. That is the timeout, measured. Against the new budgets the
+runner sits at 3.5× on the heavier test and 1.8× clear of its half-budget alarm, which is what
+`RUNNER_SLACK` buys: without it the alarm would be 255 s and a runner this close to 185 s would start
+failing on variance rather than on scene weight. The worst single pair, `traits/iso` at 383.6 ms, still
+has 2.6× headroom on the 1000 ms gate.
+
 **A test that uses more than half its own budget fails by name.** `expectWithinHalfBudget` compares
 each test's elapsed wall clock with half its timeout and fails with the test's name, both numbers and
 what to do. The next scene-weight increase therefore reports its cause instead of the bare

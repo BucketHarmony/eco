@@ -1165,9 +1165,161 @@ shot does not touch it.
 - **Every run with the water tier on writes format 4,** noise worlds included, with a synthesized all-soil `world/` grid; `meta.json`'s `world.bundle` distinguishes the two. The alternative — a fifth version for "water but no bundle" — would have split the version line over an axis a reader does not care about, since what a reader needs to know is whether a ground grid is there. `ecosim fork` therefore accepts format 4 on a noise world (it can rebuild a synthesized grid from params) and still refuses a bundle one.
 - **`--format-version 2` still writes a strictly version-2 directory,** water files and all, because "each version only adds files" is the contract the renderer's loader is written against. `write_snapshot` takes a `water: bool` for it; the ledger check runs either way.
 - **`runoff_mm` is attributed to the rain that fell on the cell,** not summed over every cell-to-cell transfer: what leaves a cell is split between its own rain and its run-on in proportion. Summing transfers counted water crossing 300 cells 300 times and reported runoff at 22164% of rain. Attributed, it is at most `rain_mm` and the ratio of the two is the storm's runoff coefficient, which is the number the FINDINGS tables want.
-- **Moisture is derived, not stored.** The u8 field is `round(255 × min(1, soil_water / field_capacity))`, recomputed on the soil update, so soil water is the single source of truth and the renderer's overlay keeps working unchanged. Species draws still subtract from moisture; `draw_moisture` converts the draw back into millimetres and takes it out of soil water, so the ledger stays closed.
+- **Moisture is derived, not stored.** The field is a `Vec<f32>` holding `255 × min(1, soil_water / field_capacity)`, recomputed on the soil update and quantised to u8 only when `moisture.bin` is written, so soil water is the single source of truth and the renderer's overlay keeps working unchanged. (Shot G4b corrected this line, which called the field u8, and replaced `draw_moisture` with `draw_water_mm`: a plant's demand is in millimetres, so there is no longer a conversion back from the index.)
 - **The flow graph is built once at load and never rebuilt.** Depressions are filled by priority-flood, receivers are D8 over 4 neighbours, and the order is Kahn's; roofs are lifted by their building height so water leaves them by their downspouts (BFS from each pipe inlet) rather than down their walls. Any cycle the fill leaves is cut by routing its entry cell to `OUT`, chosen by lowest index so the cut is deterministic. Buildings and terrain do not move during a run, so a static graph is exact, and it makes the storm pass one linear sweep: 2.85 ms at 512 × 512.
 - **A storm is one whole-world event** with `detail` `"<depth> <runoff> <outflow>"` in millimetres, matching the tick's series columns, rather than one event per rained-on cell. Per-cell rain is a field, not an event.
 - **The manifest, `s42-check.txt` and the `s42-mini-v2` and `capitol-mini` fixtures were regenerated,** because the water tier changes behaviour on every world. `fixtures/s42-mini` stays as it is: it is the format-1 fixture.
 - **Two forced-extinction tests needed stronger forcing** (`fire.base_rate` 1 → 20, `hunter.hunt_cost` 5 → 8, both test-local `--set` values, not defaults). The tier holds moisture near saturation and ignition scales with the square of dryness, so fires are roughly 25× rarer than they were. Raising the forcing keeps the test testing what it names — that extinction runs to 20000 ticks without a panic — instead of quietly passing because nothing died.
 - **The ecoview CI job pins its two ecosim runs with `--set hydro.enabled=false`.** Rate-0 identity makes that data byte-identical to what the committed reference screenshots were rendered from, so the renderer's pixel tests stay honest until a renderer shot teaches it the water files. **Shot G8 removes the pin.** `tests/ci.rs` pins the ecosim job's commands only, so the pin does not fight it.
+
+## Shot G4b — units calibration
+
+The audit is `UNITS.md`, committed on its own before any conversion. This section is the judgement
+record: what the unit system is, what was converted, what was deliberately left, and which standing
+rules the operator suspended for the shot.
+
+**One tick has one duration, and it is written down once.** `hydro::HOURS_PER_YEAR = 8766.0` is the
+only place the length of a year appears, and `hydro::tick_hours(p) = HOURS_PER_YEAR / year_len` is the
+only place a tick's length is computed; `hydro::years(p, n)` is the same division for a span of `n`
+ticks. At the shipped `climate.year_len = 4000` a tick is **2.1915 h**, so a 20000-tick reference run
+is **5 simulated years**. That duration was not chosen by this shot — it was already implied by the
+water tier's mm/h rates — and the prompt's instruction was to adopt it rather than contradict it.
+Everything else follows from it: **every rate in `params.toml` is per hour or per year**, and a
+subsystem that updates every `N` ticks turns its rate into an amount by multiplying by `years(p, N)`
+or `N × tick_hours(p)`. `tests/units.rs` pins both halves of that sentence — the constant appears
+exactly once, only `hydro.rs` divides by `year_len`, and five named call sites charge their rate over
+the update's own length.
+
+**The consequence is that a cadence is a schedule and not part of a rate,** so the four hard-coded
+cadences became parameters in a new `[schedule]` section: `cover_every` (was the two literal `10`s on
+one line in `producers.rs`), `soil_every` (was `is_multiple_of(10)` in `sim.rs` *and*, separately, the
+`10.0` in `abiotic.rs` that converted it to hours — the desynchronisation the prompt warned about, now
+one read), `temperature_every` and `fire_every` (was `fire::FIRE_EVERY`). The other four cadences were
+already parameters and stay where they are. None of this is a mechanism: the same code runs, it just
+asks where it used to assume.
+
+**Soil water is the physical quantity; the 0–255 moisture index is a reading of it.**
+`medium.*.field_capacity_mm` is declared as the **available water capacity of the rooting zone** — a
+store of 0 is the permanent wilting point, not oven-dry soil — and the derived index is
+`255 × soil_water / field_capacity`. Every threshold that used to be a number on that index is now a
+**fraction of available water capacity**: the three species' `moisture` curves, `tree.dry_fraction`
+(was `dry_moisture` = 30 of 255, now 0.12) and fire's dryness. This is the conversion that touches the
+most rules, and it is why the curves' fourth element is 1.004 rather than 1: a curve is "0 at or above
+max", so the max has to sit just above full capacity.
+
+**Plant water demand is in millimetres, drawn from the soil store.** `cover.moisture_draw` became
+`cover.water_per_growth_mm` (mm of water per unit of new cover) and `tree.moisture_draw` became
+`tree.transpiration_mm_h`. The old draws were amounts of the index, which the water tier then
+multiplied by the column's own capacity, so a plant on a deep soil drew more water for the same growth
+— that rule was wrong rather than merely mis-scaled, and `UNITS.md` lists it as such.
+
+**A tolerance of 5% on the cadence-doubling test, and what it is not measuring.** A rate charged over a
+longer update is charged the same amount per year but lands in fewer, larger steps, so a logistic
+increment is evaluated at a slightly different cover and a rate-limited flow can be limited at a
+different moment. That error is of the order of one update's share of the year, about 1% at these
+cadences; 5% leaves room for it to compound over a year while still failing anything accidentally per
+tick, which would be off by a factor of two. The test asserts the five quantities a declared rate is
+responsible for (standing cover, litter, rain, evapotranspiration, mean temperature) and deliberately
+**excludes** drainage, runoff, ponded evaporation and the standing stores, because none of those is set
+by a rate: what drains is the residual of a store with a ceiling, so how often the store is emptied
+decides how much of a storm it has room to take. Doubling `soil_every` moves annual drainage by 23% and
+ponded evaporation by 54% with rain, ET and cover all holding. That is the water tier's integration
+error — a property of the model, measured in `sweeps/shotG4b/FINDINGS.md` — and hiding it behind a
+loose tolerance would have been the wrong way to record it.
+
+**Where the line was drawn, and what shot G4c gets.** Converted here: climate and rain, soil water,
+plant water demand and growth, fire, and the two nutrient rates that read a clock or a water flow.
+Deferred, with every row marked in `UNITS.md` and the list repeated in
+`overnight/shots/G4c-units-calibration-rest.md`: light (four curves, the sapling threshold and building
+shade have to move together), the fertility and detritus indices (shot G5 replaces that field outright,
+so converting the index would be converting a quantity about to be deleted), lifespans and phenology,
+the legacy non-water moisture model, the whole animal tier, the immigration intervals, and the six
+`SIG_*` constants. The prompt sanctions stopping at a subsystem boundary, and these are boundaries:
+each changes which columns germinate or how long a thing lives, and none can be half done.
+
+**`climate.decay_k` is a unit change with no value change; `hydro.leach_k` is both.** `decay_k` 0.015
+per soil update is exactly 6.0 per year at the shipped cadence, so it is rewritten and not retuned —
+which leaves the audit's finding standing, that 6.0 a year is a litter turnover of two months against a
+published one to three years. `leach_k` moves 0.0002 → 0.0008, because the old value was fitted against
+the pre-G4b rain of 4000 mm a year: with rain corrected to 800 mm, drainage falls with it and fertility
+loses the sink that held it down. The new value is derived (mobile share of the pool over the rooting
+zone's capacity) and lands at 26% of a column's fertility a year against a published 15–40% for nitrate
+loss. Both are in `TUNING.md` with the acceptance line that forced them.
+
+**Fire is converted and not retuned.** `fire.base_rate` 0.002 per fire update becomes 0.8 ignitions per
+patch per year, the same rate in the declared unit, and fire's dryness term now reads the soil store as
+a fraction of available water capacity instead of the 0–255 index. The operator's note of 2026-09-20
+02:36 is explicit that the resulting ignition count is to be reported and not tuned, so
+`sweeps/shotG4b/FINDINGS.md` gives it before and after and stops there. `fire.spread` stays a
+per-attempt probability with the fire's `duration` in ticks: spread is a within-event geometry, not a
+rate per unit time, and converting it belongs with the fire model itself (backlog row G4d).
+
+**The health checks are re-expressed in years, read from the run's own `meta.json`.** `WINDOW_START`,
+`TREE_ANCHOR`, the 20000-tick run length, the tick-10000 sample, `LONG_TICKS` and `LONG_BAND_FROM`
+became `WINDOW_YEARS` 0.5, `TREE_ANCHOR_YEARS` 1.25, `RUN_YEARS` 5.0, `SAMPLE_YEARS` 2.5, `LONG_YEARS`
+15.0 and `LONG_BAND_FROM_YEARS` 5.0, through `ticks_in(years, year_len)`. At the shipped year length
+every one of them is the tick count it replaced, so no run's verdict changes by arithmetic. **No
+threshold was widened and none was retired**: the grazer-cycle windows, `CAUSE_WINDOW` and the `SIG_*`
+lags stay in ticks with the reason written at each — they describe the per-tick animal tier, which is
+not converted, so a ruler in years would measure a per-tick cycle. One check is **new**, as the prompt
+says it must be: `moisture_band` asserts the field mean stays above the wilting point on every tick of
+the window and below field capacity on at least 95% of them. Both bounds are the soil's own rather than
+chosen numbers — at either one no plant's moisture curve responds to anything — and the 95% is there
+because a storm briefly fills every column.
+
+**The regression anchor, per operator override 2, is suspended and replaced** by "the reference worlds
+still run to full length with plants surviving and pass the re-derived checks". Recording the
+substitution is part of the override, and so is this: **byte identity could not have been kept even in
+principle.** Measured on the 100-tick format-1 fixture, the only columns that move are `grass_mean`,
+`moisture_mean`, `fertility_mean` and `detritus_total`, in the fourth decimal, because the derived
+constants are rounded to three or four significant figures where the old ones were exact; and on any
+longer run the tree draw's correction from 2352 to 300 mm a year makes the break structural. A
+conversion that preserved bytes would have had to preserve the numbers it exists to change.
+
+**So the manifests are re-cut under new names and the old ones are kept as history.** The five live
+manifests are `tests/data/s42-manifest-g4b-{64,heredity-off,crowding-off,fire-off,water-off}.sha256`;
+`s42-manifest-preG4`, `-prefire`, `-preshot10`, `-preshot11`, `-preshot14a` and `s42-64-manifest` stay
+on disk untouched and are no longer claimed to be reproducible.
+`the_pre_conversion_manifests_are_kept_as_history` is what keeps that honest: for each pair it asserts
+the same file set, byte-identical tick-0 `material.bin`, `light.bin` and `height.bin` (the terrain is
+upstream of every rate, so the world is still the same world), and that `series.csv` and the last
+snapshot's `patches.json` differ. An archive nothing checks rots; an archive checked for the wrong
+thing is worse.
+
+**Regeneration is a switch, not an edit.** `ECOSIM_REGEN_MANIFEST=1 cargo test --release --test sweep`
+rewrites every manifest and `s42-check.txt` from the run the test just made; without it the same test
+asserts. The alternative was a throwaway script, which is what the last four manifest regenerations
+used, and which cannot be relied on to hash the same file set the assertion reads.
+
+**`format_2_and_fire_only_add_to_version_1_files` is now a claim about the format, not about the
+numbers.** `fixtures/s42-mini` is the format-1 fixture and there is no format-1 writer left to rewrite
+it with, so the test can no longer compare a fresh run's values to it. It now asserts what it was
+always named for: that the version-2 run's tick-0 snapshot is byte-identical to the version-1 one after
+the files version 2 adds are cut, that the later snapshot's shared fields still match, that the series
+header and row count line up, and that the params that were renamed are exactly the four in its
+`RENAMED` table. What it no longer asserts is that the values are unchanged, which is what this shot
+changes on purpose.
+
+**Behavioural tests moved off the flat world.** `common::SQUARE` (the 64-world with
+`rain_gradient = 0`) keeps the byte fixtures; the six forced-extinction tests now run on a new
+`common::SMALL`, the same world at the default west–east rain gradient. The reason is a finding, not a
+convenience: at the corrected 800 mm a year a flat, evenly watered world **cannot keep a tree**,
+because a tree's 300 mm a year is charged to its trunk column on top of that column's grass
+evapotranspiration, so every column is equally marginal and germination falls by 85%. A
+forced-extinction test has to force one mechanism in a world that is otherwise healthy, and with the
+gradient the same world is healthy (142 mature trees). One test needed its forcing raised as well
+(`grazer.energy_cost` 2.0 → 3.5) and one restated in the new units (`fire.base_rate` 20 → 8000, which
+is the same 20 per update); both are test-local `--set` values, not defaults, and both are in
+`TUNING.md`.
+
+**The tree's double charge is reported, not fixed.** A mature crown covers nine columns and draws from
+one, which is why `tree.transpiration_mm_h` is set at the bottom of its published range (300 of
+300–700 mm/yr). Spreading the draw over the crown is a change to the water mechanism, and this shot
+adds no mechanisms; it is `UNITS.md` finding 3 and it is named in the G4c prompt.
+
+**One acceptance line belongs to a deferred subsystem and is not claimed.** "A tree planted at the
+start reaches a height within the published curve's band at the ages sampled" needs a tree height and
+an age in years, which is the lifespans-and-phenology subsystem — trees have no height at all today,
+only an age in ticks. The prompt's limiter says the acceptance lines that test converted quantities
+apply only to the subsystems actually converted, so this one is recorded in `UNITS.md` section 7 as the
+shot's largest finding (the tree tier is out by 25–60×) and handed on.

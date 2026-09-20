@@ -16,6 +16,8 @@ pub struct Params {
     pub world: WorldParams,
     /// `[climate]`
     pub climate: ClimateParams,
+    /// `[schedule]`
+    pub schedule: ScheduleParams,
     /// `[rain]`
     pub rain: RainParams,
     /// `[hydro]`
@@ -170,6 +172,12 @@ pub struct ClimateParams {
     /// Moisture diffusion rate per soil update.
     pub diffusion: f32,
     /// Detritus decay rate at full temperature and moisture.
+    /// Detritus decay constant, per year (shot G4b: it was per 10-tick soil update, and 0.015 per
+    /// update is 6.0 a year). The share of a patch's detritus that decays into the fertility of its
+    /// soil columns over one soil update is `decay_k` times the update's length in years, times the
+    /// temperature and moisture factors. A model constant: 6.0 a year is an order of magnitude above
+    /// the published 0.3-0.6 a year for temperate grass litter, which is a finding recorded for the
+    /// nutrient shot rather than something this shot retunes (UNITS.md R11 and finding 9).
     pub decay_k: f32,
     /// Temperature at which decay reaches full rate.
     pub decay_temp_full: f32,
@@ -183,12 +191,35 @@ pub struct ClimateParams {
     pub rain_gradient: f32,
 }
 
+/// How often each staggered tier updates, in ticks (shot G4b). Every cadence lives here so that a
+/// tier's rate and the cadence it is charged over are read from the same value: a rate is per hour
+/// or per year and is multiplied by `cadence × tick_hours`, so doubling a cadence leaves an annual
+/// total alone. `tree.update_every`, `tree.seed_every`, `world.compact_every` and the three
+/// `immigration_interval`s were already parameters and stay where they are.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleParams {
+    /// Ticks between a patch's grass-and-shrub updates; also the stagger, so about
+    /// `patches / cover_every` patches update per tick.
+    pub cover_every: u32,
+    /// Ticks between soil updates: the water tier's settling half (or the pre-G4 moisture steps),
+    /// detritus decay and the fertility clamp.
+    pub soil_every: u32,
+    /// Ticks between temperature and season updates.
+    pub temperature_every: u32,
+    /// Ticks between ignition draws.
+    pub fire_every: u32,
+}
+
 /// Storms (shot G4). Rain arrives as whole storms instead of a trickle every soil update.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RainParams {
-    /// Chance per tick that a storm starts, before the season's rain factor.
-    pub storm_p: f32,
+    /// Rain a year, in millimetres, at `climate.year_len` ticks to the year (shot G4b). The chance
+    /// per tick that a storm starts is `annual_mm / (year_len × storm_mean_mm)` before the season's
+    /// rain factor, whose mean over a year is 1, so this is the expected annual depth whatever
+    /// `year_len` and `storm_mean_mm` are. 0 leaves the rain out and keeps the draw.
+    pub annual_mm: f32,
     /// Mean storm depth in millimetres; the depth is drawn exponentially.
     pub storm_mean_mm: f32,
 }
@@ -204,7 +235,7 @@ pub struct HydroParams {
     /// Evaporation and transpiration from soil water, mm per hour at the mean temperature and
     /// full plant cover.
     pub et_mm_h: f32,
-    /// Soil water at tick 0, as a fraction of field capacity.
+    /// Soil water at tick 0, as a fraction of the available water capacity.
     pub initial_fill: f32,
     /// The most a column's soil holds, as a multiple of field capacity: what is above field
     /// capacity is the part that percolates away as drainage.
@@ -219,7 +250,9 @@ pub struct HydroParams {
 pub struct MediumParams {
     /// Fastest rate water soaks in, mm per hour.
     pub infiltration_mm_h: f32,
-    /// Soil water a column of this medium holds, mm.
+    /// Plant-available water a column of this medium holds, mm: the available water capacity of the
+    /// rooting zone, the water between field capacity and the permanent wilting point. A store of 0
+    /// is the wilting point (UNITS.md section 1). The name is kept from shot G4.
     pub field_capacity_mm: f32,
     /// Drainage out of the bottom above field capacity, mm per hour.
     pub percolation_mm_h: f32,
@@ -281,8 +314,10 @@ pub struct SeasonParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoverParams {
-    /// Moisture taken from each soil column per unit of cover growth.
-    pub moisture_draw: f32,
+    /// Water taken from each soil column per unit of cover fraction gained, in millimetres. The
+    /// standing transpiration of the cover that is already there is `hydro.et_mm_h`; this is only
+    /// what new growth costs, and it is a declared model constant (UNITS.md section 3.3).
+    pub water_per_growth_mm: f32,
     /// Fertility taken from each soil column per unit of cover growth.
     pub fertility_draw: f32,
     /// Detritus added per unit of cover mortality, per soil column.
@@ -301,15 +336,16 @@ pub struct CoverParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoverSpecies {
-    /// Maximum growth rate per update.
+    /// Maximum growth rate, per year. One update grows by `r × f_L f_M f_T f_F × (1 − density)`
+    /// times the update's own length in years, so the cadence does not change a year's growth.
     pub r: f32,
-    /// Mortality rate per update.
+    /// Mortality rate, per year, charged over the update's length like `r`.
     pub g: f32,
     /// Density on every soil patch at tick 0.
     pub initial: f32,
     /// Suitability over patch light.
     pub light: Curve,
-    /// Suitability over patch moisture.
+    /// Suitability over patch soil water, as a fraction of the available water capacity.
     pub moisture: Curve,
     /// Suitability over patch temperature.
     pub temp: Curve,
@@ -335,10 +371,14 @@ pub struct TreeParams {
     pub lifespan_jitter: f32,
     /// Per-update death chance of a mature tree whose crown is overlapped by the canopy of ≥ 2 other trees.
     pub crowding_mortality: f32,
-    /// Moisture a tree takes from its column per update.
-    pub moisture_draw: f32,
-    /// Moisture below which a tree counts as dry.
-    pub dry_moisture: f32,
+    /// Transpiration of one tree, millimetres per hour over its trunk column. An update takes
+    /// `transpiration_mm_h × update_every × tick_hours` millimetres, so the cadence does not change
+    /// a year's water use. It is charged to the trunk column alone, though a mature crown covers
+    /// nine, which is why it is calibrated at the low end of the published range (UNITS.md 3.3).
+    pub transpiration_mm_h: f32,
+    /// Soil water below which a tree counts as dry, as a fraction of the column's available water
+    /// capacity. 0 is the permanent wilting point.
+    pub dry_fraction: f32,
     /// Consecutive dry ticks after which a tree dies.
     pub dry_death_ticks: u32,
     /// A mature tree tries to seed when its age is a multiple of this.
@@ -353,7 +393,8 @@ pub struct TreeParams {
     pub death_detritus: f32,
     /// Germination suitability over surface light (low-opt replaced by `sapling_light`).
     pub light: Curve,
-    /// Germination suitability over column moisture.
+    /// Germination suitability over the column's soil water, as a fraction of its available water
+    /// capacity.
     pub moisture: Curve,
     /// Germination suitability over patch temperature.
     pub temp: Curve,
@@ -496,7 +537,9 @@ pub struct HunterParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FireParams {
-    /// Ignition: p = base_rate · f(T) · (1 − moisture/255)² · fuel per patch per fire update.
+    /// Ignitions per patch per year, before the weather: one fire update draws against
+    /// `base_rate × f(T) × dryness² × fuel` times the update's own length in years, where dryness is
+    /// `1 − soil water / available water capacity`. 0 means nothing ever ignites.
     pub base_rate: f32,
     /// f(T) is 0 at or below this patch temperature, °C.
     pub temp_min: f32,
@@ -508,7 +551,7 @@ pub struct FireParams {
     pub canopy_weight: f32,
     /// Ticks a patch burns before it burns out.
     pub duration: u32,
-    /// Per-tick spread chance to each 4-neighbour: spread · neighbour fuel · (1 − neighbour moisture/255).
+    /// Per-tick spread chance to each 4-neighbour: `spread × neighbour fuel × neighbour dryness`.
     pub spread: f32,
     /// Chance that burn-out kills each tree whose trunk is in the patch.
     pub tree_kill: f32,

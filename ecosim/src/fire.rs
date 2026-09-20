@@ -1,6 +1,6 @@
 //! Fire disturbance at patch scale: fuel, ignition, spread to the 4-neighbours and burn-out.
 //!
-//! A patch ignites on a fire update (every `FIRE_EVERY` ticks) or by spread from a burning
+//! A patch ignites on a fire update (every `schedule.fire_every` ticks) or by spread from a burning
 //! neighbour. It burns for `fire.duration` ticks and then burns out: its grass and shrub go to 0,
 //! the burnt biomass becomes detritus, each tree whose trunk is in it may die, and its soil gains
 //! ash. Animals in a burning patch take damage and flee it (`animals.rs`).
@@ -10,9 +10,6 @@ use crate::params::FireParams;
 use crate::sim::Sim;
 use crate::world::Dims;
 use rand::Rng;
-
-/// Ticks between ignition updates.
-pub const FIRE_EVERY: u32 = 10;
 
 /// f(T): 0 at or below `lo`, 1 at or above `hi`, linear between.
 pub fn temp_factor(t: f32, lo: f32, hi: f32) -> f32 {
@@ -25,21 +22,27 @@ pub fn temp_factor(t: f32, lo: f32, hi: f32) -> f32 {
     }
 }
 
-fn dryness(moisture: f32) -> f32 {
-    (1.0 - moisture / 255.0).clamp(0.0, 1.0)
+/// How dry a patch is: 1 at the wilting point and 0 at field capacity, from its soil water as a
+/// fraction of available water capacity (shot G4b; it was `1 − moisture/255`, and at loam's 150 mm
+/// capacity a dryness of 0.5 is 75 mm of plant-available water left in the rooting zone).
+fn dryness(water: f32) -> f32 {
+    (1.0 - water).clamp(0.0, 1.0)
 }
 
-/// Ignition chance of a patch on one fire update: base_rate · f(T) · (1 − moisture/255)² · fuel,
+/// Ignition chance of a patch on one fire update: base_rate · f(T) · dryness² · fuel, times
+/// `years` (the update's own length in years, since base_rate is ignitions per patch per year),
 /// clamped to [0, 1].
-pub fn ignition_prob(fp: &FireParams, temperature: f32, moisture: f32, fuel: f32) -> f32 {
-    let d = dryness(moisture);
-    (fp.base_rate * temp_factor(temperature, fp.temp_min, fp.temp_full) * d * d * fuel).clamp(0.0, 1.0)
+pub fn ignition_prob(fp: &FireParams, temperature: f32, water: f32, fuel: f32, years: f32) -> f32 {
+    let d = dryness(water);
+    (fp.base_rate * years * temp_factor(temperature, fp.temp_min, fp.temp_full) * d * d * fuel).clamp(0.0, 1.0)
 }
 
-/// Per-tick chance that a burning patch ignites a neighbour: spread · fuel · (1 − moisture/255),
-/// clamped to [0, 1], all of the neighbour.
-pub fn spread_prob(fp: &FireParams, moisture: f32, fuel: f32) -> f32 {
-    (fp.spread * fuel * dryness(moisture)).clamp(0.0, 1.0)
+/// Per-tick chance that a burning patch ignites a neighbour: spread · fuel · dryness, clamped to
+/// [0, 1], all of the neighbour. `spread` is per tick and pairs with `fire.duration`, which is in
+/// ticks: giving a fire a length in hours is deferred with the rest of phenology (UNITS.md
+/// "Deferred to shot G4c").
+pub fn spread_prob(fp: &FireParams, water: f32, fuel: f32) -> f32 {
+    (fp.spread * fuel * dryness(water)).clamp(0.0, 1.0)
 }
 
 /// The 4-neighbour patches of `p` that exist, in (+x, −x, +y, −y) order.
@@ -102,7 +105,7 @@ impl Sim {
                 if self.is_burning(q) {
                     continue;
                 }
-                let pr = spread_prob(&self.params.fire, self.patch_moisture(q), self.fuel(q));
+                let pr = spread_prob(&self.params.fire, self.patch_water_fraction(q), self.fuel(q));
                 if pr > 0.0 && self.rng.gen::<f32>() < pr {
                     self.ignite(q, Some(p));
                 }
@@ -114,10 +117,17 @@ impl Sim {
                 self.burn_out(p);
             }
         }
-        if self.params.fire.base_rate > 0.0 && t.is_multiple_of(FIRE_EVERY) {
+        let every = self.params.schedule.fire_every.max(1);
+        if self.params.fire.base_rate > 0.0 && t.is_multiple_of(every) {
+            let years = crate::hydro::years(&self.params, every) as f32;
             for p in 0..d.patches() {
-                let pr =
-                    ignition_prob(&self.params.fire, self.patches[p].temperature, self.patch_moisture(p), self.fuel(p));
+                let pr = ignition_prob(
+                    &self.params.fire,
+                    self.patches[p].temperature,
+                    self.patch_water_fraction(p),
+                    self.fuel(p),
+                    years,
+                );
                 let u: f32 = self.rng.gen();
                 if u < pr && !self.is_burning(p) {
                     self.ignite(p, None);
@@ -200,7 +210,7 @@ mod tests {
             prop_assert!(f >= 0.0, "patch {} fuel {}", p, f);
             if sim.world.patch_soil[p].is_empty() {
                 prop_assert_eq!(f, 0.0, "patch {} has no soil", p);
-                prop_assert_eq!(ignition_prob(&sim.params.fire, 30.0, 0.0, f), 0.0);
+                prop_assert_eq!(ignition_prob(&sim.params.fire, 30.0, 0.0, f, 1.0), 0.0);
                 prop_assert_eq!(spread_prob(&sim.params.fire, 0.0, f), 0.0);
             }
         }
@@ -266,14 +276,15 @@ mod tests {
 
     /// Ignition chance never falls as fuel rises or as temperature rises, and stays in [0, 1].
     fn ignition_monotone(fp: &FireParams, m: f32, fuels: (f32, f32), temps: (f32, f32)) -> Result<(), TestCaseError> {
+        // One year of updates, so the monotonicity is read off the per-year rate itself.
         let (f0, f1) = (fuels.0.min(fuels.1), fuels.0.max(fuels.1));
         let (t0, t1) = (temps.0.min(temps.1), temps.0.max(temps.1));
         for &t in &[t0, t1] {
-            let (a, b) = (ignition_prob(fp, t, m, f0), ignition_prob(fp, t, m, f1));
+            let (a, b) = (ignition_prob(fp, t, m, f0, 1.0), ignition_prob(fp, t, m, f1, 1.0));
             prop_assert!((0.0..=1.0).contains(&a) && a <= b, "fuel {} -> {}: {} -> {}", f0, f1, a, b);
         }
         for &f in &[f0, f1] {
-            let (a, b) = (ignition_prob(fp, t0, m, f), ignition_prob(fp, t1, m, f));
+            let (a, b) = (ignition_prob(fp, t0, m, f, 1.0), ignition_prob(fp, t1, m, f, 1.0));
             prop_assert!((0.0..=1.0).contains(&b) && a <= b, "temp {} -> {}: {} -> {}", t0, t1, a, b);
         }
         Ok(())
@@ -313,7 +324,7 @@ mod tests {
         #[test]
         fn prop_ignition_monotone_in_fuel_and_temperature(
             fp in fire(),
-            m in 0.0f32..=255.0,
+            m in 0.0f32..=1.0,
             fuels in (0.0f32..4.0, 0.0f32..4.0),
             temps in (-20.0f32..45.0, -20.0f32..45.0),
         ) {
@@ -369,11 +380,15 @@ mod tests {
     fn ignition_regression_ramp_ends_and_clamp() {
         let fp = FireParams { base_rate: 1.0, ..fire_params() };
         ignition_monotone(&fp, 0.0, (0.0, 1.0e6), (fp.temp_min, fp.temp_full)).unwrap();
-        assert_eq!(ignition_prob(&fp, fp.temp_min, 0.0, 1.0), 0.0);
-        assert_eq!(ignition_prob(&fp, fp.temp_full, 0.0, 1.0), 1.0);
-        assert_eq!(ignition_prob(&fp, fp.temp_full + 10.0, 0.0, 1.0e6), 1.0);
-        assert_eq!(ignition_prob(&fp, fp.temp_full, 255.0, 1.0), 0.0, "saturated soil never ignites");
-        assert!((ignition_prob(&fp, 22.5, 127.5, 2.0) - 0.25).abs() < 1e-6);
+        assert_eq!(ignition_prob(&fp, fp.temp_min, 0.0, 1.0, 1.0), 0.0);
+        assert_eq!(ignition_prob(&fp, fp.temp_full, 0.0, 1.0, 1.0), 1.0);
+        assert_eq!(ignition_prob(&fp, fp.temp_full + 10.0, 0.0, 1.0e6, 1.0), 1.0);
+        assert_eq!(ignition_prob(&fp, fp.temp_full, 1.0, 1.0, 1.0), 0.0, "a soil at field capacity never ignites");
+        assert!((ignition_prob(&fp, 22.5, 0.5, 2.0, 1.0) - 0.25).abs() < 1e-6);
+        assert!(
+            (ignition_prob(&fp, 22.5, 0.5, 2.0, 0.25) - 0.0625).abs() < 1e-6,
+            "a quarter of a year is a quarter of the chance"
+        );
     }
 
     /// One draw per patch on a fire update and none between them, while nothing burns.

@@ -29,20 +29,33 @@ evap_base = 2.0
 evap_div = 8.0
 pond_moisture = 255.0
 diffusion = 0.10
-decay_k = 0.015
+# Detritus decay, per year (shot G4b: 0.015 per 10-tick soil update is 6.0 a year).
+decay_k = 6.0
 decay_temp_full = 30.0
 initial_moisture = 128.0
 initial_fertility = 128.0
 # Rain at column x is rain × (1 + rain_gradient × (2x/(width − 1) − 1)), clamped at 0: dry west, wet east.
 rain_gradient = 0.6
 
+# Update cadences, in ticks (shot G4b). Every rate is per hour or per year and is charged over
+# cadence × tick_hours, so doubling a cadence leaves an annual total alone (DECISIONS.md, "Units
+# calibration"). tree.update_every, tree.seed_every, world.compact_every and the three
+# immigration_interval keys were already parameters and stay in their own sections.
+[schedule]
+cover_every = 10
+soil_every = 10
+temperature_every = 100
+fire_every = 10
+
 [rain]
-# Storms (shot G4). Each tick a storm starts with probability storm_p × the season's rain factor
-# (climate.rain_base − rain_amp·sin(2πt/year_len), over rain_base), and its depth is drawn
-# exponentially with mean storm_mean_mm and falls in that tick. climate.rain_gradient scales the
-# depth by column as it scaled the old rain. storm_p 0 leaves the rain out but keeps the draw.
-storm_p = 0.10
-storm_mean_mm = 10.0
+# Storms (shot G4, recalibrated in G4b). annual_mm of rain falls a year in storms of mean depth
+# storm_mean_mm: each tick a storm starts with probability annual_mm/(year_len × storm_mean_mm) ×
+# the season's rain factor (climate.rain_base − rain_amp·sin(2πt/year_len), over rain_base, mean 1
+# over a year), and its whole depth is drawn exponentially and falls in that tick.
+# climate.rain_gradient scales the depth by column. annual_mm 0 leaves the rain out, keeping the
+# draw. 800 mm is Lansing's annual normal and 6 mm its ~130 rain days' mean depth (UNITS.md R1, R2).
+annual_mm = 800.0
+storm_mean_mm = 6.0
 
 [hydro]
 # Surface water and soil water (shot G4). false leaves the whole water tier out: the pre-G4
@@ -52,21 +65,29 @@ storm_mean_mm = 10.0
 enabled = true
 # Ponded water evaporates at evap_mm_h, soil water evaporates and transpires at et_mm_h, both
 # per hour, scaled by the temperature factor (climate.evap_base + T/evap_div, normalised to 1 at
-# climate.temp_base) and, for ET, by 0.2 + 0.8 × the patch's grass and shrub cover.
-evap_mm_h = 0.05
-et_mm_h = 0.12
-# Soil water of every column at tick 0, as a fraction of its field capacity.
+# climate.temp_base) and, for ET, by 0.2 + 0.8 × the patch's grass and shrub cover. 0.08 mm/h is
+# 701 mm a year of open-water evaporation and 0.05 mm/h is 438 mm a year of ET at full cover, both
+# inside their published ranges (shot G4b; UNITS.md R4, R5).
+evap_mm_h = 0.08
+et_mm_h = 0.05
+# Soil water of every column at tick 0, as a fraction of its available water capacity.
 initial_fill = 0.5
 # The most a column's soil holds, as a multiple of field capacity. Water between field capacity
 # and this is the part that drains away, so 1.0 would mean no drainage and no leaching.
 saturation = 1.2
 # Leaching: a soil update that drains `d` mm out of the bottom of a column takes
 # min(1, leach_k × d) of its fertility with it. 0 turns leaching off and fertility has no sink.
-leach_k = 0.0002
+# leach_k is a fraction per millimetre drained (shot G4b): the mobile share of the nutrient pool
+# divided by the rooting zone's water capacity. At the site's ~320 mm of annual drainage 0.0008
+# leaches 26% of a column's fertility a year, which is the published range for nitrate loss from a
+# humid temperate soil; 0.0002 was set against the pre-G4b rain of 4000 mm a year (UNITS.md R13).
+leach_k = 0.0008
 
 # The nine media of the scene contract (docs/SCENE-CONTRACT.md), one table each (shot G4).
-# infiltration_mm_h is how fast water soaks in, field_capacity_mm how much soil water a column of
-# this medium holds, percolation_mm_h how fast the excess drains out of the bottom, and plantable
+# infiltration_mm_h is how fast water soaks in, field_capacity_mm how much plant-available water a
+# column of this medium holds (the available water capacity of its rooting zone: a store of 0 is the
+# wilting point, not dry soil — UNITS.md section 1), percolation_mm_h how fast the excess drains out
+# of the bottom, and plantable
 # whether anything roots in it (the Rock rule of a bundle column reads it). A noise world is all
 # soil, except its water voxels.
 [medium.soil]
@@ -130,7 +151,10 @@ plantable = false
 amplitude = 15.0
 
 [cover]
-moisture_draw = 15.0
+# Millimetres of water one unit of new cover costs (shot G4b: was 15 units of the 0–255 moisture
+# index, which the water tier then multiplied by the column's own capacity). Standing cover's
+# transpiration is hydro.et_mm_h; this is only the cost of growth.
+water_per_growth_mm = 8.8
 fertility_draw = 20.0
 litter_factor = 20.0
 fertility_full = 64.0
@@ -139,19 +163,21 @@ shrub_spread_threshold = 0.6
 shrub_spread_seed = 0.02
 
 [grass]
-r = 0.05
-g = 0.005
+# r and g are per year (shot G4b: 0.05 and 0.005 per 10-tick update × 400 updates a year). The
+# moisture curve is a fraction of the column's available water capacity (was the 0–255 index).
+r = 20.0
+g = 2.0
 initial = 0.10
 light = [100.0, 200.0, 255.0, 256.0]
-moisture = [20.0, 80.0, 255.0, 256.0]
+moisture = [0.0784, 0.3137, 1.0, 1.004]
 temp = [0.0, 5.0, 30.0, 35.0]
 
 [shrub]
-r = 0.01
-g = 0.004
+r = 4.0
+g = 1.6
 initial = 0.02
 light = [40.0, 100.0, 200.0, 254.0]
-moisture = [15.0, 60.0, 255.0, 256.0]
+moisture = [0.0588, 0.2353, 1.0, 1.004]
 temp = [-5.0, 0.0, 28.0, 33.0]
 
 [tree]
@@ -163,8 +189,13 @@ mature_age = 1000
 max_age = 6000
 lifespan_jitter = 0.2
 crowding_mortality = 0.02
-moisture_draw = 50.0
-dry_moisture = 30.0
+# Transpiration per hour over the trunk column (shot G4b: was 50 units of the 0–255 index every 50
+# ticks, which came to 2352 mm a year). 0.0342 mm/h is 300 mm a year, the low end of the published
+# range for an open-grown temperate deciduous tree, chosen low because the draw is charged to one
+# column while a mature crown covers nine (UNITS.md R8 and finding 3).
+transpiration_mm_h = 0.0342
+# Fraction of the column's available water capacity below which a tree is in drought (was 30 of 255).
+dry_fraction = 0.12
 dry_death_ticks = 500
 seed_every = 200
 seed_radius = 6.0
@@ -172,7 +203,7 @@ sapling_light = 150.0
 min_spacing = 2
 death_detritus = 40.0
 light = [60.0, 150.0, 255.0, 256.0]
-moisture = [30.0, 100.0, 255.0, 256.0]
+moisture = [0.1176, 0.3922, 1.0, 1.004]
 temp = [-3.0, 2.0, 26.0, 31.0]
 immigration_floor = 0
 immigration_interval = 500
@@ -252,8 +283,11 @@ immigration_floor = 0
 immigration_interval = 500
 
 [fire]
-# Fire disturbance (shot 9). base_rate 0 switches fire off: no draws, no burning.
-base_rate = 0.002
+# Fire disturbance (shot 9). base_rate is ignitions per patch per year (shot G4b: was 0.002 per
+# 10-tick fire update, and 0.002 × 400 updates a year is 0.8). 0 switches fire off: no draws, no
+# burning. Shot G4b converts fire's units and reports the ignition count; whether a watered garden
+# site should burn at all is backlog row G4d, held for a human.
+base_rate = 0.8
 temp_min = 15.0
 temp_full = 30.0
 detritus_weight = 0.0002

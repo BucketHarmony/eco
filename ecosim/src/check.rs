@@ -10,15 +10,35 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// First tick of the invariant window; the burn-in before it is ignored.
-pub const WINDOW_START: u32 = 2000;
-/// Anchor tick of the trees' `max_10x` limit. Trees grow slowly from a dozen, so a tick-2000 anchor
-/// measured establishment speed rather than a runaway; animals keep `WINDOW_START`.
-pub const TREE_ANCHOR: u32 = 5000;
-/// Minimum length of a run for `check --long`.
-pub const LONG_TICKS: u32 = 60_000;
-/// Start of the `check --long` population band window and the tick its bounds are relative to.
-pub const LONG_BAND_FROM: u32 = 20_000;
+// The windows below are in years, not ticks (shot G4b). A tick is one `climate.year_len`th of a
+// year, so a tick count means a fixed amount of simulated time only once it is divided by the
+// `year_len` of the run being checked, which `check` reads from that run's `meta.json`. At the
+// default year_len of 4000 every one of them is the tick count it replaced, named in its doc comment.
+
+/// Length of the burn-in ignored before the invariant window: half a year (was 2000 ticks).
+pub const WINDOW_YEARS: f64 = 0.5;
+/// Anchor age of the trees' `max_10x` limit: 1.25 years (was tick 5000). Trees grow slowly from a
+/// dozen, so a half-year anchor measured establishment speed rather than a runaway; animals keep
+/// [`WINDOW_YEARS`].
+pub const TREE_ANCHOR_YEARS: f64 = 1.25;
+/// Length a short run must reach: 5 years (was 20000 ticks).
+pub const RUN_YEARS: f64 = 5.0;
+/// Age at which the addendum's extra checks are sampled: 2.5 years (was tick 10000). The renderer's
+/// pixel tests read the snapshot at this tick, so at year_len 4000 it is the same snapshot as before.
+pub const SAMPLE_YEARS: f64 = 2.5;
+/// Minimum length of a run for `check --long`: 15 years (was 60000 ticks).
+pub const LONG_YEARS: f64 = 15.0;
+/// Start of the `check --long` population band window, and the age its bounds are relative to:
+/// 5 years (was tick 20000).
+pub const LONG_BAND_FROM_YEARS: f64 = 5.0;
+/// Year length assumed for a series read without a `meta.json` to say otherwise (a sweep cell, a
+/// bare `series.csv`): the shipped default.
+pub const DEFAULT_YEAR_LEN: u32 = 4000;
+
+/// How many ticks `years` years are, in a run of `year_len` ticks a year.
+pub fn ticks_in(years: f64, year_len: u32) -> u32 {
+    (years * year_len.max(1) as f64).round() as u32
+}
 /// Runtime invariant limit for a 20000-tick run on the 64×64 world, in milliseconds.
 pub const RUNTIME_LIMIT_MS: u64 = 30_000;
 /// Ceiling of the area-scaled runtime limit (shot 15: 20k ticks on the strip in under 90 s).
@@ -29,6 +49,15 @@ pub const RUNTIME_CAP_MS: u64 = 90_000;
 pub fn runtime_limit_ms(cols: u64) -> u64 {
     (RUNTIME_LIMIT_MS * cols / 4096).clamp(RUNTIME_LIMIT_MS, RUNTIME_CAP_MS)
 }
+
+/// Share of the window's ticks on which mean soil moisture must be below field capacity (shot
+/// G4b). The derived moisture index is 0 at the wilting point and 255 at field capacity
+/// (`Sim::derive_moisture`), so both bounds are the soil's own rather than chosen numbers: a field
+/// mean pinned at 0 is a site with no plant-available water left, one pinned at 255 is a site
+/// holding all it can, and in neither does a plant's moisture curve respond to anything. Storms do
+/// briefly fill every column, so the upper bound is a share of ticks while the wilting point is an
+/// every-tick bound.
+pub const MOISTURE_BELOW_CAPACITY: f64 = 0.95;
 
 /// Number of fire columns `series.csv` gained in shot 9.
 const FIRE_FIELDS: usize = 2;
@@ -143,6 +172,10 @@ pub fn moving_average(v: &[f64], w: usize) -> Vec<Option<f64>> {
 }
 
 /// Local maxima of the 200-tick smoothed grazer count within [from, to] (row index = tick):
+/// The 200-tick smoothing window, the plus-or-minus 500-tick neighbourhood and the 1500-tick
+/// separation in `evaluate` stay in ticks (shot G4b): animal energy, reproduction cooldowns and ages
+/// are all still per tick, so the grazer cycle has no length in years to be measured against until
+/// the animal tier is converted (UNITS.md, "Deferred to shot G4c").
 /// ≥ every smoothed value within ±500 and strictly > at least one. Plateaus collapse to their first tick.
 pub fn grazer_maxima(rows: &[StatsRow], from: usize, to: usize) -> Vec<usize> {
     let g: Vec<f64> = rows.iter().map(|r| r.grazers as f64).collect();
@@ -183,8 +216,11 @@ pub fn grazer_maxima(rows: &[StatsRow], from: usize, to: usize) -> Vec<usize> {
 pub struct Series {
     /// One row per tick, starting at tick 0.
     pub rows: Vec<StatsRow>,
-    /// Mature trees in the tick-10000 snapshot; `None` when the run is shorter than 10000 ticks.
+    /// Mature trees in the [`SAMPLE_YEARS`] snapshot; `None` when the run is shorter than that.
     pub mature_at_10000: Option<Result<usize, String>>,
+    /// Ticks in a year (`climate.year_len` from `meta.json`), which every window in years is
+    /// measured with.
+    pub year_len: u32,
     /// Wall time of the run, if known and evaluated.
     pub timing: Timing,
     /// Whether the run placed grazers and hunters; false makes the animal invariants n/a.
@@ -202,16 +238,18 @@ pub enum Timing {
 }
 
 impl Series {
-    /// Load the series, the tick-10000 mature-tree count and `timing.json` from a run directory.
+    /// Load the series, the [`SAMPLE_YEARS`] mature-tree count and `timing.json` from a run dir.
     pub fn from_run_dir(run_dir: &Path) -> Result<Series, String> {
         let rows = read_series(run_dir)?;
-        let mature_at_10000 = (rows.len() > 10_000).then(|| mature_trees_at(run_dir, 10_000));
+        let year_len = meta_year_len(run_dir);
+        let sample = ticks_in(SAMPLE_YEARS, year_len) as usize;
+        let mature_at_10000 = (rows.len() > sample).then(|| mature_trees_at(run_dir, sample as u32));
         let text = fs::read_to_string(run_dir.join("timing.json")).unwrap_or_default();
         let timing = match serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v["wall_ms"].as_u64()) {
             Some(ms) => Timing::Ms(ms, runtime_limit_ms(meta_cols(run_dir))),
             None => Timing::Missing,
         };
-        Ok(Series { rows, mature_at_10000, timing, animals: run_has_animals(run_dir) })
+        Ok(Series { rows, mature_at_10000, timing, animals: run_has_animals(run_dir), year_len })
     }
 }
 
@@ -219,6 +257,11 @@ impl Series {
 fn meta_json(run_dir: &Path) -> serde_json::Value {
     let text = fs::read_to_string(run_dir.join("meta.json")).unwrap_or_default();
     serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// Ticks in a year from `meta.json`'s `year_len`; [`DEFAULT_YEAR_LEN`] when absent or unreadable.
+pub fn meta_year_len(run_dir: &Path) -> u32 {
+    meta_json(run_dir)["year_len"].as_u64().map_or(DEFAULT_YEAR_LEN, |v| v.max(1) as u32)
 }
 
 /// Columns of the run's world from `meta.json`'s `dims`; 4096 (64×64) when absent or unreadable.
@@ -299,11 +342,12 @@ impl CheckReport {
 
 /// Every invariant key in report order. `run_length` and `tick_10000` only appear for short runs,
 /// and `runtime` only when timing is evaluated.
-pub const INVARIANT_KEYS: [&str; 11] = [
+pub const INVARIANT_KEYS: [&str; 12] = [
     "run_length",
     "no_extinction",
     "max_10x",
     "grazer_cycle",
+    "moisture_band",
     "fertility_band",
     "grass_band",
     "tree_growth",
@@ -399,11 +443,12 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
     }
     let last = rows.len() - 1;
     let mut out = Builder(Vec::new());
-    if last < 20_000 {
-        let vtm = (last as f64, 20_000.0, margin_at_least(last as f64, 20_000.0));
-        out.push("run_length", "run length ≥ 20000 ticks", false, format!("last tick {last}"), vtm);
+    let full = ticks_in(RUN_YEARS, series.year_len) as f64;
+    if (last as f64) < full {
+        let vtm = (last as f64, full, margin_at_least(last as f64, full));
+        out.push("run_length", "run length >= 5 years", false, format!("last tick {last}"), vtm);
     }
-    let from = (WINDOW_START as usize).min(last);
+    let from = (ticks_in(WINDOW_YEARS, series.year_len) as usize).min(last);
     let win = &rows[from..];
     // An animals-off run never placed a grazer or a hunter, so only the trees are counted here.
     let species = species_columns(series.animals);
@@ -424,7 +469,8 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
     let mut obs = Vec::new();
     let mut parts = Vec::new();
     for (n, f) in species.iter() {
-        let anchor = if *n == "trees" { (TREE_ANCHOR as usize).min(last) } else { from };
+        let anchor =
+            if *n == "trees" { (ticks_in(TREE_ANCHOR_YEARS, series.year_len) as usize).min(last) } else { from };
         let base = f(&rows[anchor]);
         let max = win.iter().map(f).max().unwrap_or(0);
         ok &= max <= 10 * base;
@@ -433,7 +479,7 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
     }
     out.push(
         "max_10x",
-        "no species exceeds 10x its anchor count (animals: tick 2000, trees: tick 5000)",
+        "no species exceeds 10x its anchor count (animals: 0.5 years, trees: 1.25 years)",
         ok,
         obs.join(" "),
         tightest(parts),
@@ -458,7 +504,21 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
         out.push_na("grazer_cycle", cycle_name);
     }
 
-    // 4. fertility_mean in [40, 220].
+    // 4. Soil moisture between the wilting point and field capacity (shot G4b).
+    let (mmin, _) = range(win.iter().map(|r| r.moisture_mean));
+    let below = win.iter().filter(|r| r.moisture_mean < 255.0).count() as f64 / win.len().max(1) as f64;
+    out.push(
+        "moisture_band",
+        "moisture_mean above the wilting point every tick, below field capacity on >= 95% of them",
+        mmin > 0.0 && below >= MOISTURE_BELOW_CAPACITY,
+        format!("min {mmin:.2} of 255, below capacity on {:.2}% of ticks", 100.0 * below),
+        tightest([
+            (mmin as f64, 0.0, margin_at_least(mmin as f64, 0.0)),
+            (below, MOISTURE_BELOW_CAPACITY, margin_at_least(below, MOISTURE_BELOW_CAPACITY)),
+        ]),
+    );
+
+    // 5. fertility_mean in [40, 220].
     let (fmin, fmax) = range(win.iter().map(|r| r.fertility_mean));
     out.push(
         "fertility_band",
@@ -468,7 +528,7 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
         band(fmin as f64, fmax as f64, 40.0, 220.0),
     );
 
-    // 5. grass_mean in [0.05, 0.95].
+    // 6. grass_mean in [0.05, 0.95].
     let (gmin, gmax) = range(win.iter().map(|r| r.grass_mean));
     out.push(
         "grass_band",
@@ -478,7 +538,7 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
         band(gmin as f64, gmax as f64, 0.05, 0.95),
     );
 
-    // 6. Succession: trees at the end ≥ 1.5× trees at tick 0.
+    // 7. Succession: trees at the end ≥ 1.5× trees at tick 0.
     let (t0, tn) = (rows[0].trees, rows[last].trees);
     let need = 1.5 * t0 as f64;
     out.push(
@@ -489,7 +549,7 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
         (tn as f64, need, margin_at_least(tn as f64, need)),
     );
 
-    // 7. Runtime under 30 s (per 64×64 of area, at most 90 s).
+    // 8. Runtime under 30 s (per 64×64 of area, at most 90 s).
     match series.timing {
         Timing::Ms(ms, limit_ms) => out.push(
             "runtime",
@@ -505,10 +565,12 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
         Timing::Excluded => {}
     }
 
-    // Addendum extras at tick 10000 (renderer pixel tests depend on them).
+    // Addendum extras at 2.5 years, tick 10000 at the default year length (the renderer's pixel
+    // tests depend on them).
+    let sample = ticks_in(SAMPLE_YEARS, series.year_len) as usize;
     match &series.mature_at_10000 {
-        Some(mature) if last >= 10_000 => {
-            let name = "mature trees at tick 10000 >= 35";
+        Some(mature) if last >= sample => {
+            let name = "mature trees at 2.5 years >= 35";
             match mature {
                 Ok(m) => {
                     let m = *m as f64;
@@ -516,9 +578,9 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
                 }
                 Err(e) => out.push("mature_trees_10k", name, false, e.clone(), (f64::NAN, 35.0, -1.0)),
             }
-            let animals_name = "at tick 10000 grazers >= 10 and hunters >= 2";
+            let animals_name = "at 2.5 years grazers >= 10 and hunters >= 2";
             if series.animals {
-                let r = &rows[10_000];
+                let r = &rows[sample];
                 let (g, h) = (r.grazers as f64, r.hunters as f64);
                 out.push(
                     "animals_10k",
@@ -533,10 +595,10 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
         }
         _ => out.push(
             "tick_10000",
-            "tick-10000 checks",
+            "2.5-year checks",
             false,
-            "run shorter than 10000 ticks".into(),
-            (last as f64, 10_000.0, margin_at_least(last as f64, 10_000.0)),
+            format!("run shorter than {sample} ticks"),
+            (last as f64, sample as f64, margin_at_least(last as f64, sample as f64)),
         ),
     }
     Ok(CheckReport { lines: out.0 })
@@ -547,16 +609,16 @@ pub const LONG_KEYS: [&str; 4] = ["long_run_length", "long_no_extinction", "long
 
 /// `ecosim check --long` on a run directory.
 pub fn check_run_long(run_dir: &Path) -> Result<CheckReport, String> {
-    evaluate_long(&read_series(run_dir)?, run_has_animals(run_dir))
+    evaluate_long(&read_series(run_dir)?, run_has_animals(run_dir), meta_year_len(run_dir))
 }
 
-/// The long-run invariants, for runs of at least `LONG_TICKS`: no species reaches 0 at any tick,
+/// The long-run invariants, for runs of at least [`LONG_YEARS`]: no species reaches 0 at any tick,
 /// fertility_mean stays inside the same [40, 220] band the short check uses, and grazers and
-/// hunters stay within [0.2×, 5×] of their tick-20000 count over ticks 20000–60000. These replace,
+/// hunters stay within [0.2×, 5×] of their 5-year count over years 5–15. These replace,
 /// rather than extend, the 20000-tick invariants. Fertility is here because a 20000-tick run ends
 /// a few hundred ticks after fertility crosses 220 in the noise world, so the short check never
 /// saw the saturation the long run has always had (shot G4, DECISIONS.md "Fertility has a sink").
-pub fn evaluate_long(rows: &[StatsRow], animals: bool) -> Result<CheckReport, String> {
+pub fn evaluate_long(rows: &[StatsRow], animals: bool, year_len: u32) -> Result<CheckReport, String> {
     if rows.is_empty() {
         return Err("series.csv has no rows".into());
     }
@@ -567,10 +629,11 @@ pub fn evaluate_long(rows: &[StatsRow], animals: bool) -> Result<CheckReport, St
     }
     let last = rows.len() - 1;
     let mut out = Builder(Vec::new());
-    let long = LONG_TICKS as f64;
-    if last < LONG_TICKS as usize {
+    let long_ticks = ticks_in(LONG_YEARS, year_len) as usize;
+    let long = long_ticks as f64;
+    if last < long_ticks {
         let vtm = (last as f64, long, margin_at_least(last as f64, long));
-        out.push("long_run_length", "run length >= 60000 ticks", false, format!("last tick {last}"), vtm);
+        out.push("long_run_length", "run length >= 15 years", false, format!("last tick {last}"), vtm);
     }
     let species = species_columns(animals);
     let mins: Vec<(&str, u32)> = species.iter().map(|(n, f)| (*n, rows.iter().map(f).min().unwrap_or(0))).collect();
@@ -589,13 +652,13 @@ pub fn evaluate_long(rows: &[StatsRow], animals: bool) -> Result<CheckReport, St
         format!("[{fmin:.2}, {fmax:.2}]"),
         band(fmin as f64, fmax as f64, 40.0, 220.0),
     );
-    let band_name = "grazers and hunters over ticks 20000-60000 within [0.2x, 5x] of their tick-20000 count";
+    let band_name = "grazers and hunters over years 5-15 within [0.2x, 5x] of their 5-year count";
     if !animals {
         out.push_na("long_band", band_name);
         return Ok(CheckReport { lines: out.0 });
     }
-    let from = (LONG_BAND_FROM as usize).min(last);
-    let win = &rows[from..=(LONG_TICKS as usize).min(last)];
+    let from = (ticks_in(LONG_BAND_FROM_YEARS, year_len) as usize).min(last);
+    let win = &rows[from..=long_ticks.min(last)];
     let (mut ok, mut obs, mut parts) = (true, Vec::new(), Vec::new());
     for (n, f) in &species[..2] {
         let base = f(&rows[from]) as f64;
@@ -621,6 +684,8 @@ pub fn first_extinction(rows: &[StatsRow], animals: bool) -> Option<&StatsRow> {
 }
 
 /// Ticks of death counts attributed to an extinction: the extinction tick and the 499 before it.
+/// In ticks rather than years (shot G4b): it is a window over the death log of the per-tick animal
+/// tier, and it sets no threshold, so no amount of simulated time depends on it.
 pub const CAUSE_WINDOW: u32 = 500;
 
 /// One species reaching 0, with what killed it off.
@@ -711,7 +776,11 @@ pub fn extinction_line(e: &Extinction) -> String {
     )
 }
 
-/// Lag range of the predator–prey signature: −`SIG_MAX_LAG`..=`SIG_MAX_LAG` ticks in `SIG_LAG_STEP`s.
+// The six `SIG_*` constants stay in ticks (shot G4b), for the reason `grazer_maxima` gives: they
+// describe the predator-prey cycle, whose clock is the per-tick animal tier. Converting them to
+// years before that tier is converted would measure a per-tick cycle on a per-year ruler.
+
+/// Lag range of the predator-prey signature: -`SIG_MAX_LAG`..=`SIG_MAX_LAG` ticks in `SIG_LAG_STEP`s.
 pub const SIG_MAX_LAG: i32 = 8000;
 /// Step between the signature's lags, and between the hunter autocorrelation's lags.
 pub const SIG_LAG_STEP: i32 = 50;
@@ -1014,7 +1083,9 @@ mod tests {
             .collect()
     }
 
-    const YEAR: u32 = 4000;
+    /// Year length of every hand-built series in this file: the shipped default, so a window in
+    /// years is the tick count the file used before shot G4b (`WINDOW_YEARS` 0.5 is tick 2000).
+    const YEAR: u32 = DEFAULT_YEAR_LEN;
     const CYCLE_TICKS: usize = 66_001;
 
     /// A grazer series and hunters that copy it `delay` ticks later. Four incommensurate cycles,
@@ -1231,7 +1302,8 @@ mod tests {
         let mut rows = rows_from(|t| 100 + (t % 3000 < 1500) as u32 * 50, 20001);
         rows[5000].fertility_mean = 210.0; // upper side: (220 − 210)/220 ≈ 0.045, tighter than (100 − 40)/40
         rows[6000].grass_mean = 0.04; // below the band: (0.04 − 0.05)/0.05 = −0.2
-        let s = Series { rows, mature_at_10000: Some(Ok(42)), timing: Timing::Excluded, animals: true };
+        let s =
+            Series { rows, mature_at_10000: Some(Ok(42)), timing: Timing::Excluded, animals: true, year_len: YEAR };
         let r = evaluate(&s).unwrap();
         assert!(r.get("runtime").is_none());
         let f = r.get("fertility_band").unwrap();
@@ -1309,15 +1381,22 @@ mod tests {
                 water: Default::default(),
             })
             .collect();
-        Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms, RUNTIME_LIMIT_MS), animals: true }
+        Series {
+            rows,
+            mature_at_10000: Some(Ok(h.mature)),
+            timing: Timing::Ms(h.ms, RUNTIME_LIMIT_MS),
+            animals: true,
+            year_len: YEAR,
+        }
     }
 
     /// The invariants a violation may break: all but `tick_10000`, which needs a run under 10000 ticks.
-    const VIOLABLE: [&str; 10] = [
+    const VIOLABLE: [&str; 11] = [
         "run_length",
         "no_extinction",
         "max_10x",
         "grazer_cycle",
+        "moisture_band",
         "fertility_band",
         "grass_band",
         "tree_growth",
@@ -1333,8 +1412,18 @@ mod tests {
         match key {
             "run_length" => rows.truncate(keep),
             "no_extinction" => rows[t].hunters = 0,
-            "max_10x" => rows[t].trees = 10 * rows[TREE_ANCHOR as usize].trees + 1,
+            "max_10x" => rows[t].trees = 10 * rows[ticks_in(TREE_ANCHOR_YEARS, YEAR) as usize].trees + 1,
             "grazer_cycle" => rows.iter_mut().for_each(|r| r.grazers = 150),
+            // The dry side is a single tick, which is all that clause allows; the wet side is a
+            // fraction of the run, because field capacity on one tick is within the 5% the check
+            // allows a saturated soil (shot G4b).
+            "moisture_band" => {
+                if side {
+                    rows[t].moisture_mean = 0.0;
+                } else {
+                    rows.iter_mut().step_by(8).for_each(|r| r.moisture_mean = 255.0);
+                }
+            }
             "fertility_band" => rows[t].fertility_mean = if side { 39.9 } else { 220.1 },
             "grass_band" => rows[t].grass_mean = if side { 0.049 } else { 0.951 },
             "tree_growth" => rows[20_000].trees = rows[0].trees,
@@ -1398,15 +1487,15 @@ mod tests {
 
     /// Keys failing in `evaluate_long` on these rows.
     fn failing_long(rows: &[StatsRow]) -> Vec<&'static str> {
-        evaluate_long(rows, true).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect()
+        evaluate_long(rows, true, YEAR).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect()
     }
 
     #[test]
     fn long_check_passes_a_healthy_run_and_flags_each_violation() {
-        let n = LONG_TICKS as usize + 1;
+        let n = ticks_in(LONG_YEARS, YEAR) as usize + 1;
         let base = |t: usize| if t < 20_000 { 200 } else { 100 + (t % 7) as u32 };
         let healthy = rows_from(base, n);
-        let report = evaluate_long(&healthy, true).unwrap();
+        let report = evaluate_long(&healthy, true, YEAR).unwrap();
         assert!(report.pass(), "{:?}", report.lines);
         assert_eq!(report.lines.iter().map(|l| l.key).collect::<Vec<_>>(), LONG_KEYS[1..]);
 
@@ -1416,7 +1505,7 @@ mod tests {
         assert_eq!(failing_long(&rows), ["long_no_extinction"]);
         // 5.1x the anchor fails the band; 5x and just above 0.2x pass.
         let mut rows = healthy.clone();
-        let anchor = rows[LONG_BAND_FROM as usize].grazers;
+        let anchor = rows[ticks_in(LONG_BAND_FROM_YEARS, YEAR) as usize].grazers;
         rows[40_000].grazers = anchor * 5;
         rows[40_001].grazers = anchor.div_ceil(5);
         assert!(failing_long(&rows).is_empty());
@@ -1443,21 +1532,21 @@ mod tests {
     /// `long_no_extinction` watches the trees alone, so the all-zero animal columns pass.
     #[test]
     fn long_check_without_animals_marks_the_band_na() {
-        let n = LONG_TICKS as usize + 1;
+        let n = ticks_in(LONG_YEARS, YEAR) as usize + 1;
         let mut rows = rows_from(|t| if t < 20_000 { 200 } else { 100 + (t % 7) as u32 }, n);
         rows.iter_mut().for_each(|r| {
             r.grazers = 0;
             r.hunters = 0;
         });
         assert_eq!(failing_long(&rows), ["long_no_extinction"], "with animals, the empty columns are an extinction");
-        let report = evaluate_long(&rows, false).unwrap();
+        let report = evaluate_long(&rows, false, YEAR).unwrap();
         assert!(report.pass(), "{:?}", report.lines);
         assert_eq!(report.not_applicable(), ANIMAL_ONLY_LONG_KEYS.to_vec());
         assert_eq!(report.get("long_no_extinction").unwrap().observed, "min trees=20");
         // The trees still count: a tree reaching 0 fails, animals off or not.
         rows[30_000].trees = 0;
         assert_eq!(
-            evaluate_long(&rows, false).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect::<Vec<_>>(),
+            evaluate_long(&rows, false, YEAR).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect::<Vec<_>>(),
             ["long_no_extinction"]
         );
     }
@@ -1465,14 +1554,14 @@ mod tests {
     #[test]
     fn long_check_on_a_short_run_reports_its_length() {
         let rows = rows_from(|_| 50, 20_001);
-        let report = evaluate_long(&rows, true).unwrap();
+        let report = evaluate_long(&rows, true, YEAR).unwrap();
         assert_eq!(report.lines.iter().map(|l| l.key).collect::<Vec<_>>(), LONG_KEYS);
         assert_eq!(failing_long(&rows), ["long_run_length"]);
-        assert!(evaluate_long(&rows_from(|_| 50, 10), true).unwrap().get("long_band").unwrap().pass);
-        assert!(evaluate_long(&[], true).is_err());
+        assert!(evaluate_long(&rows_from(|_| 50, 10), true, YEAR).unwrap().get("long_band").unwrap().pass);
+        assert!(evaluate_long(&[], true, YEAR).is_err());
         let mut gap = rows_from(|_| 50, 10);
         gap.remove(4);
-        assert!(evaluate_long(&gap, true).unwrap_err().contains("row 4 has tick 5"));
+        assert!(evaluate_long(&gap, true, YEAR).unwrap_err().contains("row 4 has tick 5"));
     }
 
     #[test]

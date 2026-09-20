@@ -24,9 +24,9 @@ pub enum Phase {
     Trees,
     /// Fire spread, burn-out and ignition.
     Fire,
-    /// Moisture and fertility (every 10 ticks).
+    /// Moisture and fertility (every `schedule.soil_every` ticks).
     MoistureFertility,
-    /// Temperature and season (every 100 ticks).
+    /// Temperature and season (every `schedule.temperature_every` ticks).
     TemperatureSeason,
     /// Removing dead entities (every `world.compact_every` ticks).
     Compaction,

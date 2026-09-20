@@ -185,17 +185,17 @@ fn full_run_writes_series_header_and_one_row_per_tick() {
     assert!(!dir.join("snap_000250").exists());
 }
 
-/// The crate's `params.toml` on the square world with `set` applied.
-fn square_with(set: &[String]) -> Params {
+/// The crate's `params.toml` on the small world (`common::SMALL`) with `set` applied.
+fn small_with(set: &[String]) -> Params {
     let set: Vec<&str> = set.iter().map(String::as_str).collect();
-    Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &common::square_set(&set)).unwrap()
+    Params::load_with(&Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml"), &common::small_set(&set)).unwrap()
 }
 
-/// Seed 1 for 20000 ticks on the square world with `set` applied, a snapshot every 1000, into `dir`.
+/// Seed 1 for 20000 ticks on the small world with `set` applied, a snapshot every 1000, into `dir`.
 /// Returns the last row.
 fn run_with(dir: &Path, set: &[String]) -> ecosim::StatsRow {
     let set: Vec<&str> = set.iter().map(String::as_str).collect();
-    run_on(dir, &common::square_set(&set))
+    run_on(dir, &common::small_set(&set))
 }
 
 /// Seed 1 for 20000 ticks with `set` applied, a snapshot every 1000, into `dir`. Returns the last row.
@@ -254,11 +254,11 @@ fn assert_valid_run(dir: &Path) -> String {
     text
 }
 
-/// Forced extinction: `grazer.energy_cost=1.0` starves the grazers out on seed 1, and the hunters
-/// follow. Fire and grazer crowding are off (`fire.base_rate=0`, `disease.grazer_rate=0`) so
-/// starvation is the only thing forced: crowding thins grazers enough that the survivors can feed. The run still
-/// completes 20000 ticks with valid snapshots, and `ecosim stats` names `starved` as the dominant
-/// cause of the grazer extinction.
+/// Forced extinction: `grazer.energy_cost=1.0` starves the grazers out on seed 1 (tick 4056, hunters
+/// at 5300), on the small world (`common::SMALL`). Fire and grazer crowding are off
+/// (`fire.base_rate=0`, `disease.grazer_rate=0`) so starvation is the only thing forced: crowding
+/// thins grazers enough that the survivors can feed. The run still completes 20000 ticks with valid
+/// snapshots, and `ecosim stats` names `starved` as the dominant cause of the grazer extinction.
 #[test]
 fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
     let dir = tmp("forced_extinction");
@@ -276,10 +276,12 @@ fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
 }
 
 /// Forced extinction on the reference strip (shot 15): starvation forcing at the default dimensions,
-/// rain gradient and slope. The square world's `energy_cost=1.0` leaves 840 grazers on the strip's
-/// wet east, so this uses 2.0: grazers starve out on seed 1 at tick 3428, hunters at 4582. The run completes 20000 ticks with valid
-/// snapshots of the strip's size, `ecosim stats` names `starved` for the grazers, and the last
-/// snapshot restores onto the strip.
+/// rain gradient and slope. The small world's `energy_cost=1.0` leaves grazers alive on the strip,
+/// which is four times the area and better watered, so this uses 3.5: grazers starve out on seed 1 at
+/// tick 116, hunters at 1251. 2.0 was enough before the units conversion, and 3.0 now kills the
+/// hunters first and leaves the last grazers to die of old age instead (shot G4b). The run completes
+/// 20000 ticks with valid snapshots of the strip's size, `ecosim stats` names `starved` for the
+/// grazers, and the last snapshot restores onto the strip.
 #[test]
 #[cfg_attr(
     coverage,
@@ -288,7 +290,7 @@ fn forced_grazer_extinction_runs_to_the_end_and_is_attributed_to_starvation() {
 fn forced_grazer_extinction_on_the_strip_runs_to_the_end() {
     let dir = tmp("forced_extinction_strip");
     let set: Vec<String> =
-        ["grazer.energy_cost=2.0", "fire.base_rate=0", "disease.grazer_rate=0"].map(String::from).to_vec();
+        ["grazer.energy_cost=3.5", "fire.base_rate=0", "disease.grazer_rate=0"].map(String::from).to_vec();
     let last = run_on(&dir, &set);
     assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species extinct by the end");
     assert!(last.trees > 0);
@@ -305,24 +307,25 @@ fn forced_grazer_extinction_on_the_strip_runs_to_the_end() {
         "the last snapshot restores"
     );
     assert!(
-        Sim::restore(square_with(&set), &dir.join("snap_020000")).is_err(),
+        Sim::restore(small_with(&set), &dir.join("snap_020000")).is_err(),
         "a strip snapshot is not a 64-world one"
     );
 }
 
 /// Forced extinction by fire: every patch with fuel can ignite at any temperature and fire kills any
-/// animal in one tick, so both animal species burn out on seed 1 (hunters at tick 471, grazers at
-/// 1301). Ignition is scaled by the square of dryness, and the water tier keeps the soil near
-/// saturation (shot G4), so `base_rate` is 20 rather than 1: the product is clamped to a probability,
-/// and 20 is enough to leave it at 1 on a fuelled patch. Mutation is off (`heredity.mutation=0`) so
-/// fire is the only thing forced.
+/// animal in one tick, so both animal species burn out on seed 1 in the first few hundred ticks.
+/// Ignition is scaled by the square of dryness, and the water tier keeps a good part of the soil's
+/// capacity filled (shot G4), so `base_rate` is far above 1: the product is clamped to a
+/// probability, and this leaves it at 1 on a fuelled patch. 8000 ignitions per patch per year is the
+/// 20 of shot G4 over the 400 fire updates a year the cadence now divides it into (shot G4b).
+/// Mutation is off (`heredity.mutation=0`) so fire is the only thing forced.
 /// The run continues to 20000 ticks with valid snapshots, fires keep burning, and `ecosim stats`
 /// names `burnt` as the dominant cause of both extinctions.
 #[test]
 fn forced_fire_extinction_runs_to_the_end_and_is_attributed_to_fire() {
     let dir = tmp("forced_fire_extinction");
     let set: Vec<String> = [
-        "fire.base_rate=20",
+        "fire.base_rate=8000",
         "fire.temp_min=-50",
         "fire.temp_full=-40",
         "fire.animal_damage=100",
@@ -343,7 +346,7 @@ fn forced_fire_extinction_runs_to_the_end_and_is_attributed_to_fire() {
         assert!(line.contains("dominant cause: burnt"), "{line}");
     }
     let snap = dir.join("snap_020000");
-    let sim = Sim::restore(square_with(&set), &snap).unwrap();
+    let sim = Sim::restore(small_with(&set), &snap).unwrap();
     assert_eq!((sim.tick, sim.total_burnt), (20_000, last.total_burnt), "the last snapshot restores");
 }
 
@@ -367,13 +370,13 @@ fn forced_hunter_extinction_by_refractory_runs_to_the_end() {
     let crowded = |rows: &[ecosim::StatsRow]| rows.iter().map(|r| r.deaths[0][3]).sum::<u32>();
     let (all, late) = (crowded(&series), crowded(&series[15_000..]));
     assert!(all > 1000 && late > 0, "grazer crowded deaths {all}, after tick 15000 {late}");
-    let params = square_with(&set);
+    let params = small_with(&set);
     let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
 
 /// Forced extinction by hunting cost: at `hunter.hunt_cost=8` an attack costs more than a hunter
-/// can win back at the typical success rate, so the hunters starve out on seed 1 (tick 5382). The run continues
+/// can win back at the typical success rate, so the hunters starve out on seed 1 (tick 6622). The run continues
 /// to 20000 ticks with valid snapshots, `ecosim stats` names `starved`, the predator–prey signature
 /// is reported as undefined with that cause, and the last snapshot restores.
 #[test]
@@ -390,13 +393,13 @@ fn forced_hunter_starvation_by_hunt_cost_runs_to_the_end() {
     assert!(out.status.success());
     let sig = String::from_utf8(out.stdout).unwrap();
     assert!(sig.starts_with("signature: undefined, hunters extinct at tick ") && sig.contains("starved"), "{sig}");
-    let params = square_with(&set);
+    let params = small_with(&set);
     let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
 
 /// Forced extinction by handling time: at `hunter.handling_ticks=1000000` a hunter's first kill is
-/// its last, so the hunters starve out on seed 1 (tick 2582) while grazers boom. The run continues to
+/// its last, so the hunters starve out on seed 1 (tick 2561) while grazers boom. The run continues to
 /// 20000 ticks with valid snapshots, the tick-1000 snapshot shows hunters in state
 /// `handling`, `ecosim stats` and the signature name `starved`, and the last snapshot restores.
 #[test]
@@ -415,14 +418,14 @@ fn forced_hunter_starvation_by_handling_time_runs_to_the_end() {
     let out = Command::new(env!("CARGO_BIN_EXE_ecosim")).args(["stats", "--signature"]).arg(&dir).output().unwrap();
     let sig = String::from_utf8(out.stdout).unwrap();
     assert!(sig.starts_with("signature: undefined, hunters extinct at tick ") && sig.contains("starved"), "{sig}");
-    let params = square_with(&set);
+    let params = small_with(&set);
     let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
 
 /// Forced extinction under heredity: at `grazer.repro_energy=400` no grazer can ever breed (energy
 /// tops out at 100, and the clamp keeps `repro_threshold` at 100 or more), so with mutation 0.2 the
-/// grazers are eaten out on seed 1 (tick 2285) and the hunters starve after them. The run continues
+/// grazers are eaten out on seed 1 (tick 2096) and the hunters starve after them. The run continues
 /// to 20000 ticks with valid snapshots and no NaN. Grazer trait deviations stay 0 (no grazer is ever
 /// born), hunter ones rise above 0 (hunters breed and mutate), and both species' trait columns read
 /// 0 once they are extinct. `entities.json` animals carry the three traits, and the last snapshot
@@ -448,7 +451,7 @@ fn forced_grazer_extinction_under_heredity_runs_to_the_end() {
             assert!(a[k].as_f64().is_some_and(f64::is_finite), "{a}");
         }
     }
-    let params = square_with(&set);
+    let params = small_with(&set);
     let sim = Sim::restore(params, &dir.join("snap_020000")).unwrap();
     assert_eq!((sim.tick, sim.count_grazers()), (20_000, 0), "the last snapshot restores");
 }
@@ -458,13 +461,22 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// Format version 2, fire and traits only add files, fields and columns. A fresh seed-42 mini run
-/// with fire, crowding and mutation off and the hunter refractory at the old cooldown, with the trait
-/// and fire additions cut (`common::without_traits`, `common::without_fire`), is the v1 fixture byte
-/// for byte apart from `meta.json` (the version, `forked_from`, the `[fire]`, `[disease]` and
-/// `[heredity]` params, the new immigration and flee keys, and the cooldown's new name) and the new
-/// `state.bin` files. The committed v2 fixture is the same command at the defaults, and is current.
-/// All of it is on the square world (`common::SQUARE`) the fixtures were made on; `meta.json` also
-/// gains the shot-15 dimension keys, the rain gradient and the slope bias.
+/// with fire, crowding and mutation off, the hunter refractory at the old cooldown and the water tier
+/// off, on the square world (`common::SQUARE`) the fixtures were made on, is compared with the v1
+/// fixture after the trait and fire additions are cut (`common::without_traits`,
+/// `common::without_fire`, `common::without_water`).
+///
+/// Shot G4b ended the byte-for-byte half of this comparison, and did not replace it with a rewritten
+/// fixture: converting a per-tick rate to a rate per hour changes the numbers a run produces, and the
+/// version-1 writer is gone, so `fixtures/s42-mini` cannot be re-cut (DECISIONS.md, "Units
+/// calibration"). Four series columns (`grass_mean`, `moisture_mean`, `fertility_mean` and
+/// `detritus_total`) now differ in their fourth decimal, because the conversion rounded the derived
+/// constants to three or four significant figures. What version 1 still pins is the format: the
+/// tick-0 snapshot byte for byte (the world a seed makes has not moved, and the fire and trait fields
+/// are all that version 2 and the shots after it add to it), the file set of both snapshots plus
+/// `state.bin`, the terrain files at tick 100, the series header and length, and the shape of
+/// `meta.json`, whose every version-1 params key is still written under its own name or the name the
+/// conversion gave it.
 #[test]
 fn format_2_and_fire_only_add_to_version_1_files() {
     let v1 = fixture("s42-mini");
@@ -482,47 +494,51 @@ fn format_2_and_fire_only_add_to_version_1_files() {
         let b = common::without_water(f, fs::read(fresh.join(rel)).unwrap());
         common::without_fire(f, common::without_traits(f, b))
     };
-    assert!(cut("series.csv") == fs::read(v1.join("series.csv")).unwrap(), "series.csv");
+    let text = |b: Vec<u8>| String::from_utf8(b).unwrap();
+    let (got, want) = (text(cut("series.csv")), text(fs::read(v1.join("series.csv")).unwrap()));
+    assert_eq!(got.lines().next(), want.lines().next(), "series header");
+    assert_eq!(got.lines().count(), want.lines().count(), "series rows");
     for snap in ["snap_000000", "snap_000100"] {
         let files: Vec<_> = fs::read_dir(v1.join(snap)).unwrap().map(|e| e.unwrap().file_name()).collect();
         for f in &files {
-            let rel = format!("{snap}/{}", f.to_str().unwrap());
-            assert!(cut(&rel) == fs::read(v1.join(&rel)).unwrap(), "{rel}");
+            let name = f.to_str().unwrap();
+            let rel = format!("{snap}/{name}");
+            let terrain = matches!(name, "material.bin" | "light.bin" | "height.bin");
+            if snap == "snap_000000" || terrain {
+                assert!(cut(&rel) == fs::read(v1.join(&rel)).unwrap(), "{rel}");
+            }
         }
         assert_eq!(fs::read_dir(fresh.join(snap)).unwrap().count(), files.len() + 1);
         assert!(fresh.join(snap).join("state.bin").exists());
     }
-    let (mut a, mut b) = (read_json(&v1.join("meta.json")), read_json(&fresh.join("meta.json")));
+    let (a, b) = (read_json(&v1.join("meta.json")), read_json(&fresh.join("meta.json")));
     assert_eq!((a["format_version"].as_u64(), b["format_version"].as_u64()), (Some(1), Some(FORMAT_VERSION as u64)));
     assert!(b["forked_from"].is_null() && b["params"]["fire"].is_object());
     assert_eq!(
         (&a["params"]["hunter"]["cooldown"], &b["params"]["hunter"]["refractory"]),
         (&5000.into(), &5000.into())
     );
-    for (m, key) in [(&mut a, "cooldown"), (&mut b, "refractory")] {
-        let o = m.as_object_mut().unwrap();
-        o.remove("format_version");
-        o.remove("forked_from");
-        o["dims"].as_object_mut().unwrap().remove("patch");
-        let params = o["params"].as_object_mut().unwrap();
-        for k in ["width", "depth", "height", "patch", "slope_bias"] {
-            params["world"].as_object_mut().unwrap().remove(k);
-        }
-        params["climate"].as_object_mut().unwrap().remove("rain_gradient");
-        params.remove("fire");
-        params.remove("disease");
-        params.remove("heredity");
-        params.remove("rain");
-        params.remove("hydro");
-        params.remove("medium");
-        params["hunter"].as_object_mut().unwrap().remove(key);
-        params["hunter"].as_object_mut().unwrap().remove("flee_radius");
-        params["hunter"].as_object_mut().unwrap().remove("hunt_cost");
-        for k in ["immigration_floor", "immigration_interval"] {
-            params["tree"].as_object_mut().unwrap().remove(k);
+    for k in ["seed", "ticks", "snapshot_every", "snapshots", "species", "water_level", "year_len", "overrides"] {
+        assert_eq!(a[k], b[k], "{k}");
+    }
+    for k in ["x", "y", "z"] {
+        assert_eq!(a["dims"][k], b["dims"][k], "dims.{k}");
+    }
+    // The four params keys the units conversion renamed (shot G4b), as (section, version 1, now).
+    const RENAMED: [(&str, &str, &str); 4] = [
+        ("hunter", "cooldown", "refractory"),
+        ("cover", "moisture_draw", "water_per_growth_mm"),
+        ("tree", "moisture_draw", "transpiration_mm_h"),
+        ("tree", "dry_moisture", "dry_fraction"),
+    ];
+    for (section, keys) in a["params"].as_object().unwrap() {
+        let now = b["params"][section].as_object().unwrap_or_else(|| panic!("params.{section} is gone"));
+        for key in keys.as_object().unwrap().keys() {
+            let rename = RENAMED.iter().find(|(s, old, _)| s == section && old == key);
+            let want = rename.map_or(key.as_str(), |(_, _, now)| now);
+            assert!(now.contains_key(want), "params.{section}.{key} is gone (looked for {want})");
         }
     }
-    assert_eq!(a, b);
 
     // `--format-version 2` still writes the committed v2 fixture byte for byte; format 3 adds only
     // events.csv and the version number.

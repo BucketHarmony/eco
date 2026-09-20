@@ -520,7 +520,7 @@ acceptance allows moving only `rain.*` and `hydro.*`, and nothing else was touch
 
 | Parameter | Before | After | Why, and the acceptance line that forced it |
 |---|---|---|---|
-| `rain.et_mm_h` → `hydro.et_mm_h` | 0.25 | 0.12 | 0.25 mm/h is 5.5 mm a tick against a lawn's 40 mm field capacity, so soil water fell to zero between storms and the strip's trees died of drought in the first few thousand ticks. Forced by the regression anchor, "seeds 1, 2, 3 and 42 still pass `ecosim check` at 20000 ticks at the defaults". |
+| `rain.et_mm_h` → `hydro.et_mm_h` | 0.25 | 0.12 | 0.25 mm/h is 5.5 mm over a 10-tick soil update (0.55 mm in one tick) against a lawn's 150 mm field capacity, so soil water fell to zero between storms and the strip's trees died of drought in the first few thousand ticks. (Shot G4b corrected this cell, which said 5.5 mm a tick and 40 mm of field capacity; the numbers behind the change are unaffected.) Forced by the regression anchor, "seeds 1, 2, 3 and 42 still pass `ecosim check` at 20000 ticks at the defaults". |
 | `rain.storm_p` | 0.047 | 0.10 | The draft kept the pre-G4 mean of 1 mm per tick at a 21 mm storm, which is the wrong end of the sweep's safe band (see below): trees died of drought on two of the three seeds. At a 10 mm mean the same long-run total arrives often enough that the soil never empties. Same acceptance line. |
 | `hydro.leach_k` | 0.02 | 0.0002 | Leaching is fertility's only sink (the operator's note for this shot). At 0.02 a typical 20 mm percolation takes 40% of a column's fertility per soil update and `fertility_mean` fell through the floor of 40 within 2000 ticks. 0.0002 is the largest round value that holds both ends. Forced by `ecosim check`'s `fertility_mean in [40, 220]`, on the anchor seeds and on the new `check --long` line. |
 | `hydro.saturation` | (none: field capacity was the ceiling) | 1.2 | With the ceiling at field capacity there is no water above it to drain, so percolation was always zero and so was leaching — fertility kept saturating. 1.2 gives each column 20% of its capacity as the transient store that drains and leaches. Forced by the same `fertility_mean` line, via `check --long`. |
@@ -539,3 +539,65 @@ instead of soaking in — the lawn's runoff fraction goes 0.051, 0.207, 0.485, 0
 sizes — so the mean is unchanged but the dry spells between storms get longer. The default sits at
 the wet edge of the band, not its middle, and that is deliberate: it is the value at which the 1 mm
 per tick of the pre-G4 rain arrives in storms a real site would recognise.
+
+## Shot G4b — units calibration
+
+Every row below is a default that moved, and most of them moved **without changing behaviour**: a rate
+that was "0.05 per 10-tick update" is written "20 per year" because the shipped cadence is 400 updates
+a year, and the sim computes the same increment either way. Those rows say *unit only*. The rows that
+are a real change of value are the ones the audit found to be wrong rather than mis-scaled, and each
+names the published reference it was set against (`UNITS.md`, R1–R13) — not the health check it had to
+pass, which is the calibration discipline the prompt asked for.
+
+The acceptance lines referred to below, from `overnight/shots/G4b-units-calibration.md`:
+
+- **(A)** "Annual rainfall at the site's defaults falls within the normal range for the site's region."
+- **(B)** "Annual plant water use falls within the published range for its cover type."
+- **(C)** "The soil moisture field sits between wilting point and field capacity for the texture on
+  most days" — the new `moisture_band` check.
+- **(D)** "Fertility does not pin at either bound over a 50-year run."
+- **(E)** "Reference worlds pass the re-derived health checks" — the replacement anchor of override 2.
+- **(F)** "Changing the staggered update interval for any subsystem by a factor of two changes that
+  subsystem's totals over a year by less than a stated tolerance."
+
+| Parameter | Before | After | Kind | Why, and the acceptance line that forced it |
+|---|---|---|---|---|
+| `[schedule]` (4 keys) | hard-coded 10, 10, 100, 10 | `cover_every` 10, `soil_every` 10, `temperature_every` 100, `fire_every` 10 | new, no change | The cadences had to be reachable before **(F)** could be written at all, and `sim.rs` and `abiotic.rs` encoded the soil cadence twice. Same values, so no run moves. |
+| `rain.storm_p` → `rain.annual_mm` | 0.10 per tick | 800.0 mm/yr | value | The old triple was 0.1 × 4000 × 10 = **4000 mm a year**, five times the site's normal. The per-tick probability is now derived from the annual depth, so it no longer drifts when `year_len` does. **(A)**, R1. |
+| `rain.storm_mean_mm` | 10.0 | 6.0 | value | 800 mm in 10 mm storms is 80 rain days; the site records about 130. 6 mm gives 133. **(A)**, R2. |
+| `hydro.et_mm_h` | 0.12 | 0.05 | value | 0.12 mm/h is 1052 mm a year at full cover, about double the published range for well-watered temperate grass; 0.05 is 438 mm. **(B)**, R4. |
+| `hydro.evap_mm_h` | 0.05 | 0.08 | value | 0.05 mm/h is 438 mm a year off open water, well under the region's ~700 mm; 0.08 is 701 mm. **(B)**, R5. |
+| `hydro.leach_k` | 0.0002 | 0.0008 | value | The old value was fitted against 4000 mm of rain a year. At the corrected 800 mm the site drains ~320 mm a year, and 0.0008 leaches 26% of a column's fertility over that — inside the published 15–40% for nitrate loss. At 0.0002 the 50-year run's fertility climbs back towards the ceiling it had before shot G4 gave it a sink. **(D)**, R13. |
+| `climate.decay_k` | 0.015 per soil update | 6.0 per year | unit only | 400 soil updates a year. Deliberately not retuned: 6.0 a year is a two-month litter turnover against a published 1–3 years (R11), and that 10× discrepancy is a finding handed to G5 with the field it acts on. |
+| `cover.moisture_draw` → `cover.water_per_growth_mm` | 15 (index units) | 8.8 mm | unit only at the reference soil, rule fixed | 15 of 255 on a 150 mm soil is 8.8 mm, so the reference world sees the same draw. The **rule** changed: the old draw scaled with the column's own capacity, so a plant on a deeper soil paid more water for the same growth. **(H)**, and `UNITS.md` finding 2. |
+| `grass.r`, `grass.g` | 0.05, 0.005 per update | 20.0, 2.0 per year | unit only | 400 cover updates a year. **(F)**. |
+| `shrub.r`, `shrub.g` | 0.01, 0.004 per update | 4.0, 1.6 per year | unit only | Same. |
+| `grass.moisture` | [20, 80, 255, 256] | [0.0784, 0.3137, 1.0, 1.004] | unit only | The curve is now a fraction of available water capacity: 20/255, 80/255, capacity, just above capacity. **(C)**. |
+| `shrub.moisture` | [15, 60, 255, 256] | [0.0588, 0.2353, 1.0, 1.004] | unit only | Same. |
+| `tree.moisture` | [30, 100, 255, 256] | [0.1176, 0.3922, 1.0, 1.004] | unit only | Same. |
+| `tree.moisture_draw` → `tree.transpiration_mm_h` | 50 (index units) / 50 ticks | 0.0342 mm/h | value | The old draw was **2352 mm a year** over the trunk column — three times the top of the published range for an open-grown deciduous tree, and the largest single unit error the audit found. 0.0342 mm/h is 300 mm a year, the bottom of that range, chosen low because the draw is charged to one column while a mature crown covers nine (`UNITS.md` finding 3). **(B)**, R8. |
+| `tree.dry_moisture` → `tree.dry_fraction` | 30 (of 255) | 0.12 | unit only | 30/255 = 0.1176, rounded. Drought now means "below 12% of available water capacity", which is inside the published severe-stress band of 10–20% (R9). **(C)**. |
+| `fire.base_rate` | 0.002 per fire update | 0.8 per patch per year | unit only | 400 fire updates a year. **Not retuned**: the operator's note of 2026-09-20 02:36 asks for the resulting ignition count to be reported, not fixed. `sweeps/shotG4b/FINDINGS.md` has it before and after; backlog row G4d is where the direction question lives. |
+
+**What moved in the reference runs** is in `sweeps/shotG4b/FINDINGS.md` in full, including the
+per-species event-cause breakdown the reporting rule asks for. The short version, on the 256 × 64 strip
+at seeds 1, 2, 3 and 42: rain falls from about 4000 to 774–816 mm a year, storms from ~2100 to ~650 in
+a run, soil water settles at 84–107 mm of the soil's 150 mm available capacity instead of sitting near
+saturation, trees reach 852 with 478 mature at 2.5 years on seed 42 (the check needs 35), and all four
+seeds pass `ecosim check` on all 12 short invariants including the new `moisture_band`. The thinnest
+margin in the set is seed 1's `mature_trees_10k` at +0.0857 (38 mature against 35), which is named in
+FINDINGS as the number to watch.
+
+**Two test-local forcings moved, and no default moved with them.** Both are `--set` values inside
+forced-extinction tests, whose job is to prove that a mechanism taken to an extreme kills a population
+without panicking:
+
+| Test | Forcing | Before | After | Why |
+|---|---|---|---|---|
+| `forced_grazer_extinction_on_the_strip_runs_to_the_end` | `grazer.energy_cost` | 2.0 | 3.5 | At 2.0 the strip's grazers now survive the run (75 left at tick 20000) because the corrected rain grows more grass. 3.0 kills the hunters first and leaves the last grazers to die of old age, which is not what the test is named for; 3.5 starves them out at tick 116, which is. |
+| `forced_fire_extinction_runs_to_the_end_and_is_attributed_to_fire` | `fire.base_rate` | 20 | 8000 | The same rate in the new unit: 20 per 10-tick update is 8000 a year. At 20 per year the per-update probability is 0.05 and nothing burns. The assertions (both animal species extinct, `total_burnt` > 1000 — measured 27870) are unchanged. |
+
+The six forced-extinction tests also moved world, from `common::SQUARE` to the new `common::SMALL`
+(the same 64-world at the default rain gradient instead of flat). That is not a tuning change — no
+parameter's default moved — but it is the reason four of them went red mid-shot, and
+`DECISIONS.md` has why a flat, evenly watered world cannot keep a tree at 800 mm of rain a year.

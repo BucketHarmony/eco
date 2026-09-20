@@ -61,9 +61,9 @@ the largest single finding of the audit; see section 7.
 | section | keys | what it holds | status |
 |---|---|---|---|
 | `[world]` | 13 | world geometry, in metres and columns | 11 unchanged, 2 dimensionless |
-| `[climate]` | 14 | season, the legacy moisture model, decay | 3 converted, 4 unchanged, 7 deferred |
+| `[climate]` | 14 | season, the legacy moisture model, decay | 1 converted, 4 unchanged, 5 dimensionless, 4 deferred |
 | `[rain]` | 2 | storm frequency and size | 2 converted |
-| `[hydro]` | 6 | the water tier's rates and stores | 2 converted, 4 unchanged |
+| `[hydro]` | 6 | the water tier's rates and stores | 3 converted, 1 unchanged, 2 dimensionless |
 | `[medium.*]` | 9 x 4 | infiltration, AWC, percolation, plantability per medium | 27 unchanged, 9 dimensionless |
 | `[season]` | 1 | temperature amplitude, °C | unchanged |
 | `[cover]` | 7 | ground-cover water, litter and fertility | 1 converted, 4 dimensionless, 2 deferred |
@@ -114,7 +114,7 @@ Smaller storms also shed less runoff, which matters on a site that is a third pa
 | `hydro.evap_mm_h` | 0.05 | mm/h from ponded water | same | 0.08 | R5 | converted |
 | `hydro.initial_fill` | 0.5 | fraction of AWC at tick 0 | same | 0.5 | model | dimensionless |
 | `hydro.saturation` | 1.2 | multiple of AWC the store holds | same | 1.2 | model | unchanged |
-| `hydro.leach_k` | 0.0002 | fertility fraction lost per mm drained | — | 0.0002 | model | deferred (with fertility) |
+| `hydro.leach_k` | 0.0002 | fertility fraction lost per mm drained | same | 0.0008 | R13 | converted |
 | `hydro.enabled` | true | switch | — | — | — | dimensionless |
 | `medium.*.infiltration_mm_h` | 0–60 | mm/h | mm/h | unchanged | R6 | unchanged |
 | `medium.*.field_capacity_mm` | 0–200 | mm — **is AWC of the rooting zone** | mm of AWC | unchanged | R7 | unchanged |
@@ -253,15 +253,29 @@ leaf area index (R10), and the fixed sun is backlog row G9's business. Convertin
 converting all four curves, the sapling threshold and the building shade together, and it changes
 which columns germinate, so it is a subsystem on its own.
 
-**Nutrients (subsystem 5, not started).** `cover.fertility_draw` = 20, `cover.fertility_full` = 64,
-`cover.litter_factor` = 20, `climate.decay_k` = 0.015 per soil update, `climate.initial_fertility` =
-128, `hydro.leach_k`, `fire.ash`, `fire.detritus_yield`, `fire.detritus_weight`, `tree.death_detritus`,
-`grazer.corpse_detritus`, `hunter.corpse_detritus`, and the `Patch::detritus` pool itself. All on
-the 0–255 fertility index or the arbitrary detritus scale. Shot **G5 replaces this field outright**
-with nitrogen, phosphorus and potassium, so converting it here would be converting a quantity that
-is about to be deleted; `decay_k` is the one row worth naming, because 0.015 per soil update is a
-turnover of about 2 months against a published litter turnover of 1–3 years (R11) — a 10x
-discrepancy handed on with the rest.
+**Nutrients (subsystem 5, mostly deferred).** `cover.fertility_draw` = 20,
+`cover.fertility_full` = 64, `cover.litter_factor` = 20, `climate.initial_fertility` = 128,
+`fire.ash`, `fire.detritus_yield`, `fire.detritus_weight`, `tree.death_detritus`,
+`grazer.corpse_detritus`, `hunter.corpse_detritus` and the `Patch::detritus` pool itself stay on
+the 0–255 fertility index or the arbitrary detritus scale. Shot **G5 replaces this field
+outright** with nitrogen, phosphorus and potassium, so converting the index here would be
+converting a quantity that is about to be deleted.
+
+The two rates that read a clock or a water flow were converted anyway, because leaving them on
+the old cadence would contradict section 2: a rate is per hour or per year whatever index it
+acts on.
+
+- `climate.decay_k`: 0.015 per soil update becomes **6.0 per year**, the same behaviour written
+  in the declared unit. The value is deliberately not touched, so the audit finding stands: 6.0 a
+  year is a litter turnover of about 2 months against a published 1–3 years (R11), a 10x error
+  handed to G5 with the field it acts on.
+- `hydro.leach_k`: 0.0002 becomes **0.0008** per millimetre drained, and this one is a value
+  change, because the old value was set against the pre-G4b rain of 4000 mm a year. It is the
+  mobile share of a soil nutrient pool divided by the rooting zone's water capacity, and at the
+  site's ~320 mm of annual drainage it leaches 26% of a column's fertility a year — inside
+  the published 15–40% for nitrate loss from a humid temperate soil (R13). Left at 0.0002 the
+  50-year run's fertility climbs out of `check`'s band on the high side
+  (`sweeps/shotG4b/FINDINGS.md`).
 
 **Lifespans and phenology (subsystem 7, not started).** `tree.initial_age` = 500, `young_age` = 500,
 `mature_age` = 1000, `max_age` = 6000, `seed_every` = 200, `bundle.tree_tall_age` = 3000 — all tick
@@ -385,3 +399,5 @@ during the shot. One significant figure is all any of them should be trusted to.
   **1.2–2.3 yr**.
 - **R12** Street and park broadleaf (maple, oak): about **3 m at 5–8 yr**, **10 m at 20 yr**,
   **20 m at 40–60 yr**; lifespan **60–150 yr** in an open urban setting.
+- **R13** Nitrate leaching from a humid temperate soil under vegetation: **15–40%** of the
+  mineral pool a year, higher under bare or fertilised ground.

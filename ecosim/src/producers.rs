@@ -23,8 +23,9 @@ pub fn suitability(c: &Curve, v: f32) -> f32 {
 pub struct PatchEnv {
     /// Mean surface light, 0–255.
     pub light: f32,
-    /// Mean surface moisture, 0–255.
-    pub moisture: f32,
+    /// Mean soil water, as a fraction of available water capacity: 0 at the wilting point, 1 at
+    /// field capacity (shot G4b; it was the 0–255 moisture index).
+    pub water: f32,
     /// Mean surface fertility, 0–255.
     pub fertility: f32,
     /// Patch temperature, °C.
@@ -36,40 +37,52 @@ impl Sim {
     pub fn patch_env(&self, p: usize) -> PatchEnv {
         let cols = &self.world.patch_soil[p];
         let n = cols.len().max(1) as f32;
-        let (mut l, mut m, mut f) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut m, mut l, mut f) = (0.0f32, 0.0f32, 0.0f32);
         for &c in cols {
             l += self.world.surface_light(c) as f32;
-            m += self.moisture[c];
+            m += self.water_fraction(c);
             f += self.fertility[c];
         }
-        PatchEnv { light: l / n, moisture: m / n, fertility: f / n, temperature: self.patches[p].temperature }
+        PatchEnv { light: l / n, water: m / n, fertility: f / n, temperature: self.patches[p].temperature }
     }
 
-    /// Mean surface moisture of a patch's soil columns.
+    /// Mean surface moisture of a patch's soil columns, on the 0–255 index. Fire and the producers
+    /// read [`Sim::patch_water_fraction`] instead; this is what the decay rate, still in its pre-G4
+    /// units, uses (UNITS.md "Deferred to shot G4c").
     pub fn patch_moisture(&self, p: usize) -> f32 {
         let cols = &self.world.patch_soil[p];
         cols.iter().map(|&c| self.moisture[c]).sum::<f32>() / cols.len().max(1) as f32
     }
 
-    /// Unsuppressed, un-limited growth rate factor r·f_L·f_M·f_T·f_F for one species.
+    /// Mean soil water of a patch's soil columns, as a fraction of available water capacity.
+    pub fn patch_water_fraction(&self, p: usize) -> f32 {
+        let cols = &self.world.patch_soil[p];
+        cols.iter().map(|&c| self.water_fraction(c)).sum::<f32>() / cols.len().max(1) as f32
+    }
+
+    /// Unsuppressed, un-limited growth rate factor r·f_L·f_M·f_T·f_F for one species, per year.
     fn growth_factor(&self, sp: &CoverSpecies, env: &PatchEnv) -> f32 {
         let f_f = (env.fertility / self.params.cover.fertility_full).clamp(0.0, 1.0);
         sp.r * suitability(&sp.light, env.light)
-            * suitability(&sp.moisture, env.moisture)
+            * suitability(&sp.moisture, env.water)
             * suitability(&sp.temp, env.temperature)
             * f_f
     }
 
-    /// Producer update for patches with `p % 10 == tick % 10`.
+    /// Producer update for the patches whose turn it is: `p % cover_every == tick % cover_every`, so
+    /// every patch is updated once per `schedule.cover_every` ticks.
     pub fn update_producers(&mut self, tick: u32) {
+        let every = self.params.schedule.cover_every.max(1);
         for p in 0..self.world.dims.patches() {
-            if p as u32 % 10 == tick % 10 {
+            if p as u32 % every == tick % every {
                 self.update_patch_cover(p);
             }
         }
     }
 
-    /// Grass and shrub density update for one patch: growth, mortality, litter, soil draw and shrub spread.
+    /// Grass and shrub density update for one patch: growth, mortality, litter, soil draw and shrub
+    /// spread. The species' `r` and `g` are per year, charged over the `schedule.cover_every` ticks
+    /// since this patch's last update (shot G4b).
     pub fn update_patch_cover(&mut self, p: usize) {
         let n_soil = self.world.patch_soil[p].len();
         if n_soil == 0 {
@@ -81,11 +94,12 @@ impl Sim {
         let cp = self.params.cover.clone();
         let (grass, shrub) = (self.patches[p].grass, self.patches[p].shrub);
 
+        let dt = crate::hydro::years(&self.params, self.params.schedule.cover_every.max(1)) as f32;
         let s = (1.0 - cp.grass_suppression * shrub).max(0.0);
-        let gg = self.params.grass.g;
-        let gs = self.params.shrub.g;
-        let dg = self.growth_factor(&self.params.grass, &env) * (1.0 - grass) * s - gg * grass;
-        let ds = self.growth_factor(&self.params.shrub, &env) * (1.0 - shrub) - gs * shrub;
+        let gg = self.params.grass.g * dt;
+        let gs = self.params.shrub.g * dt;
+        let dg = self.growth_factor(&self.params.grass, &env) * dt * (1.0 - grass) * s - gg * grass;
+        let ds = self.growth_factor(&self.params.shrub, &env) * dt * (1.0 - shrub) - gs * shrub;
 
         let litter = cp.litter_factor * (gg * grass + gs * shrub) * n_soil as f32;
         self.patches[p].detritus += litter;
@@ -94,10 +108,10 @@ impl Sim {
 
         let growth = dg.max(0.0) + ds.max(0.0);
         if growth > 0.0 {
-            let (dm, df) = (cp.moisture_draw * growth, cp.fertility_draw * growth);
+            let (dm, df) = (cp.water_per_growth_mm * growth, cp.fertility_draw * growth);
             for i in 0..n_soil {
                 let c = self.world.patch_soil[p][i];
-                self.draw_moisture(c, dm);
+                self.draw_water_mm(c, dm);
                 self.fertility[c] = (self.fertility[c] - df).max(0.0);
             }
         }

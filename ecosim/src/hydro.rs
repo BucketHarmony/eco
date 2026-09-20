@@ -22,9 +22,20 @@ use crate::world::{ColClass, World};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-/// Hours in one tick: a year is 8766 hours and `climate.year_len` ticks long.
+/// Hours in a year, the one place a tick's length in physical time comes from (shot G4b). A tick is
+/// `HOURS_PER_YEAR / climate.year_len` hours, so at the default 4000 ticks a year it is 2.1915 h and
+/// a 20000-tick run is five years. Every rate in `params.toml` is per hour or per year and is turned
+/// into a per-update amount through [`tick_hours`] or [`years`]; nothing is per tick.
+pub const HOURS_PER_YEAR: f64 = 8766.0;
+
+/// How many years `ticks` ticks are.
+pub fn years(p: &Params, ticks: u32) -> f64 {
+    ticks as f64 / p.climate.year_len.max(1) as f64
+}
+
+/// Hours in one tick.
 pub fn tick_hours(p: &Params) -> f64 {
-    8766.0 / p.climate.year_len.max(1) as f64
+    HOURS_PER_YEAR * years(p, 1)
 }
 
 /// A receiver that carries water out of the world (the edge, or a cell of open water).
@@ -349,15 +360,31 @@ impl Sim {
         }
     }
 
-    /// Take `units` of the 0–255 moisture scale out of a column, as a plant does when it grows.
-    /// With the water tier on this is soil water leaving as transpiration, charged to the ledger;
-    /// without it, it is the old subtraction from the moisture field.
-    pub fn draw_moisture(&mut self, c: usize, units: f32) {
+    /// How wet a column is, as a fraction of its available water capacity: 0 at the wilting point
+    /// and 1 at field capacity, and above 1 while it is draining. Every plant's moisture curve is
+    /// read on this scale (shot G4b). With the water tier off there is no store, so the pre-G4
+    /// index is reported on the same scale.
+    pub fn water_fraction(&self, c: usize) -> f32 {
+        match &self.hydro {
+            Some(h) if h.capacity[c] > 0.0 => (h.soil[c] / h.capacity[c]) as f32,
+            Some(_) => 0.0,
+            None => self.moisture[c] / 255.0,
+        }
+    }
+
+    /// Take `mm` millimetres of water out of a column, as a plant does when it transpires. With the
+    /// water tier on this is soil water leaving, charged to the ledger. With it off there is no
+    /// store to take from, so the demand is converted to the pre-G4 index at the soil medium's
+    /// capacity, which is the bed the index was calibrated on (shot G4b; the pre-G4 moisture model
+    /// itself is left in its old units, UNITS.md "Deferred to shot G4c").
+    pub fn draw_water_mm(&mut self, c: usize, mm: f32) {
         match &mut self.hydro {
-            None => self.moisture[c] = (self.moisture[c] - units).max(0.0),
+            None => {
+                let cap = self.params.medium.soil.field_capacity_mm.max(f32::MIN_POSITIVE);
+                self.moisture[c] = (self.moisture[c] - 255.0 * mm / cap).max(0.0)
+            }
             Some(h) => {
-                let mm = units as f64 * h.capacity[c] / 255.0;
-                let taken = h.soil[c].min(mm);
+                let taken = h.soil[c].min(mm as f64).max(0.0);
                 h.soil[c] -= taken;
                 h.ledger.et += taken;
                 self.derive_moisture(c);
@@ -378,9 +405,11 @@ impl Sim {
         }
     }
 
-    /// One tick of rain: with probability `rain.storm_p × the season's rain factor` a storm starts,
-    /// its depth drawn exponentially with mean `rain.storm_mean_mm`, and the whole depth falls and
-    /// routes in this tick. Exactly one draw on a dry tick and two on a wet one.
+    /// One tick of rain: `rain.annual_mm` millimetres fall a year in storms of mean depth
+    /// `rain.storm_mean_mm`, so a storm starts with probability
+    /// `annual_mm / (year_len × storm_mean_mm) × the season's rain factor` (that factor averages 1
+    /// over a year), its depth is drawn exponentially, and the whole depth falls and routes in this
+    /// tick. Exactly one draw on a dry tick and two on a wet one.
     pub fn storm(&mut self, tick: u32) {
         self.hydro.as_mut().expect("storm needs the water tier").water = Water::default();
         let rp = self.params.rain.clone();
@@ -389,7 +418,8 @@ impl Sim {
         } else {
             0.0
         };
-        let p = (rp.storm_p as f64 * season as f64).clamp(0.0, 1.0);
+        let per_year = (self.params.climate.year_len.max(1) as f64 * rp.storm_mean_mm as f64).max(f64::MIN_POSITIVE);
+        let p = (rp.annual_mm as f64 / per_year * season as f64).clamp(0.0, 1.0);
         let u: f64 = rand::Rng::gen(&mut self.rng);
         if u >= p {
             let h = self.hydro.as_mut().expect("water tier");

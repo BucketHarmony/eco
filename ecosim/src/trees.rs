@@ -30,7 +30,7 @@ pub struct Tree {
     pub y: u8,
     /// Age in ticks.
     pub age: u32,
-    /// Consecutive ticks spent below `dry_moisture`.
+    /// Consecutive ticks spent below `tree.dry_fraction` of available water capacity.
     pub dry_ticks: u32,
     /// Age at which it dies, drawn at planting.
     pub lifespan: u32,
@@ -206,7 +206,7 @@ impl Sim {
         let c = self.world.dims.cidx(x, y);
         let tp = &self.params.tree;
         suitability(&self.params.tree_light_curve(), self.world.surface_light(c) as f32)
-            * suitability(&tp.moisture, self.moisture[c])
+            * suitability(&tp.moisture, self.water_fraction(c))
             * suitability(&tp.temp, self.patches[self.world.dims.patch_of(x, y)].temperature)
     }
 
@@ -237,8 +237,10 @@ impl Sim {
             let before = self.tree_stage(&self.trees[i]);
             let c = self.trees[i].col(self.world.dims);
             self.trees[i].age += tp.update_every;
-            self.draw_moisture(c, tp.moisture_draw);
-            if self.moisture[c] < tp.dry_moisture {
+            // Transpiration over the update's length, in mm (shot G4b).
+            let hours = tp.update_every as f64 * crate::hydro::tick_hours(&self.params);
+            self.draw_water_mm(c, (tp.transpiration_mm_h as f64 * hours) as f32);
+            if self.water_fraction(c) < tp.dry_fraction {
                 self.trees[i].dry_ticks += tp.update_every;
             } else {
                 self.trees[i].dry_ticks = 0;

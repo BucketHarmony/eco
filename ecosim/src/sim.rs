@@ -376,11 +376,11 @@ impl Sim {
         if self.params.hydro.enabled {
             self.storm(t);
         }
-        if t.is_multiple_of(10) {
+        if t.is_multiple_of(self.params.schedule.soil_every.max(1)) {
             self.update_soil(t);
         }
         lap(&mut prof, Phase::MoistureFertility);
-        if t.is_multiple_of(100) {
+        if t.is_multiple_of(self.params.schedule.temperature_every.max(1)) {
             self.update_temperature(t);
         }
         lap(&mut prof, Phase::TemperatureSeason);

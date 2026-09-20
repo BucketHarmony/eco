@@ -11,6 +11,20 @@ pub fn square_set(extra: &[&str]) -> Vec<String> {
     SQUARE.iter().chain(extra).map(|s| s.to_string()).collect()
 }
 
+/// The cheap world for behavioural tests (shot G4b): the 64x64x32 world at the default west-east
+/// rain gradient. It is [`SQUARE`] plus the gradient, and the gradient is the difference that
+/// matters: at the corrected 800 mm a year, a flat world watered evenly no longer keeps a tree
+/// alive, because a tree column is charged its own transpiration on top of its patch's
+/// evapotranspiration (`sweeps/shotG4b/FINDINGS.md`). A forced-extinction test has to force one
+/// mechanism in a world that is otherwise healthy, so those tests run here and only the byte
+/// fixtures stay on [`SQUARE`].
+pub const SMALL: [&str; 2] = ["world.width=64", "world.slope_bias=0"];
+
+/// [`SMALL`] followed by `extra`, as `--set` strings.
+pub fn small_set(extra: &[&str]) -> Vec<String> {
+    SMALL.iter().chain(extra).map(|s| s.to_string()).collect()
+}
+
 /// The crate's `params.toml` on the square world.
 pub fn square() -> ecosim::Params {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml");

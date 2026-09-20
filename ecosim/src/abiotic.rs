@@ -60,7 +60,7 @@ impl Sim {
         }
     }
 
-    /// The every-10-ticks soil update. With the water tier on (shot G4) the water half is
+    /// The soil update, every `schedule.soil_every` ticks. With the water tier on (shot G4) the water half is
     /// [`Sim::settle_water`] — ponded water soaking in and evaporating, percolation and ET — and
     /// the moisture field is derived from what is left; with it off, the pre-G4 steps 1–5 run
     /// instead (rain, diffusion, evaporation, pond wetting, clamp). Detritus decay and the
@@ -69,7 +69,8 @@ impl Sim {
         let d = self.world.dims;
         let soil: Vec<usize> = (0..d.cols()).filter(|&c| self.world.class[c] == ColClass::Soil).collect();
         if self.hydro.is_some() {
-            let drained = self.settle_water(10.0 * crate::hydro::tick_hours(&self.params));
+            let hours = self.params.schedule.soil_every.max(1) as f64 * crate::hydro::tick_hours(&self.params);
+            let drained = self.settle_water(hours);
             self.decay_detritus(&soil, &drained);
             return;
         }
@@ -123,7 +124,9 @@ impl Sim {
             }
             let m = self.patch_moisture(p);
             let t = self.patches[p].temperature;
-            let rate = cl.decay_k * (t / cl.decay_temp_full).clamp(0.0, 1.0) * m / 255.0;
+            // decay_k is per year, charged over this update's own length (shot G4b).
+            let dt = crate::hydro::years(&self.params, self.params.schedule.soil_every.max(1)) as f32;
+            let rate = cl.decay_k * dt * (t / cl.decay_temp_full).clamp(0.0, 1.0) * m / 255.0;
             let converted = self.patches[p].detritus * rate;
             self.patches[p].detritus -= converted;
             let per = converted / n as f32;

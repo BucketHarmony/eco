@@ -315,6 +315,9 @@ mod tests {
     /// Knobs that make every death cause, fire and immigration happen within a few hundred ticks.
     #[derive(Debug, Clone)]
     struct Busy {
+        /// Ignitions per patch per year (shot G4b). A fire update is `schedule.fire_every` of
+        /// `climate.year_len` ticks, so the 400 updates a year of the shipped cadence divide this
+        /// down: 200 a year is the 0.5 per update these runs used before the units conversion.
         fire_rate: f32,
         spread: f32,
         grazer_cost: f32,
@@ -387,7 +390,7 @@ mod tests {
 
     fn busy() -> impl Strategy<Value = Busy> {
         let costs = (0.05f32..1.5, 20u32..3000, 0.02f32..1.5, 20u32..3000);
-        (0.0f32..2.0, 0.0f32..2.0, costs, 0.0f64..=1.0, 0.0f32..0.2, 0u32..400).prop_map(
+        (0.0f32..800.0, 0.0f32..2.0, costs, 0.0f64..=1.0, 0.0f32..0.2, 0u32..400).prop_map(
             |(
                 fire_rate,
                 spread,
@@ -429,7 +432,7 @@ mod tests {
     }
 
     const EVERYTHING: Busy = Busy {
-        fire_rate: 0.5,
+        fire_rate: 200.0,
         spread: 0.3,
         grazer_cost: 0.6,
         grazer_max_age: 400,
@@ -516,7 +519,8 @@ mod tests {
     #[test]
     fn storm_rows_carry_their_depth_runoff_and_outflow() {
         let mut p = Params::load_square();
-        p.rain.storm_p = 0.5;
+        // Half the ticks rain: the per-tick storm chance is annual_mm / (year_len * storm_mean_mm).
+        p.rain.annual_mm = 0.5 * p.climate.year_len as f32 * p.rain.storm_mean_mm;
         let dir = scratch_dir();
         run(p, 3, 200, 100, &[], &dir).unwrap();
         let events = parse_events(&fs::read_to_string(dir.join(EVENTS_FILE)).unwrap()).unwrap();

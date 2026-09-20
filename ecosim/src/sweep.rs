@@ -7,7 +7,7 @@
 
 use crate::check::{
     evaluate, extinctions, grazer_maxima, parse_series, signature, CheckReport, Series, Signature, Timing,
-    INVARIANT_KEYS, WINDOW_START,
+    ticks_in, INVARIANT_KEYS, WINDOW_YEARS,
 };
 use crate::output::{series_csv, simulate};
 use crate::params::Params;
@@ -151,9 +151,10 @@ pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) 
     let year_len = params.climate.year_len;
     let animals = params.animals.enabled;
     let mut sim = Sim::new(params, seed);
+    let sample = ticks_in(crate::check::SAMPLE_YEARS, year_len);
     let mut mature = None;
     let rows = simulate(&mut sim, ticks, |s| {
-        if s.tick == 10_000 {
+        if s.tick == sample {
             mature = Some(s.trees.iter().filter(|t| t.alive && s.tree_stage(t) == Stage::Mature).count());
         }
         Ok(())
@@ -163,7 +164,7 @@ pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) 
     // Evaluate the parsed CSV, not the in-memory floats, so results match `check` on a run directory.
     let rows = parse_series(&csv)?;
     let last = rows.len() - 1;
-    let grazer_peaks = grazer_maxima(&rows, (WINDOW_START as usize).min(last), last).len();
+    let grazer_peaks = grazer_maxima(&rows, (ticks_in(WINDOW_YEARS, year_len) as usize).min(last), last).len();
     let ext = extinctions(&rows, animals);
     let first_extinction = ext.first().map(|e| e.tick);
     let first_extinction_species =
@@ -172,7 +173,8 @@ pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) 
     let hunter_extinction = rows.iter().find(|r| r.hunters == 0).map(|r| r.tick);
     let hunter_immigrants = rows[last].hunter_immigrants;
     let signature = signature(&rows, year_len, animals);
-    let report = evaluate(&Series { rows, mature_at_10000: mature.map(Ok), timing: Timing::Excluded, animals })?;
+    let report =
+        evaluate(&Series { rows, mature_at_10000: mature.map(Ok), timing: Timing::Excluded, animals, year_len })?;
     Ok(CellResult {
         csv,
         report,

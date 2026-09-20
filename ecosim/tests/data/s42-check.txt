@@ -1,9 +1,10 @@
-PASS no species reaches 0: min grazers=2740 min hunters=34 min trees=73
-PASS no species exceeds 10x its anchor count (animals: tick 2000, trees: tick 5000): grazers max=3385 limit=31580 hunters max=124 limit=340 trees max=1573 limit=4380
-PASS grazer cycle (2 maxima >= 1500 ticks apart): 13 maxima at [2738, 4577, 6007, 7889, 9350, 10469, 11900, 13115, 14804, 15503, 17115, 17963, 19901], span 17163
-PASS fertility_mean in [40, 220]: [47.62, 96.20]
-PASS grass_mean in [0.05, 0.95]: [0.2868, 0.8915]
-PASS trees at end >= 1.5x trees at tick 0: 1414 vs 12 (need 18.0)
-PASS run time < 30 s per 64x64, at most 90 s: 51749 ms
-PASS mature trees at tick 10000 >= 35: 371
-PASS at tick 10000 grazers >= 10 and hunters >= 2: grazers=2851 hunters=101
+PASS no species reaches 0: min grazers=2676 min hunters=34 min trees=41
+PASS no species exceeds 10x its anchor count (animals: 0.5 years, trees: 1.25 years): grazers max=3446 limit=31640 hunters max=112 limit=340 trees max=1065 limit=1480
+PASS grazer cycle (2 maxima >= 1500 ticks apart): 14 maxima at [2871, 5094, 5748, 6872, 7660, 8866, 10551, 11921, 12506, 13063, 14100, 17780, 17783, 19736], span 16865
+PASS moisture_mean above the wilting point every tick, below field capacity on >= 95% of them: min 46.53 of 255, below capacity on 99.92% of ticks
+PASS fertility_mean in [40, 220]: [67.05, 114.07]
+PASS grass_mean in [0.05, 0.95]: [0.3027, 0.8822]
+PASS trees at end >= 1.5x trees at tick 0: 793 vs 12 (need 18.0)
+FAIL run time < 30 s per 64x64, at most 90 s: 4758668 ms
+PASS mature trees at 2.5 years >= 35: 413
+PASS at 2.5 years grazers >= 10 and hunters >= 2: grazers=3004 hunters=82

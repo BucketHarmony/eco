@@ -50,7 +50,17 @@ fn fresh_s42() -> &'static Path {
 fn evaluate_matches_committed_s42_check_output() {
     let series = Series::from_run_dir(fresh_s42()).unwrap();
     let report = evaluate(&series).unwrap();
-    let golden = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/s42-check.txt")).unwrap();
+    if regenerating() {
+        let text: String = report
+            .lines
+            .iter()
+            .map(|l| format!("{} {}: {}
+", if l.pass { "PASS" } else { "FAIL" }, l.name, l.observed))
+            .collect();
+        fs::write(data_path("s42-check.txt"), text).unwrap();
+        return;
+    }
+    let golden = fs::read_to_string(data_path("s42-check.txt")).unwrap();
     let golden: Vec<&str> = golden.lines().collect();
     assert_eq!(golden.len(), report.lines.len());
     for (g, l) in golden.iter().zip(&report.lines) {
@@ -104,6 +114,30 @@ fn without_events(mut got: BTreeMap<String, String>) -> BTreeMap<String, String>
     got
 }
 
+/// True with `ECOSIM_REGEN_MANIFEST=1` in the environment: the committed manifests and the golden
+/// `check` output are rewritten from the fresh runs instead of asserted. It is for the one commit a
+/// shot that changes behaviour on purpose re-cuts them in, and nothing sets it in CI (shot G4b, which
+/// converted every rate to per hour or per year, was the first shot to use it; DECISIONS.md, "Units
+/// calibration").
+fn regenerating() -> bool {
+    std::env::var_os("ECOSIM_REGEN_MANIFEST").is_some()
+}
+
+fn data_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(name)
+}
+
+/// `got` equals the committed manifest `name`, or, when [`regenerating`], replaces it.
+fn assert_manifest(name: &str, got: &BTreeMap<String, String>) {
+    if regenerating() {
+        let text: String = got.iter().map(|(path, hash)| format!("{hash}  {path}
+")).collect();
+        fs::write(data_path(name), text).unwrap();
+        return;
+    }
+    assert_same_manifest(&read_manifest(name), got);
+}
+
 fn assert_same_manifest(want: &BTreeMap<String, String>, got: &BTreeMap<String, String>) {
     let differing: Vec<&String> = want.keys().chain(got.keys()).filter(|k| want.get(*k) != got.get(*k)).collect();
     assert!(
@@ -116,19 +150,20 @@ fn assert_same_manifest(want: &BTreeMap<String, String>, got: &BTreeMap<String, 
 
 /// A fresh seed-42 run hashes to `tests/data/s42-manifest.sha256` (series.csv plus every snapshot
 /// file): the guard against unintended behaviour changes. A shot that changes behaviour on purpose
-/// regenerates the manifest and says so in DECISIONS.md.
+/// regenerates the manifest (`ECOSIM_REGEN_MANIFEST=1`) and says so in DECISIONS.md. Shot G4b did,
+/// for every manifest at once: converting a rate from per tick to per hour changes the numbers a run
+/// produces, so none of the pre-conversion manifests can be reproduced.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn fresh_s42_matches_committed_manifest() {
-    let want = read_manifest("s42-manifest.sha256");
     let got = hash_run(fresh_s42(), |_, b| b);
     // 10 files per snapshot since the water tier added water.bin and soil_water.bin (shot G4, which
     // also made every run format_version 4 and so gave it the four `world/` files); events.csv
     // since version 3.
     assert_eq!(got.len(), 2 + 201 * 10 + 4);
-    assert!(want.contains_key(EVENTS_FILE));
-    assert_eq!(want.keys().filter(|k| k.ends_with("/state.bin")).count(), 201);
-    assert_same_manifest(&want, &got);
+    assert!(got.contains_key(EVENTS_FILE));
+    assert_eq!(got.keys().filter(|k| k.ends_with("/state.bin")).count(), 201);
+    assert_manifest("s42-manifest.sha256", &got);
 }
 
 /// Shot 14b regenerated the manifest for events.csv only: every other line of the shot-14 manifest
@@ -139,6 +174,39 @@ fn manifest_regeneration_for_the_event_log_changed_no_existing_line() {
     let want = read_manifest("s42-64-manifest.sha256");
     assert_eq!(want.len(), 2 + 201 * 8);
     assert_same_manifest(&read_manifest("s42-manifest-preshot14a.sha256"), &without_events(want));
+}
+
+/// The pre-conversion identity chain, kept as history (shot G4b). Each of these manifests holds the
+/// bytes of a run made before the units conversion, and the four tests below used to reproduce one of
+/// them with the feature it predates switched off, which made each an identity with code that no
+/// longer exists. None of them can be reproduced now: a rate that was charged per tick and is now
+/// charged per hour lands a different amount in the same update, and the moisture a plant draws is
+/// millimetres of soil water rather than steps of an index. So the chain is retired rather than
+/// regenerated in place, and this test is what the retirement leaves: each `-g4b` cut covers the same
+/// files as the manifest it replaces, the world the seed makes at tick 0 is unchanged, and the run has
+/// moved by tick 20000.
+#[test]
+fn the_pre_conversion_manifests_are_kept_as_history() {
+    for (before, g4b) in [
+        ("s42-manifest-preG4.sha256", "s42-manifest-g4b-water-off.sha256"),
+        ("s42-manifest-preshot11.sha256", "s42-manifest-g4b-heredity-off.sha256"),
+        ("s42-manifest-preshot10.sha256", "s42-manifest-g4b-crowding-off.sha256"),
+        ("s42-manifest-prefire.sha256", "s42-manifest-g4b-fire-off.sha256"),
+        ("s42-64-manifest.sha256", "s42-manifest-g4b-64.sha256"),
+    ] {
+        let (a, b) = (read_manifest(before), read_manifest(g4b));
+        assert!(a.keys().all(|k| b.contains_key(k)), "{g4b} is missing files of {before}");
+        // The three manifests from before the event log have no `events.csv` line; the cuts do.
+        let extra: Vec<&String> = b.keys().filter(|k| !a.contains_key(*k)).collect();
+        assert!(extra.iter().all(|k| *k == EVENTS_FILE), "{g4b} adds {extra:?} to {before}");
+        for f in ["material.bin", "light.bin", "height.bin"] {
+            let k = format!("snap_000000/{f}");
+            assert_eq!(a[&k], b[&k], "{k}: the world at tick 0 moved between {before} and {g4b}");
+        }
+        assert_ne!(a["series.csv"], b["series.csv"], "{before} and {g4b} are the same series");
+        let k = "snap_020000/patches.json".to_string();
+        assert_ne!(a[&k], b[&k], "{k}: {before} and {g4b} end the same");
+    }
 }
 
 /// The seed-42 event log: its death rows equal the series death columns on every tick, so `stats`
@@ -165,28 +233,31 @@ fn s42_event_log_matches_the_series_and_stays_small() {
     }
 }
 
-/// 64-world identity (shot 15): the default params on the 64×64×32 world with patch 8, rain
-/// gradient 0 and slope bias 0 (`common::SQUARE`) hash to the shot-14 manifest byte for byte, so the
-/// world dimensions, the gradient and the slope change nothing there.
+/// The square world’s manifest: the default params on the 64×64×32 world with patch 8, rain gradient
+/// 0 and slope bias 0 (`common::SQUARE`), the world every fixture was made on. Until shot G4b this
+/// hashed to the shot-14 manifest, which was the claim that the strip’s dimensions, gradient and slope
+/// changed nothing on the 64 world; the units conversion ended that
+/// (`the_pre_conversion_manifests_are_kept_as_history`), and what is left is the byte pin for this
+/// world, shared with `old_hunting_economics_via_set_reproduce_the_square_manifest`.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
-fn square_world_reproduces_the_shot_14_manifest() {
+fn square_world_reproduces_its_manifest() {
     let dir = tmp("s42_square");
     let set = common::square_set(&["world.depth=64", "world.height=32", "world.patch=8", "hydro.enabled=false"]);
     run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
     let meta: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["dims"], serde_json::json!({"x": 64, "y": 64, "z": 32, "patch": 8}));
-    assert_same_manifest(&read_manifest("s42-64-manifest.sha256"), &hash_run(&dir, common::without_water));
+    assert_manifest("s42-manifest-g4b-64.sha256", &hash_run(&dir, common::without_water));
 }
 
-/// Identity case for food-limited hunters (shots 14a and 14a-rev): the pre-shot hunting economics
-/// set explicitly through `--set` (hunter crowding 0.001, kill_energy 40, hunt_cost 0, handling_ticks
-/// 0) reproduce the shot-14 manifest byte for byte on the square world, and the manifest as shot 14b
-/// left it (events.csv included). `hunt_cost` 0 charges nothing on a kill and leaves a miss at `fail_cost` alone;
-/// handling 0 never enters Handling and writes the version-3 `state.bin`.
+/// Identity case for food-limited hunters (shots 14a and 14a-rev): the pre-shot hunting economics set
+/// explicitly through `--set` (hunter crowding 0.001, kill_energy 40, hunt_cost 0, handling_ticks 0)
+/// reproduce the square world’s manifest byte for byte, which is the standing claim that they are what
+/// the defaults still do. `hunt_cost` 0 charges nothing on a kill and leaves a miss at `fail_cost`
+/// alone; handling 0 never enters Handling and writes the version-3 `state.bin`.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
-fn old_hunting_economics_via_set_reproduce_the_shot_14_manifest() {
+fn old_hunting_economics_via_set_reproduce_the_square_manifest() {
     let dir = tmp("s42_old_hunting");
     let set = common::square_set(&[
         "disease.hunter_rate=0.001",
@@ -198,8 +269,7 @@ fn old_hunting_economics_via_set_reproduce_the_shot_14_manifest() {
     run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
     let got = hash_run(&dir, common::without_water);
     assert_eq!(got.len(), 2 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-64-manifest.sha256"), &got);
-    assert_same_manifest(&read_manifest("s42-manifest-preshot14a.sha256"), &without_events(got));
+    assert_manifest("s42-manifest-g4b-64.sha256", &got);
 }
 
 /// Default params on the square world with shot 11 switched off: mutation 0 (the immigration floors
@@ -217,19 +287,20 @@ fn pre_g4() -> Params {
     p
 }
 
-/// Rate-0 identity for heredity and open boundaries: at mutation 0 and floors 0, seed 42 hashes to
-/// the manifest as it stood before shot 11 (`s42-manifest-preshot11.sha256`) once the trait columns,
-/// the `entities.json` trait fields and the `state.bin` traits section are cut
-/// (`common::without_traits`, which asserts every cut value is the species default). So at mutation
-/// 0 heredity draws nothing and changes nothing else in any of the 201 snapshots.
+/// Heredity at rate 0: at mutation 0 and floors 0, seed 42 hashes to its own manifest once the trait
+/// columns, the `entities.json` trait fields and the `state.bin` traits section are cut
+/// (`common::without_traits`, which asserts every cut value is the species default). The cut is the
+/// standing part of the claim — at mutation 0 heredity writes nothing but defaults — and until shot
+/// G4b the manifest was the one from before shot 11, which made it an identity with the code that
+/// predated the feature (`the_pre_conversion_manifests_are_kept_as_history`).
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
-fn heredity_off_reproduces_the_pre_shot_11_manifest() {
+fn heredity_off_cuts_to_its_manifest() {
     let dir = tmp("s42_heredity_off");
     run(pre_shot_11(), 42, 20_000, 100, &[], &dir).unwrap();
     let got = hash_run(&dir, |f, b| common::without_traits(f, common::without_water(f, b)));
     assert_eq!(got.len(), 2 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-manifest-preshot11.sha256"), &without_events(got));
+    assert_manifest("s42-manifest-g4b-heredity-off.sha256", &got);
 }
 
 /// Default params with shots 10 and 11 switched off: crowding rates 0, the hunter refractory at the
@@ -242,44 +313,47 @@ fn pre_shot_10() -> Params {
     p
 }
 
-/// Rate-0 identity for crowding mortality: with both crowding rates at 0 and the refractory at the
-/// old cooldown, seed 42 hashes to the manifest as it stood before shot 10
-/// (`s42-manifest-preshot10.sha256`) byte for byte once shot 11's trait additions are cut. Shot 10
-/// added no columns (`crowded` already existed): at rate 0 crowding draws nothing and writes nothing.
+/// Crowding mortality at rate 0: with both crowding rates at 0 and the refractory at the old cooldown,
+/// seed 42 hashes to its own manifest once shot 11's trait additions are cut. Shot 10 added no columns
+/// (`crowded` already existed), so at rate 0 crowding draws nothing and writes nothing; the manifest
+/// was the one from before shot 10 until shot G4b re-cut it
+/// (`the_pre_conversion_manifests_are_kept_as_history`).
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
-fn crowding_off_reproduces_the_pre_shot_10_manifest() {
+fn crowding_off_cuts_to_its_manifest() {
     let dir = tmp("s42_crowding_off");
     run(pre_shot_10(), 42, 20_000, 100, &[], &dir).unwrap();
     let got = hash_run(&dir, |f, b| common::without_traits(f, common::without_water(f, b)));
     assert_eq!(got.len(), 2 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-manifest-preshot10.sha256"), &without_events(got));
+    assert_manifest("s42-manifest-g4b-crowding-off.sha256", &got);
 }
 
-/// Rate-0 identity for fire: with `fire.base_rate=0` (and shots 10 and 11 switched off), seed 42
-/// hashes to the manifest as it stood before fire (`s42-manifest-prefire.sha256`, shot 8) once the
-/// trait additions and the fire columns, the `burning_ticks_left` patch field and the `state.bin` fire section are cut. So fire at
-/// rate 0 draws nothing and writes nothing: every other byte of all 201 snapshots is unchanged.
+/// Fire at rate 0: with `fire.base_rate=0` (and shots 10 and 11 switched off), seed 42 hashes to its
+/// own manifest once the trait additions and the fire columns, the `burning_ticks_left` patch field
+/// and the `state.bin` fire section are cut. So fire at rate 0 draws nothing and writes nothing but
+/// zeros; the manifest was the one from before fire (shot 8) until shot G4b re-cut it
+/// (`the_pre_conversion_manifests_are_kept_as_history`).
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
-fn fire_off_reproduces_the_pre_fire_manifest() {
+fn fire_off_cuts_to_its_manifest() {
     let dir = tmp("s42_fire_off");
     let mut p = pre_shot_10();
     p.fire.base_rate = 0.0;
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
     let got = hash_run(&dir, |f, b| common::without_fire(f, common::without_traits(f, common::without_water(f, b))));
     assert_eq!(got.len(), 2 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-manifest-prefire.sha256"), &without_events(got));
+    assert_manifest("s42-manifest-g4b-fire-off.sha256", &got);
 }
 
-/// Rate-0 identity for the water tier: with `hydro.enabled=false`, seed 42 on the reference strip
-/// hashes to the manifest as it stood before shot G4 (`s42-manifest-preG4.sha256`) once the six
-/// water columns are cut (`common::without_water`, which asserts every cut value is 0). So with the
-/// tier off the storm draws nothing, writes no field and adds no file: the run is the pre-G4 run,
-/// format_version 3 and all, byte for byte in all 201 snapshots.
+/// The water tier off: with `hydro.enabled=false`, seed 42 on the reference strip hashes to its own
+/// manifest once the six water columns are cut (`common::without_water`, which asserts every cut value
+/// is 0). So with the tier off the storm draws nothing, writes no field and adds no file, and the run
+/// is still `format_version` 3. Until shot G4b the manifest was the pre-G4 one, which made this an
+/// identity with the code that predated the tier (`the_pre_conversion_manifests_are_kept_as_history`);
+/// the converted plant draws speak in millimetres, which the pre-G4 moisture index cannot reproduce.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
-fn water_off_reproduces_the_pre_g4_manifest() {
+fn water_off_cuts_to_its_manifest() {
     let dir = tmp("s42_water_off");
     let mut p = Params::load_default();
     p.hydro.enabled = false;
@@ -289,7 +363,7 @@ fn water_off_reproduces_the_pre_g4_manifest() {
     assert!(!dir.join("world").exists(), "no world directory without the water tier");
     let got = hash_run(&dir, common::without_water);
     assert_eq!(got.len(), 2 + 201 * 8);
-    assert_same_manifest(&read_manifest("s42-manifest-preG4.sha256"), &got);
+    assert_manifest("s42-manifest-g4b-water-off.sha256", &got);
 }
 
 /// A 2-value × 1-seed × 500-tick sweep writes 2 rows and 2 cell CSVs, and each cell equals a

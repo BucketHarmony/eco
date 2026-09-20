@@ -66,6 +66,7 @@ Architecture points that span modules:
 npm run build
 npm test            # Vitest unit tests + Playwright page/pixel tests
 npm run shot        # vite preview + headless Chromium → 8 PNGs in shots/
+npm run preview:sim # preview + the dev-only sim helper: R runs ecosim on the bundle being edited
 npx vitest run <file-or-pattern>        # single unit test
 npx playwright test -g "<test name>"    # single Playwright test
 ```

@@ -2,14 +2,17 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
-  loadBundle, loadRun, loadSnapshot, pickSnapshot, speciesColor, type Grid, type Run, type Snapshot,
+  loadBundle, loadRun, loadSnapshot, pickSnapshot, speciesColor,
+  type Bundle, type Grid, type Run, type Snapshot,
 } from './loader';
 import { Buildings, GroundDrape, Pipes, World } from './world';
 import { Entities } from './entities';
-import { Editor, type EditorHost } from './edit';
+import { Editor, bundleFiles, type EditorHost } from './edit';
+import { SimRunner, type SimFiles } from './sim';
 import {
-  drawChart, drawEditPanel, drawLegend, getControls, initControls, parseParams, parseWorldParams,
-  prepareWorldSidebar, stepNote, syncControls, toSearch, worldSearch, type Cam, type ViewState, type WorldState,
+  drawChart, drawEditPanel, drawLegend, drawSimLine, getControls, initControls, parseParams, parseWorldParams,
+  prepareRunSidebar, prepareWorldSidebar, stepNote, syncControls, toSearch, worldSearch,
+  type Cam, type ViewState, type WorldState,
 } from './ui';
 
 declare global {
@@ -251,6 +254,13 @@ const host: EditorHost = {
   },
 };
 
+/** The status line of a bundle page: what was loaded, and how big it is in both grids. */
+function worldStatus(b: Bundle, s: WorldState): string {
+  const w = b.world;
+  return `${s.world} · ${b.json.name} · ${b.grid.x}×${b.grid.y} m over ${w.gw}×${w.gd} ground cells`
+    + ` at ${w.cell} m · ${b.trees.length} trees, ${b.shrubs.length} shrubs, ${w.pipes.length} pipes`;
+}
+
 async function applyWorld(s: WorldState): Promise<void> {
   window.__ecoviewReady = false;
   try {
@@ -268,10 +278,9 @@ async function applyWorld(s: WorldState): Promise<void> {
     editor.setLit(s.eye !== null || s.cam !== 'top');
     if (s.eye) editor.setEye(...s.eye);
     drawLegend(ui.legend, 'medium', bundle.world.meta.media);
-    const w = bundle.world;
-    ui.status.textContent = `${s.world} · ${bundle.json.name} · ${g.x}×${g.y} m over ${w.gw}×${w.gd} ground cells`
-      + ` at ${w.cell} m · ${bundle.trees.length} trees, ${bundle.shrubs.length} shrubs, ${w.pipes.length} pipes`;
+    ui.status.textContent = worldStatus(bundle, s);
     ui.status.classList.remove('error');
+    drawSimLine(ui, sim.view);
     editor.refresh();
     requestAnimationFrame(() => {
       window.__ecoviewReady = true;
@@ -291,6 +300,79 @@ function setWorldCam(cam: Cam): void {
   editor.setLit(cam !== 'top');
   editor.refresh();
 }
+
+// ---- running the simulator on the bundle on screen (shot E4) ----
+
+/**
+ * Which of the two views a world page is showing: the bundle it is editing, or a run the sim helper made
+ * from it. A page opened with `?run=` is always `run` and never leaves it.
+ */
+let mode: 'world' | 'run' = worldState ? 'world' : 'run';
+
+const sim = new SimRunner((v) => {
+  drawSimLine(ui, v);
+  window.__ecoviewSim = v;
+});
+
+/** R: send the grids as they stand to the helper, watch the run, and draw it when it finishes. */
+async function runSim(): Promise<void> {
+  if (!editor || !worldState || sim.busy) return;
+  const files: SimFiles = {};
+  for (const f of bundleFiles(editor.bundle)) files[f.name] = f.data;
+  const v = await sim.start(files, { ticks: worldState.ticks, seed: worldState.seed });
+  if (v.state === 'done' && v.path) await showSimRun(v.path);
+}
+
+/** The finished run, drawn by the same loader, entities and overlays every other run goes through. */
+async function showSimRun(path: string): Promise<void> {
+  const ed = editor;
+  if (!ed || !worldState || mode === 'run') return;
+  mode = 'run';
+  ed.setAsleep(true);
+  for (const o of [ed.chunks.group, ed.plants.group, ed.outline.lines]) o.removeFromParent();
+  prepareRunSidebar(ui);
+  cam = null; // the run's own cameras, framed on its ecology grid
+  await apply({ run: path, tick: worldState.ticks, overlay: 'material', cam: worldState.cam });
+}
+
+/** B: back to the bundle, with the edits still on it and no page reload, to compare before with after. */
+function showBundle(): void {
+  const ed = editor;
+  if (!ed || !worldState || mode === 'world') return;
+  mode = 'world';
+  seq++; // a load still in flight stops here rather than drawing into the bundle view
+  window.__ecoviewReady = false;
+  world?.mesh.removeFromParent();
+  entities?.group.removeFromParent();
+  for (const o of [drape?.mesh, buildings?.mesh, pipes?.lines]) o?.removeFromParent();
+  world = null;
+  entities = null;
+  drape = buildings = pipes = null;
+  run = null;
+  shown = null;
+  cache.clear();
+  scene.add(ed.chunks.group, ed.plants.group, ed.outline.lines);
+  ed.setAsleep(false);
+  prepareWorldSidebar(ui);
+  history.replaceState(null, '', worldSearch(worldState));
+  setCamera(worldState.cam, ed.bundle.grid);
+  ed.setLit(worldState.cam !== 'top');
+  ui.status.textContent = worldStatus(ed.bundle, worldState);
+  ui.status.classList.remove('error');
+  ed.refresh();
+  requestAnimationFrame(() => {
+    window.__ecoviewReady = true;
+  });
+}
+
+// The three keys the sim adds, on a world page only. The editor's own keys are untouched, and it sleeps
+// while a run is on screen, so E and the hotbar cannot edit what is no longer drawn.
+window.addEventListener('keydown', (e) => {
+  if (!worldState || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.code === 'KeyR') void runSim();
+  else if (e.code === 'KeyC') void sim.cancel();
+  else if (e.code === 'KeyB') showBundle();
+});
 
 function stepTo(index: number): void {
   if (!run) return;
@@ -315,7 +397,7 @@ function togglePlay(): void {
 
 initControls(ui, {
   onOverlay: (overlay) => void apply({ ...state, overlay }),
-  onCam: (c) => (worldState ? setWorldCam(c) : void apply({ ...state, cam: c })),
+  onCam: (c) => (mode === 'world' ? setWorldCam(c) : void apply({ ...state, cam: c })),
   onSnapshotIndex: stepTo,
   onPlayToggle: togglePlay,
 });

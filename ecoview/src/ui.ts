@@ -2,6 +2,7 @@
 import { OVERLAYS, mediumColor, type Overlay } from './world';
 import { DEATH_CAUSES, type DeathCause, type Series } from './loader';
 import { MAX_BRUSH, SLOTS, isSlot, type PanelView, type Slot } from './edit';
+import { DEFAULT_SEED, DEFAULT_TICKS, MAX_TICKS, simMessage, type SimView } from './sim';
 
 export const CAMS = ['iso', 'top', 'side'] as const;
 export type Cam = (typeof CAMS)[number];
@@ -45,6 +46,9 @@ export interface WorldState {
   aim: [number, number] | null;
   /** Where to stand in the fly camera, so a close-up screenshot needs no pointer lock; null stays in orbit. */
   eye: Eye | null;
+  /** What R asks the sim helper for (shot E4): a short run by default, since it is watched live. */
+  ticks: number;
+  seed: number;
 }
 
 export function parseWorldParams(search: string): WorldState | null {
@@ -58,6 +62,10 @@ export function parseWorldParams(search: string): WorldState | null {
   const aimed = a.length === 2 && a.every((v) => Number.isInteger(v) && v >= 0);
   const e = (p.get('eye') ?? '').split(',').map(Number);
   const eyed = e.length === 5 && e.every((v) => Number.isFinite(v));
+  const whole = (raw: string | null, fallback: number, hi: number): number => {
+    const v = Math.round(Number(raw));
+    return raw !== null && Number.isFinite(v) ? Math.min(hi, Math.max(0, v)) : fallback;
+  };
   return {
     world,
     cam: (CAMS as readonly string[]).includes(c ?? '') ? (c as Cam) : 'iso',
@@ -66,13 +74,16 @@ export function parseWorldParams(search: string): WorldState | null {
     brush: Number.isFinite(brush) ? Math.min(MAX_BRUSH, Math.max(1, brush)) : 1,
     aim: aimed ? [a[0], a[1]] : null,
     eye: eyed ? [e[0], e[1], e[2], e[3], e[4]] : null,
+    ticks: Math.max(1, whole(p.get('ticks'), DEFAULT_TICKS, MAX_TICKS)),
+    seed: whole(p.get('seed'), DEFAULT_SEED, 0xffffffff),
   };
 }
 
 export function worldSearch(s: WorldState): string {
   const aim = s.aim ? `&aim=${s.aim[0]},${s.aim[1]}` : '';
   const eye = s.eye ? `&eye=${s.eye.join(',')}` : '';
-  return `?world=${s.world}&cam=${s.cam}&edit=${s.edit ? 1 : 0}&slot=${s.slot}&brush=${s.brush}${aim}${eye}`;
+  return `?world=${s.world}&cam=${s.cam}&edit=${s.edit ? 1 : 0}&slot=${s.slot}&brush=${s.brush}`
+    + `&ticks=${s.ticks}&seed=${s.seed}${aim}${eye}`;
 }
 
 // ---- chart ----
@@ -372,6 +383,8 @@ export interface Controls {
   playRow: HTMLElement;
   /** The editor's sidebar panel, its hotbar and readout, and the crosshair over the canvas. */
   edit: HTMLElement;
+  /** The sim helper's one-line readout, on a world page only (shot E4). */
+  sim: HTMLElement;
   hotbar: HTMLElement;
   editInfo: HTMLElement;
   editNote: HTMLElement;
@@ -396,6 +409,7 @@ export function getControls(): Controls {
     overlayRow: q('overlayrow'),
     playRow: q('playrow'),
     edit: q('edit'),
+    sim: q('sim'),
     hotbar: q('hotbar'),
     editInfo: q('editinfo'),
     editNote: q('editnote'),
@@ -444,6 +458,27 @@ export function prepareWorldSidebar(c: Controls): void {
   ctx.fillStyle = CHART_BG;
   ctx.fillRect(0, 0, c.chart.width, c.chart.height);
   c.edit.hidden = false;
+  c.sim.hidden = false;
+}
+
+/**
+ * Back to the run controls, for a run the editor itself started (shot E4): the overlay selector, the tick
+ * slider and the play button come back and the edit panel goes, while the sim line stays on screen because
+ * it is where the way back is written. `apply` redraws the chart at its full height.
+ */
+export function prepareRunSidebar(c: Controls): void {
+  for (const el of [c.overlayRow, c.playRow]) el.hidden = false;
+  c.slider.hidden = false;
+  c.chart.style.height = '';
+  c.edit.hidden = true;
+  c.cross.hidden = true;
+}
+
+/** The sim helper's line: what the run is doing, or why there is nothing to run on. */
+export function drawSimLine(c: Controls, v: SimView): void {
+  c.sim.hidden = false;
+  c.sim.textContent = simMessage(v);
+  c.sim.classList.toggle('bad', v.state === 'failed' || v.state === 'absent');
 }
 
 /** The empty chart area's height on a world page, in CSS pixels. */

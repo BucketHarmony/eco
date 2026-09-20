@@ -290,19 +290,29 @@ export const changesJson = (b: Bundle, n: number, ops: Op[]): string =>
   `${JSON.stringify({ bundle: b.json.name, save: n, ops }, null, 1)}\n`;
 
 /**
- * A save's files: the four the editor never touches, verbatim so a no-edit save is byte-identical; the three
- * grids, little-endian as the bundle stores them; and the operation list. The seven bundle files carry a
- * `<name>-edit-N-` prefix, because a browser download cannot make a directory and must not overwrite the
- * bundle it loaded. Drop the prefix to get a directory `ecosim run --world` reads (DECISIONS.md, shot E1).
+ * The seven files a world bundle directory holds, under their own names: the four the editor never touches,
+ * verbatim so a no-edit save is byte-identical, and the three grids little-endian as the bundle stores them.
+ * This is what `ecosim run --world` reads, so it is also what the sim helper is posted (shot E4).
+ */
+export function bundleFiles(b: Bundle): SaveFile[] {
+  const bin = 'application/octet-stream';
+  return [
+    ...BUNDLE_VERBATIM.map((f) => ({ name: f, data: b.raw[f], type: 'application/json' })),
+    { name: 'ground_h.f32', data: f32Bytes(b.world.ground_h), type: bin },
+    { name: 'medium.u8', data: new Uint8Array(b.world.medium), type: bin },
+    { name: 'building_h.f32', data: f32Bytes(b.world.building_h), type: bin },
+  ];
+}
+
+/**
+ * A save's files: the bundle's seven, plus the operation list. The seven carry a `<name>-edit-N-` prefix,
+ * because a browser download cannot make a directory and must not overwrite the bundle it loaded. Drop the
+ * prefix to get a directory `ecosim run --world` reads (DECISIONS.md, shot E1).
  */
 export function saveFiles(b: Bundle, n: number, ops: Op[]): SaveFile[] {
   const p = `${b.json.name}-edit-${n}-`;
-  const bin = 'application/octet-stream';
   return [
-    ...BUNDLE_VERBATIM.map((f) => ({ name: p + f, data: b.raw[f], type: 'application/json' })),
-    { name: `${p}ground_h.f32`, data: f32Bytes(b.world.ground_h), type: bin },
-    { name: `${p}medium.u8`, data: new Uint8Array(b.world.medium), type: bin },
-    { name: `${p}building_h.f32`, data: f32Bytes(b.world.building_h), type: bin },
+    ...bundleFiles(b).map((f) => ({ ...f, name: p + f.name })),
     { name: `changes-${n}.json`, data: changesJson(b, n, ops), type: 'application/json' },
   ];
 }
@@ -484,6 +494,8 @@ export class Editor {
   private fly: Fly | null = null;
   private saves = 0;
   private message = '';
+  /** While a run is on screen the editor is asleep: its keys and its clicks do nothing (shot E4). */
+  private asleep = false;
   private readonly raycaster = new THREE.Raycaster();
 
   constructor(readonly bundle: Bundle, private readonly host: EditorHost) {
@@ -527,6 +539,11 @@ export class Editor {
     window.removeEventListener('keyup', this.onKey);
     delete window.__ecoviewWorld;
     delete window.__ecoviewEdit;
+  }
+
+  setAsleep(on: boolean): void {
+    this.asleep = on;
+    if (on) this.fly?.dispose();
   }
 
   setLit(lit: boolean): void {
@@ -734,7 +751,7 @@ export class Editor {
   }
 
   private readonly onPointerDown = (e: PointerEvent): void => {
-    if (!this.editing) return;
+    if (!this.editing || this.asleep) return;
     if (this.fly && !this.fly.locked) {
       this.fly.lock(); // the first click in fly mode takes the pointer, later ones edit
       return;
@@ -749,13 +766,14 @@ export class Editor {
   };
 
   private readonly onWheel = (e: WheelEvent): void => {
-    if (!this.fly) return;
+    if (!this.fly || this.asleep) return;
     this.fly.speed = flySpeed(this.fly.speed, e.deltaY);
     this.message = `fly ${this.fly.speed.toFixed(1)} m/s`;
     this.refresh();
   };
 
   private readonly onKey = (e: KeyboardEvent): void => {
+    if (this.asleep) return;
     const down = e.type === 'keydown';
     if (this.editing && this.fly?.key(e.code, down)) {
       e.preventDefault();

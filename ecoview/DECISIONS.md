@@ -534,3 +534,57 @@ The edit reaches the sim exactly: diffing this run's `world/` against the same r
 gives 49 cells in `ground_h.bin`, the same 49 bytes in `medium.bin`, 1 cell in `building_h.bin` and an
 identical `pipes.json`. The pad's cells read 5.50 m where the lawn was 5.27 m, which is the snap to the
 lattice: one click of gravel is a pad at cube height, not a paint job at LiDAR height.
+
+## E4 run from the editor
+
+**What it is.** `npm run preview:sim` starts the preview server and a second process, the *sim helper*
+(`scripts/sim-server.mjs`), on 127.0.0.1:4174. `R` on a bundle page posts the seven bundle files as the
+editor holds them, the helper writes them to a temporary directory and runs the `ecosim` release binary on
+them, and when the run finishes the page loads it through the ordinary loader and draws it with the same
+world, entities and overlays every other run gets. `B` goes back to the bundle, edits and all, without a
+reload; `C` cancels a run in flight. It is dev tooling: the built site never needs it, `npm run shot` never
+starts it, and with no helper listening the page says so and keeps editing.
+
+**This is not IPC, and it is not shared code.** The helper spawns the same command line a hand run uses and
+reads nothing out of `ecosim/` but the binary and `params.toml`, both overridable with `ECOSIM_BIN` and
+`ECOSIM_PARAMS`. The two projects still share exactly one thing, the run directory on disk; the helper only
+saves the human the round trip of downloading eight files, un-prefixing them and typing the command. Every
+run it starts is a garden run (`--set animals.enabled=false --set climate.rain_gradient=0`), the convention
+for bundle worlds, with `--snapshot-state false` because nothing in the page reads `state.bin`.
+
+**The endpoint contract** (`scripts/sim-lib.mjs` holds the half that is pure, and `tests/unit/sim.test.ts`
+tests it):
+
+| route | takes | gives |
+| --- | --- | --- |
+| `GET /sim/health` | – | `{ok, binary, params, port, root}`; `binary` is null when it is not built |
+| `POST /sim/run` | `{ticks, seed, files}`, `files` base64 by name | `{ok, id, ticks, every, path}` |
+| `GET /sim/status?id=` | a run id it issued | `{ok, state, tick, ticks, path, error}` |
+| `POST /sim/cancel?id=` | a run id it issued | `{ok, id, state}` |
+| `GET /sim/runs/<id>/<rest>` | a run id and a file in it | the file, or 400 outside it, or 404 |
+
+It takes no path from a request that it did not build itself. `files` must be exactly the seven names in
+the scene contract or the request is refused, `ticks` must be a whole number in 1..20000, and the run id is
+a key in a table the helper filled, never a path segment joined to anything. `<rest>` goes through
+`safeJoin`, which refuses `..`, a drive letter, a NUL and a backslash in any encoding and then checks the
+resolved path is still under the run. The child's working directory is the run's own. The helper binds
+127.0.0.1 only: it starts a program on this machine, so it must not be reachable from the network.
+
+**Why the page talks to its own origin.** `vite.config.ts` proxies `/sim` to the helper in both `server`
+and `preview`, so `loader.ts`, `parseParams` and the run-base semantics are untouched — a finished run at
+`/sim/runs/<id>/` is a run directory like any other. The proxy's error handler answers `200 {ok: false}`
+rather than letting vite return 502, because a 502 is an error in the browser console and change 7 asks for
+a missing helper to be a sentence in the sidebar, not a console error. A built site with no proxy answers
+404, which the page reads the same way. The sidebar distinguishes the two missing pieces the shot names:
+no helper behind `/sim` says `npm run sim`, a helper with no binary says `cargo build --release`.
+
+**Temporary files.** Everything the helper writes lives under one `mkdtemp` directory, removed on SIGINT,
+SIGTERM and SIGHUP; a 1000-tick Capitol run is about 60 MB, so it also keeps only the last `KEEP_RUNS` = 3
+finished runs and deletes the rest as new ones start. Nothing is written inside the repository, and a run
+never outlives the helper that made it. `/sim/health` reports the directory so a test that kills the helper
+can sweep up after it, which is what `tests/e2e/sim.spec.ts` does; nothing in the page reads it.
+
+**Ticks and seed are URL parameters** (`&ticks=`, `&seed=`, defaulting to 1000 and 42, clamped on parse),
+so a screenshot or a scripted page can choose the run length without clicking, the same rule the rest of
+ecoview follows. The snapshot cadence is derived, not configured: about ten snapshots whatever the run
+length, which keeps the slider useful at 200 ticks and at 20000.

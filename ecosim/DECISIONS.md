@@ -1019,3 +1019,80 @@ exception for it, so there is no mismatch to report and no BLOCKED file. The sce
 edges — speckled walk detection, the Capitol as a stepped heightfield, the dome 8 m off the crop
 centre — are recorded in the world's README as limitations of the data, which is where a reader of a
 future Capitol run will need them.
+
+## Plants from the scene, and the Capitol reference run (shot G3)
+
+**A scene tree's age is piecewise linear in its height.** The map runs through (0 m, age 0),
+(`bundle.tree_mature_height` = 3 m, `tree.mature_age` = 1000) and (`bundle.tree_tall_height` = 20 m,
+`bundle.tree_tall_age` = 3000), and is flat above 20 m. 3 m is where a mature sim canopy sits (a
+mature tree's canopy voxels are at `h + 2` and `h + 3` over a surface at `h`), so the prompt's rule —
+a tree as tall as the sim's mature height or taller starts at least `tree.mature_age` — falls out of
+the corner rather than being clamped on afterwards. The map is read as
+`max(tree_tall_age, tree.mature_age)` at the top corner, so no parameter setting can make it
+non-monotone; `prop_import_age_is_monotone` in `src/plants.rs` is the property, with
+`import_age_hits_the_growth_curve_at_its_corners` as its named regression sibling. Heights of 0 or
+less, and NaN, import at age 0 rather than being rejected: the loader already validates the bundle,
+and a report of a degenerate tree is more useful than a run that will not start.
+
+**"Non-Rock" is read as "plantable", which means `ColClass::Soil`.** The prompt's rule 1 says to move
+a tree off a Rock column, and rules 2 and 3 say shrubs and grass start on plantable columns. Water is
+neither Rock nor plantable, and a tree standing in a pond is no better than one on a roof, so all
+three use one predicate, `World::is_plantable`. The Capitol has no water column, so the two readings
+give the same answer on the reference world; the difference only shows on a future scene with a pond.
+
+**Moving is a nearest-first scan, dropping is silent, and the taller tree wins a tie.** A tree's
+column is `floor(x), floor(y)` clamped into the grid. If it is not plantable, the scan visits the
+offsets within `bundle.tree_move_radius` = 2 columns in order of distance, then y, then x, and takes
+the first plantable one; if there is none the tree is dropped. Two trees that land on one column keep
+the taller, and an exact tie keeps the one earlier in `trees.json`, so the result does not depend on
+float comparison order. `tree.min_spacing` is deliberately **not** enforced on import: the scene's
+spacing is the scene's, and a photographed avenue of trees 2 m apart should import as it stands. It
+applies from the first germination onwards, as it always did.
+
+**Planting runs in two passes, in ascending column order.** Pass one resolves every tree to a column
+and keeps the winner per column; pass two walks the columns in index order and plants. That way the
+entity ids, and therefore the RNG draws for lifespan, depend on the grid and not on the order
+`trees.json` happens to list its trees. `PlantImport` counts `planted + dropped + merged = the
+scene's tree count`, with `moved` a subset of `planted`, and `ecosim run` prints it:
+`scene: 81 trees -> 79 planted (0 moved, 2 dropped, 0 merged); 64 shrubs over 750 columns in 87
+patches`.
+
+**Scene trees replace the noise world's random ones.** A bundle run does not call
+`place_initial_trees`, so `tree.initial_count` has no effect on it. Grass needs no code at all: a
+patch's initial grass already goes to its soil columns, which on a bundle world are exactly the
+plantable ones.
+
+**A shrub ellipse adds cover by column, not by area.** A patch's initial shrub density is
+`shrub.initial` plus the fraction of its *plantable* columns whose centre `(x + 0.5, y + 0.5)` falls
+inside any ellipse, clamped to 1. Counting columns rather than integrating area keeps the number the
+same quantity the sim carries, makes a bed over a plaza contribute nothing, and makes the acceptance
+("half a patch raises its density by 0.5") exact to within one column's share, 1/64.
+
+**The import counts stay out of `meta.json`.** They are on stdout, in `RunSummary.import` and pinned
+by `tests/bundle.rs`; the run-directory contract does not change, so no renderer or reader has to
+learn anything new for G3. The pipes are loaded into `World::pipes` and nothing reads them yet —
+that is G6 — but they are carried as data rather than left in the bundle, because the world is what
+later shots hold.
+
+**`fixtures/capitol-mini` is the Capitol at seed 42, 100 ticks, snapshots at 0 and 100**, named the
+way `s42-mini` is named, 13 MB of it — a format-4 fixture is bigger than a format-3 one because it
+carries the 2.3 MB `world/` grids once and a 256 × 256 × 32 `material.bin` twice.
+`the_committed_capitol_mini_fixture_matches_a_fresh_run` re-runs it and compares with
+`check::diff_runs`, so a change in planting shows up as a failed test. It is not synced into
+`ecoview/public/`: `scripts/sync-data.sh` copies `s42-mini*`, and teaching it a second fixture is
+G7's business, not an ecosim shot's.
+
+**CI runs the Capitol at its full 20000 ticks.** It takes 5935 ms locally — 16 × the reference area
+and still a fifth of the `runtime` invariant's budget — so there was no need for the shorter CI run
+the prompt allows. It rides on the seed-3 leg of `ecosim-sims`, where seeds 1 and 2 already carry the
+long run and the baseline sweep, and uploads its `ecosim check` output as an artifact.
+
+**Nothing was tuned to make the Capitol check pass, and it passes anyway** (`sweeps/capitolG3/`).
+The one result worth carrying forward is that the west half of the site ends the run treeless: with
+`climate.rain_gradient` = 0.6 the west edge gets 40% of the mean rain, 24 of the 30 trees that ever
+stood west of the middle died of drought in the first 2000 ticks, and with `tree.seed_radius` = 6 and
+`tree.immigration_floor` = 0 nothing can disperse back. That gradient was chosen for the 256 × 64
+strip, where a west–east climate ramp is the world's point; on a 256 m photographed site it is a 2.5×
+rainfall difference across two city blocks with nothing behind it. G3 does not change it — the prompt
+says not to retune — but G4 should settle whether the Capitol runs at `rain_gradient` = 0 before it
+puts storms and runoff on top.

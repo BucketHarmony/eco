@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 /// The required steps, each identified by a command it must contain.
-const STEPS: [(&str, &str); 9] = [
+const STEPS: [(&str, &str); 10] = [
     ("exporter unit tests", "unittest discover -s tools -t tools"),
     ("fmt", "cargo fmt --check"),
     ("clippy", "cargo clippy --all-targets -- -D warnings"),
@@ -15,6 +15,7 @@ const STEPS: [(&str, &str); 9] = [
     ("runs and checks", "--seed \"$s\" --ticks 20000"),
     ("sweep baseline", "sweep --baseline --seeds 1,2,3"),
     ("long run", "check --long ci-runs/long-s1"),
+    ("capitol run", "--world worlds/capitol --seed 42 --ticks 20000"),
 ];
 
 /// Index of the first block containing each step's command; panics naming a missing step.

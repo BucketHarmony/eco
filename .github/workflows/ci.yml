@@ -2,7 +2,7 @@
 # parallel) and run in this order in `just ci` (ecosim/justfile); ecosim/tests/ci.rs checks both.
 # Step 0 runs the Blender exporter's pure half in plain CPython; step 2b builds the docs
 # warning-free; step 8 is the release half of the cross-profile determinism test; step 9 checks one
-# 60000-tick run under `ecosim check --long`.
+# 60000-tick run under `ecosim check --long`; step 10 runs the Capitol world bundle (shot G3).
 name: ci
 
 on:
@@ -24,8 +24,8 @@ defaults:
 jobs:
   # Since shot 15 the gate is split three ways so it fits 10 minutes on the 256x64 strip
   # (ecosim/DECISIONS.md, shot 15): `ecosim` runs steps 0-3 and 8, `ecosim-coverage` step 4, and
-  # `ecosim-sims` steps 5-7 and 9 as a seed matrix (seed 1 also runs the long run, seed 2 the
-  # baseline sweep). `just ci` runs the same steps one after another.
+  # `ecosim-sims` steps 5-7, 9 and 10 as a seed matrix (seed 1 also runs the long run, seed 2 the
+  # baseline sweep, seed 3 the Capitol run). `just ci` runs the same steps one after another.
   ecosim:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -160,6 +160,20 @@ jobs:
         run: |
           ./target/release/ecosim run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000
           ./target/release/ecosim check --long ci-runs/long-s1
+
+      # The Capitol reference run (shot G3): the committed world bundle, animals off, 20000 ticks.
+      # Seed 1 carries the long run and seed 2 the baseline sweep, so this rides on seed 3.
+      - name: 10 capitol run
+        if: matrix.seed == 3
+        run: |
+          ./target/release/ecosim run --world worlds/capitol --seed 42 --ticks 20000 --out ci-runs/capitol-s42 --set animals.enabled=false
+          ./target/release/ecosim check ci-runs/capitol-s42 | tee ci-runs/capitol-check.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.seed == 3
+        with:
+          name: capitol-check
+          path: ecosim/ci-runs/capitol-check.txt
 
   # Tick throughput (ecosim/benches/tick.rs, DECISIONS.md shot 15a): 2000 ticks of seed 42 on the
   # 64x64 and 256x64 worlds, failing on a slowdown of more than 20% against benches/baseline.json,

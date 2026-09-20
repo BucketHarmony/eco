@@ -5,6 +5,7 @@ use crate::bundle::Bundle;
 use crate::events::Event;
 use crate::heredity::{trait_stats, TraitStats, Traits, TRAIT_CLAMP};
 use crate::params::Params;
+use crate::plants::PlantImport;
 use crate::profile::{lap, Phase, Profiler};
 use crate::trees::Tree;
 use crate::world::{ColClass, Dims, World};
@@ -156,20 +157,31 @@ impl Sim {
         Sim::with_world(params, rng, world)
     }
 
-    /// Generate the world from a bundle (`ecosim run --world`) and place the initial populations.
-    /// The terrain is the bundle's, so unlike [`Sim::new`] the seed draws nothing for it; the
-    /// bundle's dimensions must already be in `params` (`Bundle::apply_to`).
-    pub fn from_bundle(params: Params, seed: u64, bundle: &Bundle) -> Result<Sim, String> {
+    /// Generate the world from a bundle (`ecosim run --world`) and plant its scene. The terrain is
+    /// the bundle's, so unlike [`Sim::new`] the seed draws nothing for it; the bundle's dimensions
+    /// must already be in `params` (`Bundle::apply_to`). Returns what the scene planted.
+    pub fn from_bundle(params: Params, seed: u64, bundle: &Bundle) -> Result<(Sim, PlantImport), String> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let world = World::from_bundle(bundle, &params)?;
         if params.rng.stream != 0 {
             rng.set_stream(params.rng.stream);
         }
-        Ok(Sim::with_world(params, rng, world))
+        Ok(Sim::with_bundle(params, rng, world, bundle))
     }
 
-    /// A tick-0 sim on a given world, with initial trees and animals placed using `rng`.
+    /// A tick-0 sim on a given world, with `tree.initial_count` random trees and the initial
+    /// animals placed using `rng`.
     pub fn with_world(params: Params, rng: ChaCha8Rng, world: World) -> Sim {
+        Sim::assemble(params, rng, world, None).0
+    }
+
+    /// [`Sim::with_world`] on a bundle world: the scene's trees and shrubs are the starting
+    /// vegetation, in place of the random trees (shot G3).
+    pub fn with_bundle(params: Params, rng: ChaCha8Rng, world: World, bundle: &Bundle) -> (Sim, PlantImport) {
+        Sim::assemble(params, rng, world, Some(bundle))
+    }
+
+    fn assemble(params: Params, rng: ChaCha8Rng, world: World, bundle: Option<&Bundle>) -> (Sim, PlantImport) {
         let c = &params.climate;
         let (cols, npatches) = (world.dims.cols(), world.dims.patches());
         let mut moisture = vec![0.0; cols];
@@ -220,11 +232,17 @@ impl Sim {
         };
         sim.seek_offsets = offsets_within(sim.params.hunter.seek_radius);
         sim.flee_offsets = flee_offsets(&sim.params);
-        sim.place_initial_trees();
+        let import = match bundle {
+            None => {
+                sim.place_initial_trees();
+                PlantImport::default()
+            }
+            Some(b) => sim.import_scene(b),
+        };
         sim.place_initial_animals();
         sim.rebuild_grazer_grid();
         sim.update_temperature(0);
-        sim
+        (sim, import)
     }
 
     /// A sim on the given terrain of the square test world (`Params::load_square`) with no trees

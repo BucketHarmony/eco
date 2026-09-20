@@ -108,11 +108,30 @@ pub struct BundleParams {
     /// Shadow length in columns per metre of building height, cast due north (the sun sits due
     /// south; 1.0 is a 45° altitude). 0 turns building shade off.
     pub shade_slope: f32,
+    /// Scene height in metres that maps onto `tree.mature_age` when the bundle's trees are planted
+    /// (shot G3): the height of a mature sim canopy above the ground it stands on.
+    pub tree_mature_height: f32,
+    /// Scene height in metres that maps onto `tree_tall_age`: a full-grown street tree. Heights
+    /// above it all import at `tree_tall_age`.
+    pub tree_tall_height: f32,
+    /// Age in ticks an imported tree of `tree_tall_height` or more starts at. Held at
+    /// `tree.mature_age` or more, so the height-to-age map stays monotone whatever it is set to.
+    pub tree_tall_age: u32,
+    /// How far in columns an imported tree may be moved off an unplantable column to the nearest
+    /// plantable one; past it the tree is dropped.
+    pub tree_move_radius: f32,
 }
 
 impl Default for BundleParams {
     fn default() -> Self {
-        BundleParams { base_z: 8, shade_slope: 1.0 }
+        BundleParams {
+            base_z: 8,
+            shade_slope: 1.0,
+            tree_mature_height: 3.0,
+            tree_tall_height: 20.0,
+            tree_tall_age: 3000,
+            tree_move_radius: 2.0,
+        }
     }
 }
 

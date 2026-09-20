@@ -438,3 +438,39 @@ the highest ground. Nothing needed widening. `[world] height` stays 32 even thou
 tall enough to hold the dome as voxels would be 2.4 × the memory for one building nothing can grow
 on. `[bundle] shade_slope` = 1.0 is likewise untouched; what the Capitol's shadow does to the
 ecology is G3's business, not this shot's.
+
+## Plants from the scene, and the Capitol reference run (shot G3)
+
+**No existing default changed.** The shot adds four keys to `[bundle]`, all read only when a run is
+built from a world bundle. Their values equal the struct defaults, so `[bundle]` is still left out of
+`meta.json`, every committed manifest and fixture is byte-identical, and seeds 1, 2, 3 and 42 pass
+`ecosim check` with the same numbers as before (`fresh_s42_matches_committed_manifest` is green).
+
+| key | value | why |
+|---|---|---|
+| `bundle.tree_mature_height` | 3.0 | Scene metres that map onto `tree.mature_age`. A mature sim tree's canopy voxels sit at `h + 2` and `h + 3` over a surface at `h`, so 3 m is the height of a mature canopy above the ground it stands on. This is the corner that makes the prompt's rule — a tree at least as tall as the sim's mature height starts at least `tree.mature_age` — hold by construction. |
+| `bundle.tree_tall_height` | 20.0 | Scene metres above which every tree imports at the same age: a full-grown street tree. The Capitol's tallest is 23.59 m, its mean 13.70 m, so the scene lands mostly on the segment between the two corners and only a handful of trees sit on the flat. |
+| `bundle.tree_tall_age` | 3000 | Age a tree of `tree_tall_height` or more starts at: half of `tree.max_age` = 6000. Lifespans are `max_age × (1 ± 0.2)`, i.e. 4800–7200 ticks, so the oldest imported tree still has 1800 ticks of life and the imported cohort thins out over thousands of ticks instead of dying together. At the Capitol the cohort thins from 79 at tick 0 to 4 at tick 5000, and the last imported tree dies between ticks 5600 and 5700, by which time 779 of the sim's own trees stand. Read as `max(tree_tall_age, tree.mature_age)`, so it cannot make the height-to-age map fall. |
+| `bundle.tree_move_radius` | 2.0 | Columns (metres) a trunk may be moved off an unplantable column before it is dropped, straight from the shot prompt's "within 2 m". At the Capitol 2 of 81 trees stand on Rock and neither has a plantable column within the radius, so both are dropped and nothing moves. |
+
+The acceptance line that forces `tree_mature_height` and `tree_tall_age` is "a flat bundle with one
+15 m tree gives one mature tree at the right column" — 15 m has to import as Mature, which any
+`tree_mature_height` ≤ 15 satisfies, and the pair is pinned exactly by
+`import_age_hits_the_growth_curve_at_its_corners` in `src/plants.rs`. The line that forces
+`tree_move_radius` is "a tree on a roof block moves or drops as rule 1 says", and the Capitol line
+"loading gives the documented tree count, moves and drops" pins all four at once through
+`the_capitol_scene_plants_its_trees_and_shrubs` in `tests/bundle.rs`: 81 trees → 79 planted, 0 moved,
+2 dropped, 0 merged.
+
+There is no sweep: none of the four affects a noise run, and the one real bundle in the repo is the
+Capitol, which `sweeps/capitolG3/FINDINGS.md` reports in full.
+
+**One existing default this shot deliberately did not change.** `climate.rain_gradient` = 0.6, set
+in shot 15 for the 256 × 64 strip, gives the west edge of a world 40% of the mean rain and the east
+edge 160%. On the 256 m Capitol that is a 2.5× rainfall difference across two city blocks: 24 of the
+30 trees that ever stood west of the middle die of drought in the first 2000 ticks, and with
+`tree.seed_radius` = 6 and `tree.immigration_floor` = 0 nothing can disperse back, so the western
+half ends the run treeless while the east closes into woodland. `ecosim check` still passes on the
+Capitol at every line, and the shot prompt says not to retune when it does, so 0.6 stands. The
+question of whether a real site should run at `rain_gradient` = 0 belongs to G4, which puts storms
+and runoff on the same field.

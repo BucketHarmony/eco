@@ -97,6 +97,15 @@ base_z = 8
 # Building shade: a roof of height h metres darkens the h × shade_slope columns north of it, to a
 # level falling by 1 m per 1/shade_slope columns. 1.0 is a 45° sun due south; 0 turns shade off.
 shade_slope = 1.0
+# Planting the bundle's trees (shot G3). A scene tree's age is piecewise linear in its height,
+# through (0 m, age 0), (tree_mature_height, tree.mature_age) and (tree_tall_height, tree_tall_age),
+# and flat above: 3 m is a mature sim canopy, 20 m a full-grown street tree.
+tree_mature_height = 3.0
+tree_tall_height = 20.0
+tree_tall_age = 3000
+# A scene tree standing on an unplantable column moves to the nearest plantable column within this
+# many columns (metres); past it, it is dropped.
+tree_move_radius = 2.0
 
 [animals]
 # The animal tier (shot G0). false leaves grazers and hunters out of the run entirely: none are

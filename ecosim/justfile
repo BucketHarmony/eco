@@ -7,7 +7,7 @@ export PROPTEST_RNG_SEED := "20260918"
 
 ecosim := "./target/release/ecosim"
 
-ci: pyexport fmt clippy docs test coverage build runs baseline cross long
+ci: pyexport fmt clippy docs test coverage build runs baseline cross long capitol
 
 # 0: the pure half of the Blender exporter (tools/blend_export.py), in plain CPython. CI has no
 # Blender; the Capitol bundle it writes is committed under worlds/. $PYTHON overrides the choice.
@@ -54,6 +54,10 @@ cross:
 # 9: one 60000-tick run under the long-run invariants (`check --long`)
 long:
     {{ecosim}} run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000 && {{ecosim}} check --long ci-runs/long-s1
+
+# 10: the Capitol reference run (shot G3): the committed world bundle, animals off, 20000 ticks.
+capitol:
+    {{ecosim}} run --world worlds/capitol --seed 42 --ticks 20000 --out ci-runs/capitol-s42 --set animals.enabled=false && {{ecosim}} check ci-runs/capitol-s42
 
 # Not part of `ci`: the tick bench (its own job in ci.yml). benches/baseline.json holds CI-runner numbers,
 # so a local run's comparison says little about a regression (DECISIONS.md, shot 15a).

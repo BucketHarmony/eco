@@ -228,6 +228,9 @@ fn main() -> ExitCode {
             match result {
                 Ok(s) => {
                     let last = s.rows.last().unwrap();
+                    if bundle.is_some() {
+                        println!("{}", s.import.summary());
+                    }
                     println!(
                         "wrote {} ({} ticks, {} ms): grazers={} hunters={} trees={}",
                         out.display(),

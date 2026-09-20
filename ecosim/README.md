@@ -81,14 +81,32 @@ than half of its ground cells are sealed (`roof`, `asphalt`, `concrete`), Water 
 are `water`, otherwise soil. A roof shades the columns north of it, `[bundle] shade_slope` columns
 per metre of height.
 
+A bundle's plants are planted too, in place of the noise world's random ones. Each scene tree
+becomes a tree entity on the column its trunk stands in, aged by its height: piecewise linear
+through (0 m, 0), (`[bundle] tree_mature_height`, `tree.mature_age`) and (`tree_tall_height`,
+`tree_tall_age`), flat above. A trunk on an unplantable column moves to the nearest plantable one
+within `tree_move_radius`, or is dropped; when two trees land on one column the taller stays. Each
+shrub ellipse raises its patches' starting shrub density by the fraction of their plantable columns
+it covers. Grass starts as it does in a noise world. `ecosim run --world` prints what happened:
+
+```
+scene: 81 trees -> 79 planted (0 moved, 2 dropped, 0 merged); 64 shrubs over 750 columns in 87 patches
+```
+
+The bundle's pipes are loaded into the world state and are not used yet.
+
 A bundle run writes `format_version` 4 (`--format-version` picks 2, 3 or 4 explicitly; 4 needs
 `--world` and `--world` needs 4). It cannot be forked: `ecosim fork` rebuilds the terrain, and only
-the bundle has it. `DECISIONS.md` (shot G1) has the design calls.
+the bundle has it. `DECISIONS.md` (shots G1 and G3) has the design calls.
 
 `worlds/capitol/` is the committed reference world: a 256 m square of the Michigan State Capitol
 grounds in Lansing, from public-domain USGS LiDAR, with its walks and plazas from OpenStreetMap
 under the ODbL. Its README has the provenance, the licence per file and the numbers
-`tests/bundle.rs` pins. The garden series runs it with `--set animals.enabled=false`.
+`tests/bundle.rs` pins. The garden series runs it with `--set animals.enabled=false`; CI runs it for
+20000 ticks as step 10, and `fixtures/capitol-mini/` is the first 100 ticks of that run, committed
+for the renderer. `sweeps/capitolG3/FINDINGS.md` reports the reference run: what dies of what, how
+the imported wood gives way to the sim's own, canopy fraction, and what building shade and the rain
+gradient do to a real site.
 
 `tools/blend_export.py` writes a bundle from a tagged `.blend`:
 

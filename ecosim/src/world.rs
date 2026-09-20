@@ -1,6 +1,6 @@
 //! Voxel world: terrain generation, materials, column classes and the light field.
 
-use crate::bundle::{Bundle, Ground, Medium};
+use crate::bundle::{Bundle, Ground, Medium, Pipe};
 use crate::params::Params;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -143,6 +143,8 @@ pub struct World {
     pub shade_top: Vec<u8>,
     /// The bundle's ground grid at full resolution, or `None` in a noise world.
     pub ground_grid: Option<Ground>,
+    /// The bundle's storm drains; empty in a noise world. Read by the drain network in shot G6.
+    pub pipes: Vec<Pipe>,
 }
 
 /// What tops a column, beyond the soil-over-rock fill every column gets.
@@ -369,6 +371,7 @@ impl World {
             patch_dist,
             shade_top,
             ground_grid: None,
+            pipes: Vec::new(),
         };
         for y in 0..d.wy {
             for x in 0..d.wx {
@@ -434,7 +437,15 @@ impl World {
         let shade = building_shade(d, &heights, &building, params.bundle.shade_slope);
         let mut w = World::build(&heights, params, Some(&tops), shade);
         w.ground_grid = Some(b.ground.clone());
+        w.pipes = b.pipes.clone();
         Ok(w)
+    }
+
+    /// Whether column `c` can hold a plant: its top is soil, so it is neither sealed (Rock) nor
+    /// under water. Trees, shrub cover and grass all start on plantable columns only (shot G3).
+    #[inline]
+    pub fn is_plantable(&self, c: usize) -> bool {
+        self.class[c] == ColClass::Soil
     }
 
     /// Whether (x, y) is inside the world and a soil column.

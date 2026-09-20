@@ -10,6 +10,7 @@ pub mod fire;
 pub mod heredity;
 pub mod output;
 pub mod params;
+pub mod plants;
 pub mod producers;
 pub mod profile;
 pub mod sim;

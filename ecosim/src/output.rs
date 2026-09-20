@@ -4,6 +4,7 @@ use crate::animals::{Animal, State};
 use crate::bundle::Bundle;
 use crate::events::{parse_events, Event, EVENTS_FILE, EVENTS_HEADER};
 use crate::params::Params;
+use crate::plants::PlantImport;
 use crate::profile::{lap, Phase, Profile, Profiler};
 use crate::sim::{Sim, StatsRow};
 use crate::trees::Stage;
@@ -329,6 +330,8 @@ pub struct RunSummary {
     pub wall_ms: u128,
     /// Every stats row, tick 0 first.
     pub rows: Vec<StatsRow>,
+    /// What the bundle's scene planted (shot G3); all zeroes for a noise world.
+    pub import: PlantImport,
 }
 
 /// The one simulation driver shared by `run` and `sweep`: tick 0 is recorded before any update,
@@ -476,8 +479,8 @@ fn run_inner(
     );
     let start = Instant::now();
     prepare_dir(out)?;
-    let mut sim = match opts.bundle {
-        None => Sim::new(params, seed),
+    let (mut sim, import) = match opts.bundle {
+        None => (Sim::new(params, seed), PlantImport::default()),
         Some(b) => Sim::from_bundle(params, seed, b).map_err(io::Error::other)?,
     };
     if let Some(b) = opts.bundle {
@@ -521,7 +524,7 @@ fn run_inner(
     let wall_ms = start.elapsed().as_millis();
     fs::write(out.join("timing.json"), format!("{{\"wall_ms\":{wall_ms}}}"))?;
     lap(&mut prof, Phase::SeriesWrite);
-    Ok(RunSummary { wall_ms, rows })
+    Ok(RunSummary { wall_ms, rows, import })
 }
 
 /// What `ecosim fork` continues and how.
@@ -695,7 +698,8 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
     fs::write(out.join("series.csv"), text).map_err(io)?;
     let wall_ms = start.elapsed().as_millis();
     fs::write(out.join("timing.json"), format!("{{\"wall_ms\":{wall_ms}}}")).map_err(io)?;
-    Ok(RunSummary { wall_ms, rows })
+    // A fork continues a noise run: `ecosim fork` rejects the bundle format outright.
+    Ok(RunSummary { wall_ms, rows, import: PlantImport::default() })
 }
 
 #[cfg(test)]

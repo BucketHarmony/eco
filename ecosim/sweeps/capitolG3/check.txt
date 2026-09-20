@@ -1,0 +1,9 @@
+PASS no species reaches 0: min trees=229 [margin +228.0000]
+PASS no species exceeds 10x its anchor count (animals: tick 2000, trees: tick 5000): trees max=2541 limit=6760 [margin +0.6241]
+N/A  grazer cycle (2 maxima >= 1500 ticks apart): n/a (animals off)
+PASS fertility_mean in [40, 220]: [111.88, 208.15] [margin +0.0538]
+PASS grass_mean in [0.05, 0.95]: [0.3924, 0.8381] [margin +0.1178]
+PASS trees at end >= 1.5x trees at tick 0: 2278 vs 79 (need 118.5) [margin +18.2236]
+PASS run time < 30 s per 64x64, at most 90 s: 5935 ms [margin +0.9341]
+PASS mature trees at tick 10000 >= 35: 1036 [margin +28.6000]
+N/A  at tick 10000 grazers >= 10 and hunters >= 2: n/a (animals off)

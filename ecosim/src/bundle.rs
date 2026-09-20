@@ -623,7 +623,7 @@ pub(crate) mod tests {
     /// patch's soil list (so no grass or shrub), carry no trunk and no canopy, at every tick.
     fn rock_columns_hold_no_cover(b: &Bundle, ticks: u32) -> Result<(), TestCaseError> {
         let p = bundle_params(b);
-        let mut sim = Sim::from_bundle(p, 9, b).unwrap();
+        let (mut sim, _) = Sim::from_bundle(p, 9, b).unwrap();
         let d = sim.world.dims;
         let rock: Vec<usize> = (0..d.cols()).filter(|&c| sim.world.class[c] == ColClass::Rock).collect();
         for c in 0..d.cols() {
@@ -694,7 +694,7 @@ pub(crate) mod tests {
     fn two_sims_on_one_bundle_agree() {
         let mut b = flat_bundle(16, 2);
         build(&mut b, 4, 4, 5.0);
-        let sim = |seed| Sim::from_bundle(bundle_params(&b), seed, &b).unwrap();
+        let sim = |seed| Sim::from_bundle(bundle_params(&b), seed, &b).unwrap().0;
         let (a, c) = (sim(4), sim(4));
         assert_eq!(crate::state::encode(&a), crate::state::encode(&c));
         assert_eq!(a.world.material, c.world.material);

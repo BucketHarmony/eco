@@ -241,3 +241,61 @@ fn the_committed_capitol_bundle_loads_with_its_documented_shape() {
     let (lo, hi) = (*w.height.iter().min().unwrap(), *w.height.iter().max().unwrap());
     assert_eq!((lo, hi), (8, 16), "base_z = 8 plus 0..8 m of real ground, well under wz = 32");
 }
+
+/// The Capitol's scene planted (shot G3). Like the shape above, these numbers are the committed
+/// bundle's, so a re-export that moved a tree shows up here and not in a later shot's run.
+#[test]
+fn the_capitol_scene_plants_its_trees_and_shrubs() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("worlds/capitol");
+    let b = Bundle::load(&dir).unwrap();
+    let (p, _) = bundle_params(&b);
+    let (sim, imp) = ecosim::Sim::from_bundle(p, 42, &b).unwrap();
+
+    assert_eq!(imp.trees_in_scene, 81);
+    assert_eq!(imp.trees_planted, 79);
+    assert_eq!(imp.trees_moved, 0, "no tree on a sealed column had a plantable one within 2 m");
+    assert_eq!(imp.trees_dropped, 2, "two street trees stand in asphalt, more than 2 m from soil");
+    assert_eq!(imp.trees_merged, 0, "no two scene trees share a 1 m column");
+    assert_eq!((imp.shrubs_in_scene, imp.shrub_columns, imp.shrub_patches), (64, 750, 87));
+
+    // Every trunk is on a plantable column, one per column, and the scene's trees are all at least
+    // 4.6 m tall, so every one of them starts mature.
+    assert_eq!(sim.trees.len(), 79);
+    let mature = sim.trees.iter().filter(|t| sim.tree_stage(t) == ecosim::trees::Stage::Mature).count();
+    assert_eq!(mature, 79, "the shortest scene tree is 4.675 m, well over the 3 m mature height");
+    let mut cols: Vec<usize> = sim.trees.iter().map(|t| t.col(sim.world.dims)).collect();
+    assert!(cols.iter().all(|&c| sim.world.is_plantable(c)));
+    cols.sort_unstable();
+    let n = cols.len();
+    cols.dedup();
+    assert_eq!(cols.len(), n, "one trunk per column");
+
+    // The shrub beds raise 87 of the 1024 patches above `shrub.initial` and leave the rest alone.
+    let raised = sim.patches.iter().filter(|q| q.shrub > p_initial(&sim)).count();
+    assert_eq!(raised, 87);
+    assert!(sim.patches.iter().all(|q| q.shrub <= 1.0));
+    // The drains are in the world for shot G6.
+    assert_eq!(sim.world.pipes.len(), 4);
+    assert_eq!(sim.world.pipes[0].id, "pipe_1");
+}
+
+/// The starting shrub density of a patch the scene did not touch.
+fn p_initial(sim: &ecosim::Sim) -> f32 {
+    sim.params.shrub.initial
+}
+
+/// `fixtures/capitol-mini` is the committed 2-snapshot Capitol run the renderer reads (shot G3).
+/// A fresh run of the command that made it matches it byte for byte, `timing.json` apart.
+#[test]
+#[cfg_attr(coverage, ignore = "a 256x256 world; runs in `cargo test` and CI step 3, not under llvm-cov")]
+fn the_committed_capitol_mini_fixture_matches_a_fresh_run() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let b = Bundle::load(&root.join("worlds/capitol")).unwrap();
+    let (p, set) = bundle_params(&b);
+    let out = tmp("capitol_mini");
+    let opts = RunOptions { format_version: BUNDLE_FORMAT_VERSION, bundle: Some(&b), ..Default::default() };
+    run_with(p, 42, 100, 100, &set, &out, opts).unwrap();
+    let diff = ecosim::check::diff_runs(&root.join("fixtures/capitol-mini"), &out).unwrap();
+    assert_eq!(diff, Vec::<String>::new());
+    fs::remove_dir_all(&out).unwrap();
+}

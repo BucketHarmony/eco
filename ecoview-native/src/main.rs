@@ -16,7 +16,6 @@ use bevy::image::Image;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::remote::http::RemoteHttpPlugin;
 use bevy::remote::{BrpError, BrpResult, RemotePlugin};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::tasks::ComputeTaskPool;
@@ -53,7 +52,7 @@ fn args() -> Args {
         world: CAPITOL.to_string(),
         stress: false,
         headless: false,
-        frames: 8,
+        frames: 300,
         screenshot: None,
         bench: 0.0,
         port: brp::PORT,
@@ -70,7 +69,7 @@ fn args() -> Args {
             "--stress" => a.stress = true,
             "--headless" => a.headless = true,
             "--frames" => {
-                a.frames = next().parse().unwrap_or(8);
+                a.frames = next().parse().unwrap_or(300);
                 i += 1;
             }
             "--screenshot" => {
@@ -166,6 +165,7 @@ fn main() {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
                     close_when_requested: false,
+                    ..default()
                 }),
         )
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::ZERO));
@@ -173,7 +173,7 @@ fn main() {
         app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: format!("ecoview-native: {}", bundle.name),
-                resolution: (1280.0, 800.0).into(),
+                resolution: (1280u32, 800u32).into(),
                 ..default()
             }),
             ..default()
@@ -258,6 +258,11 @@ fn setup(
             yaw: 0.0,
             pitch: 0.0,
         },
+        AmbientLight {
+            color: Color::WHITE,
+            brightness: 700.0,
+            affects_lightmapped_meshes: false,
+        },
     ));
     if args.headless {
         // Render to an image instead of a window, the way Bevy's headless_renderer example does.
@@ -275,10 +280,9 @@ fn setup(
         image.texture_descriptor.usage |= bevy::render::render_resource::TextureUsages::COPY_SRC
             | bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT;
         let handle = images.add(image);
-        cam.insert(Camera {
-            target: RenderTarget::Image(handle.clone().into()),
-            ..default()
-        });
+        // In Bevy 0.19 the render target is its own component, not a `Camera` field.
+        // In Bevy 0.19 the render target is its own component, not a `Camera` field.
+        cam.insert(RenderTarget::Image(handle.clone().into()));
         commands.insert_resource(Headless {
             frames: args.frames,
             target: handle,
@@ -289,17 +293,13 @@ fn setup(
     commands.spawn((
         DirectionalLight {
             illuminance: 10_000.0,
-            shadows_enabled: false,
+            shadow_maps_enabled: false,
             ..default()
         },
         // The G1 fixed sun: 45 degrees, from the south-west. G9 replaces it with a real path.
         Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.8, -0.8, 0.0)),
     ));
-    commands.insert_resource(AmbientLight {
-        color: Color::WHITE,
-        brightness: 700.0,
-        affects_lightmapped_meshes: false,
-    });
+    // `AmbientLight` is a camera component in 0.19, not a resource, so it goes on the camera above.
 }
 
 /// Meshes a list of chunks in parallel on Bevy's compute pool, one scratch buffer per task.
@@ -480,6 +480,10 @@ fn bench_frames(
 }
 
 /// `--headless --frames N --screenshot PATH`: render N frames to an image, save it, exit.
+///
+/// N defaults to 300 because the PBR pipeline compiles in the background: a screenshot at frame 20
+/// comes back as the clear colour with every mesh missing, and the same scene at frame 300 is
+/// complete. This is measured, not guessed -- see MEASUREMENTS.md.
 fn headless_frames(
     mut commands: Commands,
     mut hl: ResMut<Headless>,
@@ -499,7 +503,13 @@ fn headless_frames(
             return;
         }
     }
-    if *frame > hl.frames + 4 {
+    // `save_to_disk` finishes on the IO task pool, so exiting a frame later kills the write. Wait for
+    // the file to appear, with a frame cap so a failed capture cannot hang the run.
+    let written = hl
+        .screenshot
+        .as_ref()
+        .is_none_or(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 0));
+    if written || *frame > hl.frames + 600 {
         exit.write(AppExit::Success);
     }
 }

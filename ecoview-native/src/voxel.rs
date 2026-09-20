@@ -295,7 +295,7 @@ impl VoxelWorld {
             return Vec::new();
         }
         let i = x + self.width * y;
-        let before = self.column_top(i);
+        let before = self.column_span(i);
         match action {
             EditAction::RaiseGround => self.ground_h[i] += self.cell_m,
             EditAction::LowerGround => self.ground_h[i] = (self.ground_h[i] - self.cell_m).max(0.0),
@@ -305,10 +305,14 @@ impl VoxelWorld {
                 self.building_h[i] = (self.building_h[i] - self.cell_m).max(0.0)
             }
         }
-        let after = self.column_top(i);
-        let hi = (before.max(after).max(0) as usize).min(self.levels - 1);
+        let after = self.column_span(i);
+        // Only the levels between the old and new ground and tops changed; below them it is still
+        // soil, which no edit rewrites. Lowering ground under a building moves the building's base
+        // too, so the span runs from the lower of the two ground levels to the higher of the two tops.
+        let lo = (before.0.min(after.0).max(0) as usize).min(self.levels - 1);
+        let hi = (before.1.max(after.1).max(0) as usize).min(self.levels - 1);
         let mut out = Vec::new();
-        for cz in 0..=(hi / CS) {
+        for cz in (lo / CS)..=(hi / CS) {
             for dy in -1..=1i32 {
                 for dx in -1..=1i32 {
                     let nx = (x as i32 + dx).clamp(0, self.width as i32 - 1) as usize / CS;
@@ -327,13 +331,13 @@ impl VoxelWorld {
         out
     }
 
-    /// The highest level a column occupies, used to find the chunks an edit touches.
-    fn column_top(&self, i: usize) -> i32 {
+    /// A column's ground level and its highest solid level, used to find the chunks an edit touches.
+    fn column_span(&self, i: usize) -> (i32, i32) {
         let g = level_of(self.ground_h[i], self.cell_m);
         if self.building_h[i] > 0.0 {
-            level_of(self.ground_h[i] + self.building_h[i], self.cell_m).max(g)
+            (g, level_of(self.ground_h[i] + self.building_h[i], self.cell_m).max(g))
         } else {
-            g
+            (g, g)
         }
     }
 }

@@ -4,7 +4,8 @@
 //! default reference strip.
 
 use ecosim::output::{
-    run, run_with as run_opts, write_meta, write_snapshot, RunOptions, FORMAT_VERSION, SERIES_HEADER,
+    run, run_with as run_opts, write_meta, write_snapshot, RunOptions, BUNDLE_FORMAT_VERSION, FORMAT_VERSION,
+    SERIES_HEADER,
 };
 use ecosim::{Params, Sim};
 use serde_json::Value;
@@ -118,7 +119,7 @@ fn snapshot_round_trips_through_reader() {
     let dir = tmp("snap_rt");
     fs::create_dir_all(&dir).unwrap();
     write_meta(&sim, 3, 300, 100, &["hunter.kill_prob=0.2".to_string()], &dir).unwrap();
-    write_snapshot(&sim, &dir, true).unwrap();
+    write_snapshot(&sim, &dir, true, true).unwrap();
 
     let meta = read_json(&dir.join("meta.json"));
     assert_eq!(meta["format_version"], FORMAT_VERSION);
@@ -309,17 +310,19 @@ fn forced_grazer_extinction_on_the_strip_runs_to_the_end() {
     );
 }
 
-/// Forced extinction by fire: every patch can ignite at any temperature and fire kills any animal
-/// in one tick, so both animal species burn out on seed 1 (hunters at tick 1333, grazers at 1611).
-/// Mutation is off (`heredity.mutation=0`) so fire is the only thing forced: with it on, 709 grazers
-/// outlast the fires on seed 1.
+/// Forced extinction by fire: every patch with fuel can ignite at any temperature and fire kills any
+/// animal in one tick, so both animal species burn out on seed 1 (hunters at tick 471, grazers at
+/// 1301). Ignition is scaled by the square of dryness, and the water tier keeps the soil near
+/// saturation (shot G4), so `base_rate` is 20 rather than 1: the product is clamped to a probability,
+/// and 20 is enough to leave it at 1 on a fuelled patch. Mutation is off (`heredity.mutation=0`) so
+/// fire is the only thing forced.
 /// The run continues to 20000 ticks with valid snapshots, fires keep burning, and `ecosim stats`
 /// names `burnt` as the dominant cause of both extinctions.
 #[test]
 fn forced_fire_extinction_runs_to_the_end_and_is_attributed_to_fire() {
     let dir = tmp("forced_fire_extinction");
     let set: Vec<String> = [
-        "fire.base_rate=1",
+        "fire.base_rate=20",
         "fire.temp_min=-50",
         "fire.temp_full=-40",
         "fire.animal_damage=100",
@@ -369,15 +372,15 @@ fn forced_hunter_extinction_by_refractory_runs_to_the_end() {
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
 
-/// Forced extinction by hunting cost: at `hunter.hunt_cost=5` an attack costs more than a hunter
-/// can win back at the typical success rate, so the hunters starve out on seed 1. The run continues
+/// Forced extinction by hunting cost: at `hunter.hunt_cost=8` an attack costs more than a hunter
+/// can win back at the typical success rate, so the hunters starve out on seed 1 (tick 5382). The run continues
 /// to 20000 ticks with valid snapshots, `ecosim stats` names `starved`, the predator–prey signature
 /// is reported as undefined with that cause, and the last snapshot restores.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run that reaches no line the unit tests miss; runs in `cargo test`")]
 fn forced_hunter_starvation_by_hunt_cost_runs_to_the_end() {
     let dir = tmp("forced_hunt_cost_extinction");
-    let set = ["hunter.hunt_cost=5".to_string()];
+    let set = ["hunter.hunt_cost=8".to_string()];
     let last = run_with(&dir, &set);
     assert_eq!(last.hunters, 0, "hunters extinct by the end");
     let text = assert_valid_run(&dir);
@@ -472,10 +475,12 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     p.disease.hunter_rate = 0.0;
     p.hunter.refractory = 5000;
     p.heredity.mutation = 0.0;
+    p.hydro.enabled = false;
     run(p, 42, 100, 100, &[], &fresh).unwrap();
     let cut = |rel: &str| {
         let f = Path::new(rel);
-        common::without_fire(f, common::without_traits(f, fs::read(fresh.join(rel)).unwrap()))
+        let b = common::without_water(f, fs::read(fresh.join(rel)).unwrap());
+        common::without_fire(f, common::without_traits(f, b))
     };
     assert!(cut("series.csv") == fs::read(v1.join("series.csv")).unwrap(), "series.csv");
     for snap in ["snap_000000", "snap_000100"] {
@@ -507,6 +512,9 @@ fn format_2_and_fire_only_add_to_version_1_files() {
         params.remove("fire");
         params.remove("disease");
         params.remove("heredity");
+        params.remove("rain");
+        params.remove("hydro");
+        params.remove("medium");
         params["hunter"].as_object_mut().unwrap().remove(key);
         params["hunter"].as_object_mut().unwrap().remove("flee_radius");
         params["hunter"].as_object_mut().unwrap().remove("hunt_cost");
@@ -525,12 +533,17 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     assert_eq!(ecosim::check::diff_runs(&fixture("s42-mini-v2"), &v2).unwrap(), Vec::<String>::new());
     let defaults = tmp("mini_defaults");
     run(common::square(), 42, 100, 100, &set, &defaults).unwrap();
-    let only = format!("only in {}: events.csv", defaults.display());
-    assert_eq!(ecosim::check::diff_runs(&v2, &defaults).unwrap(), [only, "differs: meta.json".to_string()]);
+    let diff = ecosim::check::diff_runs(&v2, &defaults).unwrap();
+    let (only, differs): (Vec<&String>, Vec<&String>) = diff.iter().partition(|s| s.starts_with("only in"));
+    assert_eq!(differs, ["differs: meta.json"]);
+    // Version 3 added events.csv, version 4 the four `world/` files and the two water files per
+    // snapshot (shot G4). Everything else is the same run: the water tier is on in both.
+    assert_eq!(only.len(), 1 + 4 + 2 * 2, "{only:?}");
+    assert!(only.iter().all(|s| ["events.csv", "world/", "water.bin"].iter().any(|k| s.contains(k))), "{only:?}");
     let (mut a, mut b) = (read_json(&v2.join("meta.json")), read_json(&defaults.join("meta.json")));
-    assert_eq!((a["format_version"].as_u64(), b["format_version"].as_u64()), (Some(2), Some(3)));
-    a["format_version"] = 3.into();
-    b["format_version"] = 3.into();
+    assert_eq!((a["format_version"].as_u64(), b["format_version"].as_u64()), (Some(2), Some(4)));
+    a["format_version"] = 4.into();
+    b.as_object_mut().unwrap().remove("world");
     assert_eq!(a, b);
 }
 
@@ -657,7 +670,9 @@ fn animals_off_run_has_no_animals_and_marks_the_animal_invariants_na() {
     let meta = read_json(&dir.join("meta.json"));
     assert_eq!(meta["animals"], serde_json::json!(false));
     assert_eq!(meta["params"]["animals"], serde_json::json!({ "enabled": false }));
-    assert_eq!(meta["format_version"], FORMAT_VERSION, "the switch is not a format change");
+    // The water tier makes every run format version 4 (shot G4); the animals switch is not itself a
+    // format change.
+    assert_eq!(meta["format_version"], BUNDLE_FORMAT_VERSION);
 
     let again = tmp("animals_off_again");
     run_on(&again, &set);

@@ -141,8 +141,15 @@ pub struct World {
     /// Lowest z per column that a building does **not** shade: voxels below it are dark whatever
     /// the canopy does. 0 (nothing shaded) in a noise world, which has no buildings.
     pub shade_top: Vec<u8>,
-    /// The bundle's ground grid at full resolution, or `None` in a noise world.
-    pub ground_grid: Option<Ground>,
+    /// The ground grid at full resolution: the bundle's, or a 1 m mirror of the ecology grid in a
+    /// noise world (all soil, except its water columns).
+    pub ground_grid: Ground,
+    /// Ground height per ground cell, metres; the noise world's is its terrain height.
+    pub ground_h: Vec<f32>,
+    /// Building height above the ground per ground cell; all zero in a noise world.
+    pub building_h: Vec<f32>,
+    /// Whether the world was loaded from a bundle (`ecosim run --world`).
+    pub bundle_world: bool,
     /// The bundle's storm drains; empty in a noise world. Read by the drain network in shot G6.
     pub pipes: Vec<Pipe>,
 }
@@ -370,9 +377,17 @@ impl World {
             patch_soil,
             patch_dist,
             shade_top,
-            ground_grid: None,
+            ground_grid: Ground { width: d.wx, depth: d.wy, ratio: 1, medium: Vec::new(), media: Medium::ALL.to_vec() },
+            ground_h: Vec::new(),
+            building_h: vec![0.0; d.cols()],
+            bundle_world: false,
             pipes: Vec::new(),
         };
+        // The noise world's ground grid mirrors the ecology grid: one 1 m cell per column, soil
+        // everywhere but the water columns, and the terrain height as the ground height.
+        w.ground_grid.medium =
+            w.class.iter().map(|&k| if k == ColClass::Water { Medium::Water } else { Medium::Soil } as u8).collect();
+        w.ground_h = w.ground.iter().map(|&h| h as f32).collect();
         for y in 0..d.wy {
             for x in 0..d.wx {
                 w.set_column_light(x, y, &[], params.world.canopy_absorb);
@@ -410,7 +425,7 @@ impl World {
                 for i in b.ground.cells_of(x, y) {
                     sum += b.ground_h[i];
                     let m = b.ground.medium_at(i);
-                    sealed += m.is_sealed() as usize;
+                    sealed += (m != Medium::Water && !params.medium.get(m).plantable) as usize;
                     water += (m == Medium::Water) as usize;
                     roof = roof.max(b.building_h[i]);
                 }
@@ -436,7 +451,10 @@ impl World {
         }
         let shade = building_shade(d, &heights, &building, params.bundle.shade_slope);
         let mut w = World::build(&heights, params, Some(&tops), shade);
-        w.ground_grid = Some(b.ground.clone());
+        w.ground_grid = b.ground.clone();
+        w.ground_h = b.ground_h.clone();
+        w.building_h = b.building_h.clone();
+        w.bundle_world = true;
         w.pipes = b.pipes.clone();
         Ok(w)
     }

@@ -138,3 +138,28 @@ pub fn without_traits(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
         _ => bytes,
     }
 }
+
+/// A run-directory file of a run with `hydro.enabled=false` as the pre-G4 ecosim wrote it: the six
+/// water columns cut from `series.csv`, each asserted to be 0. Nothing else changes, because with
+/// the water tier off no snapshot file is added and `state.bin` keeps its pre-G4 layout.
+pub fn without_water(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    match name.file_name().and_then(|n| n.to_str()) {
+        Some("series.csv") => {
+            let text = String::from_utf8(bytes).unwrap();
+            let mut out = String::with_capacity(text.len());
+            for (i, line) in text.lines().enumerate() {
+                let f: Vec<&str> = line.split(',').collect();
+                let (keep, water) = f.split_at(f.len() - 6);
+                if i == 0 {
+                    assert_eq!(water[0], "rain_mm", "series.csv header");
+                } else {
+                    assert!(water.iter().all(|v| *v == "0.0000"), "water with the tier off: {line}");
+                }
+                out.push_str(&keep.join(","));
+                out.push('\n');
+            }
+            out.into_bytes()
+        }
+        _ => bytes,
+    }
+}

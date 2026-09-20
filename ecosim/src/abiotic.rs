@@ -60,10 +60,19 @@ impl Sim {
         }
     }
 
-    /// Steps 1–7 of the every-10-ticks soil update, in order.
+    /// The every-10-ticks soil update. With the water tier on (shot G4) the water half is
+    /// [`Sim::settle_water`] — ponded water soaking in and evaporating, percolation and ET — and
+    /// the moisture field is derived from what is left; with it off, the pre-G4 steps 1–5 run
+    /// instead (rain, diffusion, evaporation, pond wetting, clamp). Detritus decay and the
+    /// fertility clamp follow either way.
     pub fn update_soil(&mut self, tick: u32) {
         let d = self.world.dims;
         let soil: Vec<usize> = (0..d.cols()).filter(|&c| self.world.class[c] == ColClass::Soil).collect();
+        if self.hydro.is_some() {
+            let drained = self.settle_water(10.0 * crate::hydro::tick_hours(&self.params));
+            self.decay_detritus(&soil, &drained);
+            return;
+        }
         // 1. Rain, uniform unless there is a gradient (checked once, outside the loop)
         let r = self.rain(tick);
         let gradient = self.params.climate.rain_gradient;
@@ -97,6 +106,14 @@ impl Sim {
         for &c in &soil {
             self.moisture[c] = self.moisture[c].clamp(0.0, 255.0);
         }
+        self.decay_detritus(&soil, &[]);
+    }
+
+    /// Steps 6–7 of the soil update: detritus decays into the fertility of its patch's soil
+    /// columns, leaching takes a share of what a column drained away with it (`hydro.leach_k`, 0
+    /// when the water tier is off, which is what `drained` empty means), and fertility is clamped.
+    fn decay_detritus(&mut self, soil: &[usize], drained: &[f32]) {
+        let d = self.world.dims;
         // 6. Decay detritus into fertility
         let cl = self.params.climate.clone();
         for p in 0..d.patches() {
@@ -115,8 +132,15 @@ impl Sim {
                 self.fertility[c] += per;
             }
         }
+        // 6b. Leaching: fertility leaves with the water that drained out of the column.
+        if !drained.is_empty() {
+            let k = self.params.hydro.leach_k;
+            for &c in soil {
+                self.fertility[c] -= self.fertility[c] * (k * drained[c]).clamp(0.0, 1.0);
+            }
+        }
         // 7. Clamp fertility
-        for &c in &soil {
+        for &c in soil {
             self.fertility[c] = self.fertility[c].clamp(0.0, 255.0);
         }
     }
@@ -168,10 +192,12 @@ mod tests {
         let after: f64 = m.iter().map(|&v| v as f64).sum();
         assert!((before - after).abs() / before < 1e-5, "diffusion changed mass: {before} → {after}");
 
-        // Full soil update with rain off: total drops by exactly Σ evaporation.
+        // Full soil update with rain off: total drops by exactly Σ evaporation. This is the
+        // pre-G4 moisture path, so the water tier is off.
         let mut p = params.clone();
         p.climate.rain_base = 0.0;
         p.climate.rain_amp = 0.0;
+        p.hydro.enabled = false;
         let mut sim =
             Sim::with_world(p, rand::SeedableRng::seed_from_u64(1), World::from_heights(&vec![14u8; COLS], &params));
         sim.moisture = m.clone();

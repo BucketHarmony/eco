@@ -93,11 +93,27 @@ it covers. Grass starts as it does in a noise world. `ecosim run --world` prints
 scene: 81 trees -> 79 planted (0 moved, 2 dropped, 0 merged); 64 shrubs over 750 columns in 87 patches
 ```
 
-The bundle's pipes are loaded into the world state and are not used yet.
+## Water
 
-A bundle run writes `format_version` 4 (`--format-version` picks 2, 3 or 4 explicitly; 4 needs
-`--world` and `--world` needs 4). It cannot be forked: `ecosim fork` rebuilds the terrain, and only
-the bundle has it. `DECISIONS.md` (shots G1 and G3) has the design calls.
+`hydro.enabled` (on by default, shot G4) adds a water tier on the ground grid. Rain arrives as
+storms — `rain.storm_p` per tick times a season factor, depth exponential with mean
+`rain.storm_mean_mm` — and each storm runs downhill in one pass over a flow graph built once at
+load: depressions filled by priority-flood, D8 receivers, a topological order, roofs draining to
+their downspouts through the bundle's pipes, edge cells leaving the world. What a ground cell can
+take per hour and hold is its medium's (`[medium.<name>]`); the rest ponds in `water` or runs on.
+Between storms, every 10 ticks, soil water drains by percolation, loses `hydro.et_mm_h` to
+evapotranspiration, leaches fertility away at `hydro.leach_k` per mm percolated, and sets the u8
+`moisture` field, which is derived from it rather than stored. A f64 ledger balances rain against
+storage, outflow and loss to 1e-9 relative every tick. Six `series.csv` columns and a `storm` event
+kind report it; `sweeps/shotG4/FINDINGS.md` has the measurements.
+
+The bundle's pipes feed the roof drainage above.
+
+A bundle run writes `format_version` 4 (`--format-version` picks 2, 3 or 4 explicitly; `--world`
+needs 4, but 4 no longer needs `--world` — since shot G4 a noise run writes 4 too, with a synthesized
+all-soil ground grid, and `meta.json`'s `world.bundle` says which it is). It cannot be forked:
+`ecosim fork` rebuilds the terrain, and only the bundle has it. `DECISIONS.md` (shots G1 and G3) has
+the design calls.
 
 `worlds/capitol/` is the committed reference world: a 256 m square of the Michigan State Capitol
 grounds in Lansing, from public-domain USGS LiDAR, with its walks and plazas from OpenStreetMap
@@ -125,6 +141,6 @@ checks.
 `tests/data/s42-manifest.sha256` holds the sha256 of `series.csv` and every snapshot file of `ecosim run --seed 42 --ticks 20000 --snapshot-every 100`. The test `fresh_s42_matches_committed_manifest` regenerates that run and compares the hashes.
 
 A change that alters simulation behaviour on purpose must do three things:
-- Regenerate the manifest from the run directory, with `(cd runs/s42 && sha256sum series.csv snap_*/* | LC_ALL=C sort -k2)`, then normalize the output to two-space `hash  path` lines.
+- Regenerate the manifest from the run directory: every file under it except `timing.json`, `meta.json` and `params.toml` (2016 of them — `series.csv`, `events.csv`, the four `world/` files and 10 per snapshot), hashed with `sha256sum`, `LC_ALL=C` sorted by path, as two-space `hash  path` lines.
 - Update `tests/data/s42-check.txt`.
 - Say so in `DECISIONS.md`.

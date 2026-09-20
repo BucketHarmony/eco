@@ -511,3 +511,31 @@ inside `World::from_bundle`.
 **Not tuned, and worth watching.** `fertility_mean` now peaks at 218.33 against its 220 ceiling. The
 honest reading is that the invariant's band was drawn for a half-vegetated site; the first of G4, G5
 or G9 to touch that field should look at it, with the number above as the before.
+
+## Shot G4 — the water tier
+
+Every value here is new in this shot, so "before" is the first draft that went into `params.toml`
+and "after" is what the acceptance lines left standing. No pre-existing default moved: G4's
+acceptance allows moving only `rain.*` and `hydro.*`, and nothing else was touched.
+
+| Parameter | Before | After | Why, and the acceptance line that forced it |
+|---|---|---|---|
+| `rain.et_mm_h` → `hydro.et_mm_h` | 0.25 | 0.12 | 0.25 mm/h is 5.5 mm a tick against a lawn's 40 mm field capacity, so soil water fell to zero between storms and the strip's trees died of drought in the first few thousand ticks. Forced by the regression anchor, "seeds 1, 2, 3 and 42 still pass `ecosim check` at 20000 ticks at the defaults". |
+| `rain.storm_p` | 0.047 | 0.10 | The draft kept the pre-G4 mean of 1 mm per tick at a 21 mm storm, which is the wrong end of the sweep's safe band (see below): trees died of drought on two of the three seeds. At a 10 mm mean the same long-run total arrives often enough that the soil never empties. Same acceptance line. |
+| `hydro.leach_k` | 0.02 | 0.0002 | Leaching is fertility's only sink (the operator's note for this shot). At 0.02 a typical 20 mm percolation takes 40% of a column's fertility per soil update and `fertility_mean` fell through the floor of 40 within 2000 ticks. 0.0002 is the largest round value that holds both ends. Forced by `ecosim check`'s `fertility_mean in [40, 220]`, on the anchor seeds and on the new `check --long` line. |
+| `hydro.saturation` | (none: field capacity was the ceiling) | 1.2 | With the ceiling at field capacity there is no water above it to drain, so percolation was always zero and so was leaching — fertility kept saturating. 1.2 gives each column 20% of its capacity as the transient store that drains and leaches. Forced by the same `fertility_mean` line, via `check --long`. |
+
+**The result of the `fertility_mean` work**, which is the operator's note in full: over 200000 ticks
+of seed 42 at the defaults, `fertility_mean` peaks at 128.0 — its value at tick 0 — bottoms at 46.9
+at tick 39899 and averages 65.6, against a pre-G4 `runs/long42` that reached the 255 ceiling by tick
+53100 and stayed there. `check --long` now has a `fertility_mean` line, so a future regression is a
+test failure rather than a reading of the CSV.
+
+**`rain.storm_mean_mm` stays at 10 and the safe band is 5-10.** The sweep (`sweeps/shotG4/FINDINGS.md`)
+holds the long-run rainfall fixed and varies storm size: 3 of 3 cells pass at means 5 and 10, 2 of 3
+at 20 (seed 1 loses its trees at tick 1450) and 0 of 3 at 40, where 39 of the first 40 tree deaths are
+`drought`. Bigger storms deliver the same water in fewer, larger pulses, most of which runs off
+instead of soaking in — the lawn's runoff fraction goes 0.051, 0.207, 0.485, 0.710 across the four
+sizes — so the mean is unchanged but the dry spells between storms get longer. The default sits at
+the wet edge of the band, not its middle, and that is deliberate: it is the value at which the 1 mm
+per tick of the pre-G4 rain arrives in storms a real site would recognise.

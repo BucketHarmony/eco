@@ -13,6 +13,7 @@
 //! | `germination` | tree | column | | tree id |
 //! | `tree_death` | tree | column | `old_age`, `drought`, `crowded`, `burnt` | tree id |
 //! | `immigration` | grazer, hunter, tree | column | | immigrant id |
+//! | `storm` | | | | `<depth> <runoff> <outflow>`, three millimetre means separated by spaces |
 //! | `seed_drop` | reserved: never written yet | | | |
 //!
 //! Recording is off unless `Sim::log_events` is set, and it never draws from the RNG or writes any
@@ -47,13 +48,15 @@ pub enum EventKind {
     TreeDeath,
     /// An animal or tree arrived at the world's edge (open boundaries).
     Immigration,
+    /// Rain fell on the whole world during this tick (`hydro.enabled`).
+    Storm,
     /// Reserved for animal seed dispersal; never written yet.
     SeedDrop,
 }
 
 impl EventKind {
     /// Every kind, in declaration order.
-    pub const ALL: [EventKind; 9] = [
+    pub const ALL: [EventKind; 10] = [
         EventKind::Death,
         EventKind::Birth,
         EventKind::Ignition,
@@ -62,13 +65,24 @@ impl EventKind {
         EventKind::Germination,
         EventKind::TreeDeath,
         EventKind::Immigration,
+        EventKind::Storm,
         EventKind::SeedDrop,
     ];
 
     /// The name written in the `kind` column.
     pub fn name(self) -> &'static str {
-        ["death", "birth", "ignition", "spread", "burnout", "germination", "tree_death", "immigration", "seed_drop"]
-            [self as usize]
+        [
+            "death",
+            "birth",
+            "ignition",
+            "spread",
+            "burnout",
+            "germination",
+            "tree_death",
+            "immigration",
+            "storm",
+            "seed_drop",
+        ][self as usize]
     }
 }
 
@@ -78,8 +92,42 @@ pub const TREE_CAUSES: [&str; 4] = ["old_age", "drought", "crowded", "burnt"];
 /// Species names in the `species` column; the empty string for patch events.
 pub const SPECIES: [&str; 4] = ["grazer", "hunter", "tree", ""];
 
+/// The `detail` column: nothing, a whole number (an entity id or a patch index), or a storm's
+/// three millimetre totals. It is one column because the file's nine columns are the contract;
+/// a storm writes its numbers space-separated inside that column.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Detail {
+    /// The column is empty.
+    #[default]
+    None,
+    /// An entity id, or the source patch of a `spread`.
+    Id(u32),
+    /// A `storm` row: rain depth, runoff and edge outflow this tick, world means in mm.
+    Storm(f32, f32, f32),
+}
+
+impl Detail {
+    /// The id, for the kinds that carry one.
+    pub fn id(self) -> Option<u32> {
+        match self {
+            Detail::Id(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Detail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Detail::None => Ok(()),
+            Detail::Id(v) => write!(f, "{v}"),
+            Detail::Storm(d, r, o) => write!(f, "{d:.4} {r:.4} {o:.4}"),
+        }
+    }
+}
+
 /// One row of `events.csv`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Event {
     /// Tick during which it happened.
     pub tick: u32,
@@ -93,8 +141,8 @@ pub struct Event {
     pub col: Option<(u8, u8)>,
     /// A `Cause` name or one of `TREE_CAUSES`; empty for kinds without a cause.
     pub cause: &'static str,
-    /// The entity id, or the source patch of a spread (see the module table).
-    pub detail: Option<u32>,
+    /// The entity id, the source patch of a spread, or a storm's numbers (see the module table).
+    pub detail: Detail,
 }
 
 fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
@@ -119,7 +167,7 @@ impl Event {
             px,
             py,
             self.cause,
-            opt(self.detail)
+            self.detail
         );
     }
 
@@ -146,8 +194,23 @@ impl Event {
             patch: (px, py),
             col,
             cause: lookup(&causes, f[7], "cause")?,
-            detail: if f[8].is_empty() { None } else { Some(num(f[8])?) },
+            detail: parse_detail(f[8], line)?,
         })
+    }
+}
+
+/// Parse the `detail` column: empty, one whole number, or a storm's three numbers.
+fn parse_detail(s: &str, line: &str) -> Result<Detail, String> {
+    let bad = || format!("events.csv: bad detail '{s}' in '{line}'");
+    let mut parts = s.split(' ');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (None, ..) | (Some(""), ..) => Ok(Detail::None),
+        (Some(v), None, ..) => v.parse::<u32>().map(Detail::Id).map_err(|_| bad()),
+        (Some(d), Some(r), Some(o), None) => {
+            let f = |v: &str| v.parse::<f32>().map_err(|_| bad());
+            Ok(Detail::Storm(f(d)?, f(r)?, f(o)?))
+        }
+        _ => Err(bad()),
     }
 }
 
@@ -196,7 +259,7 @@ pub fn unlit_burnout(events: &[Event]) -> Option<&Event> {
 impl Sim {
     /// Record an event of this tick, when logging is on.
     pub(crate) fn log(&mut self, kind: EventKind, species: &'static str, patch: usize, col: Option<(usize, usize)>) {
-        self.log_with(kind, species, patch, col, "", None);
+        self.log_with(kind, species, patch, col, "", Detail::None);
     }
 
     /// `log` with a cause and a detail.
@@ -207,7 +270,7 @@ impl Sim {
         patch: usize,
         col: Option<(usize, usize)>,
         cause: &'static str,
-        detail: Option<u32>,
+        detail: Detail,
     ) {
         if self.log_events {
             let col = col.map(|(x, y)| (x as u8, y as u8));
@@ -226,7 +289,7 @@ impl Sim {
         cause: &'static str,
         id: u32,
     ) {
-        self.log_with(kind, species, self.world.dims.patch_of(x, y), Some((x, y)), cause, Some(id));
+        self.log_with(kind, species, self.world.dims.patch_of(x, y), Some((x, y)), cause, Detail::Id(id));
     }
 }
 
@@ -265,6 +328,10 @@ mod tests {
 
     fn busy_params(b: &Busy) -> Params {
         let mut p = Params::load_square();
+        // These runs are about what is logged, not about water; the pre-G4 moisture path keeps the
+        // fire and starvation causes reachable inside a few hundred ticks. `storm` rows have their
+        // own test below.
+        p.hydro.enabled = false;
         p.fire.base_rate = b.fire_rate;
         p.fire.temp_min = -50.0;
         p.fire.temp_full = -40.0;
@@ -407,14 +474,21 @@ mod tests {
         let (events, dir) = busy_run(2, 300, 100, &EVERYTHING);
         assert_eq!(unlit_burnout(&events), None);
         for e in events.iter().filter(|e| e.kind == EventKind::Spread) {
-            let from = e.detail.unwrap() as usize;
+            let from = e.detail.id().unwrap() as usize;
             let d = crate::world::sq::D;
             let is_source = |q: usize| d.patch_xy(q) == (e.patch.0 as usize, e.patch.1 as usize);
             assert!(crate::fire::patch_neighbours(d, from).any(is_source), "{e:?}");
         }
         // A burnout with no ignition before it is caught.
-        let lone =
-            Event { tick: 3, kind: EventKind::Burnout, species: "", patch: (1, 1), col: None, cause: "", detail: None };
+        let lone = Event {
+            tick: 3,
+            kind: EventKind::Burnout,
+            species: "",
+            patch: (1, 1),
+            col: None,
+            cause: "",
+            detail: Detail::None,
+        };
         assert_eq!(unlit_burnout(&[lone]), Some(&lone));
         let lit = Event { kind: EventKind::Ignition, tick: 1, ..lone };
         assert_eq!(unlit_burnout(&[lit, lone]), None);
@@ -437,29 +511,50 @@ mod tests {
         assert!(a.events.is_empty() && b.events.len() > 100);
     }
 
+    /// With the water tier on, every tick that rains logs one `storm` row, its detail carrying the
+    /// tick's depth, runoff and outflow, and those are the tick's series columns.
+    #[test]
+    fn storm_rows_carry_their_depth_runoff_and_outflow() {
+        let mut p = Params::load_square();
+        p.rain.storm_p = 0.5;
+        let dir = scratch_dir();
+        run(p, 3, 200, 100, &[], &dir).unwrap();
+        let events = parse_events(&fs::read_to_string(dir.join(EVENTS_FILE)).unwrap()).unwrap();
+        let storms: Vec<&Event> = events.iter().filter(|e| e.kind == EventKind::Storm).collect();
+        assert!((60..=140).contains(&storms.len()), "{} storms in 200 ticks at p = 0.5", storms.len());
+        let rows = read_series(&dir).unwrap();
+        for e in &storms {
+            assert_eq!((e.species, e.cause, e.col), ("", "", None), "a storm is a whole-world event");
+            let Detail::Storm(depth, runoff, outflow) = e.detail else { panic!("{e:?} has no storm detail") };
+            let w = rows[e.tick as usize].water;
+            assert!(depth > 0.0, "a logged storm dropped rain");
+            assert_eq!((depth, runoff, outflow), (w.rain_mm, w.runoff_mm, w.outflow_mm), "tick {}", e.tick);
+        }
+        let wet: Vec<u32> = storms.iter().map(|e| e.tick).collect();
+        for r in rows.iter().filter(|r| r.tick > 0 && !wet.contains(&r.tick)) {
+            assert_eq!(r.water.rain_mm, 0.0, "tick {} logged no storm and had no rain", r.tick);
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn event() -> impl Strategy<Value = Event> {
         let kinds = prop::sample::select(EventKind::ALL.to_vec());
         let species = prop::sample::select(SPECIES.to_vec());
         let causes: Vec<&'static str> = Cause::ALL.iter().map(|c| c.name()).chain(TREE_CAUSES).chain([""]).collect();
         let col = prop::option::of((any::<u8>(), any::<u8>()));
-        (
-            any::<u32>(),
-            kinds,
-            species,
-            (any::<u8>(), any::<u8>()),
-            col,
-            prop::sample::select(causes),
-            prop::option::of(any::<u32>()),
+        let detail = prop_oneof![
+            Just(Detail::None),
+            any::<u32>().prop_map(Detail::Id),
+            // Four decimals is what a storm row writes, so the round trip is over those values.
+            (0u32..1_000_000, 0u32..1_000_000, 0u32..1_000_000).prop_map(|(d, r, o)| Detail::Storm(
+                d as f32 / 1e4,
+                r as f32 / 1e4,
+                o as f32 / 1e4
+            )),
+        ];
+        (any::<u32>(), kinds, species, (any::<u8>(), any::<u8>()), col, prop::sample::select(causes), detail).prop_map(
+            |(tick, kind, species, patch, col, cause, detail)| Event { tick, kind, species, patch, col, cause, detail },
         )
-            .prop_map(|(tick, kind, species, patch, col, cause, detail)| Event {
-                tick,
-                kind,
-                species,
-                patch,
-                col,
-                cause,
-                detail,
-            })
     }
 
     proptest! {
@@ -483,7 +578,7 @@ mod tests {
             patch: (7, 7),
             col: None,
             cause: "",
-            detail: None,
+            detail: Detail::None,
         };
         let mut line = String::new();
         e.write_line(&mut line);
@@ -502,7 +597,7 @@ mod tests {
             patch: (0, 0),
             col: None,
             cause: "eaten",
-            detail: None,
+            detail: Detail::None,
         };
         assert!(deaths_per_tick(&[past], 5).is_err());
         assert!(deaths_per_tick(&[Event { species: "tree", ..past }], 6).is_err());

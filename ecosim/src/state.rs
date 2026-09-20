@@ -1,12 +1,12 @@
 //! `state.bin`: the part of a snapshot the other files don't hold exactly, and the restore path that
 //! turns a snapshot directory back into a `Sim` that steps identically to the one that wrote it.
 //!
-//! Layout (version 4), all integers and floats little-endian, no padding:
+//! Layout (version 5), all integers and floats little-endian, no padding:
 //!
 //! | field | type |
 //! |---|---|
 //! | magic | `b"ECOSTATE"` |
-//! | state version | u32 = 4 |
+//! | state version | u32 = 5 |
 //! | tick, next_id, hunter_immigrants | 3 × u32 |
 //! | RNG seed, stream, word position | [u8; 32], u64, u128 |
 //! | deaths this tick | 2 × 5 × u32 (grazers then hunters, `Cause` order) |
@@ -18,14 +18,20 @@
 //! | fire | total_burnt u32, then patches × burning_ticks_left u32 (patch order) |
 //! | traits | per grazer, then per hunter (`Vec` order): energy_cost_mult, flee_distance, repro_threshold f32 |
 //! | handling | per hunter (`Vec` order): handling ticks left u32 |
+//! | water | u32 ground cells, then cells × ponded f64 (mm), cols × soil water f64 (mm), 6 × ledger f64, 6 × row f32 |
 //!
 //! Version 2 is version 1 with the fire section appended, version 3 is version 2 with the traits
-//! section appended, and version 4 is version 3 with the handling section appended; nothing before
-//! any of them moved. The dimensions are not in the file: they come from the params (`meta.json`)
-//! the snapshot is restored with, and a file of the wrong size for them fails to decode. Version 4 is written only when handling is in use (`hunter.handling_ticks` above
-//! 0, or a hunter still handling); otherwise the file is version 3, byte for byte what the ecosim
-//! before handling wrote, and it decodes with every hunter's handling 0. Animal state 6 is Handling,
-//! which only a version-4 file holds.
+//! section appended, version 4 is version 3 with the handling section appended, and version 5 is
+//! version 4 with the water section appended; nothing before any of them moved. The dimensions are
+//! not in the file: they come from the params (`meta.json`) the snapshot is restored with, and a
+//! file of the wrong size for them fails to decode. Version 5 is written when the water tier is on
+//! (`hydro.enabled`), version 4 when it is off and handling is in use (`hunter.handling_ticks`
+//! above 0, or a hunter still handling), and otherwise version 3, byte for byte what the ecosim
+//! before handling wrote; a version-3 file decodes with every hunter's handling 0, and a file
+//! without the water section restores the pre-water moisture path. Animal state 6 is Handling,
+//! which only a version-4 or later file holds. The water stores are f64 in the file as they are in
+//! memory, because the ledger closes to 1e-9 and f32 rounding on every snapshot would not keep it
+//! closed across a fork (DECISIONS.md, "Water in f64").
 //!
 //! Entities are stored in `Vec` order, dead ones included, because indices into the Vecs (the trunk
 //! index, the grids) and the update order depend on it. Everything else a `Sim` holds is recomputed
@@ -33,6 +39,8 @@
 
 use crate::animals::{Animal, Kind, State};
 use crate::heredity::Traits;
+use crate::hydro::{Hydro, Ledger, Water};
+use crate::output::WATER_FIELDS;
 use crate::params::Params;
 use crate::sim::{flee_offsets, offsets_within, Deaths, Patch, Sim, NO_TREE};
 use crate::trees::Tree;
@@ -44,9 +52,11 @@ use std::path::Path;
 
 /// First bytes of every `state.bin`.
 pub const MAGIC: &[u8; 8] = b"ECOSTATE";
-/// `state.bin` layout version with the handling section; `decode` also reads `STATE_VERSION_NO_HANDLING`.
-pub const STATE_VERSION: u32 = 4;
-/// The layout written when handling is not in use: version 4 without the handling section.
+/// `state.bin` layout version with the water section; `decode` also reads the two older layouts.
+pub const STATE_VERSION: u32 = 5;
+/// The layout written when the water tier is off and handling is in use: version 5 without water.
+pub const STATE_VERSION_HANDLING: u32 = 4;
+/// The layout written when neither is in use: version 4 without the handling section.
 pub const STATE_VERSION_NO_HANDLING: u32 = 3;
 
 const STATES: [State; 7] =
@@ -57,7 +67,11 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut b = Vec::with_capacity(64 * 1024);
     b.extend_from_slice(MAGIC);
     let handling = sim.params.hunter.handling_ticks > 0 || sim.hunters.iter().any(|h| h.handling > 0);
-    let version = if handling { STATE_VERSION } else { STATE_VERSION_NO_HANDLING };
+    let version = match (&sim.hydro, handling) {
+        (Some(_), _) => STATE_VERSION,
+        (None, true) => STATE_VERSION_HANDLING,
+        (None, false) => STATE_VERSION_NO_HANDLING,
+    };
     for v in [version, sim.tick, sim.next_id, sim.hunter_immigrants] {
         b.extend_from_slice(&v.to_le_bytes());
     }
@@ -112,12 +126,35 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
             b.extend_from_slice(&v.to_le_bytes());
         }
     }
-    if handling {
+    if version >= STATE_VERSION_HANDLING {
         for a in &sim.hunters {
             b.extend_from_slice(&a.handling.to_le_bytes());
         }
     }
+    if let Some(h) = &sim.hydro {
+        b.extend_from_slice(&(h.ponded.len() as u32).to_le_bytes());
+        for v in h.ponded.iter().chain(&h.soil).chain(&ledger_array(&h.ledger)) {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in h.water.as_array() {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+    }
     b
+}
+
+/// The water tier's part of a snapshot.
+#[derive(Debug)]
+struct WaterState {
+    ponded: Vec<f64>,
+    soil: Vec<f64>,
+    ledger: [f64; 6],
+    row: [f32; WATER_FIELDS],
+}
+
+/// The ledger's running totals, in the order the water section stores them.
+fn ledger_array(l: &Ledger) -> [f64; 6] {
+    [l.rain, l.evap, l.et, l.drain, l.outflow, l.start]
 }
 
 /// Little-endian reader over `state.bin` bytes; every read fails cleanly on truncation.
@@ -146,6 +183,12 @@ impl<'a> Reader<'a> {
     }
     fn f32s(&mut self, n: usize) -> Result<Vec<f32>, String> {
         (0..n).map(|_| self.f32()).collect()
+    }
+    fn f64(&mut self) -> Result<f64, String> {
+        Ok(f64::from_le_bytes(self.arr()?))
+    }
+    fn f64s(&mut self, n: usize) -> Result<Vec<f64>, String> {
+        (0..n).map(|_| self.f64()).collect()
     }
     fn flag(&mut self) -> Result<bool, String> {
         match self.u8()? {
@@ -180,6 +223,9 @@ struct Decoded {
     hunters: Vec<Animal>,
     grazer_grid: Vec<Vec<u32>>,
     total_burnt: u32,
+    /// Ponded water per ground cell, soil water per column, the ledger and this tick's row values;
+    /// `None` before version 5.
+    water: Option<WaterState>,
 }
 
 /// Placeholder traits for a decoded animal until the traits section is read.
@@ -209,9 +255,9 @@ fn decode(bytes: &[u8], d: Dims) -> Result<Decoded, String> {
         return Err("state.bin: bad magic (not an ecosim state file)".into());
     }
     let version = r.u32()?;
-    if version != STATE_VERSION && version != STATE_VERSION_NO_HANDLING {
+    if !(STATE_VERSION_NO_HANDLING..=STATE_VERSION).contains(&version) {
         return Err(format!(
-            "state.bin: state version {version}, this ecosim reads {STATE_VERSION_NO_HANDLING} and {STATE_VERSION}"
+            "state.bin: state version {version}, this ecosim reads {STATE_VERSION_NO_HANDLING} to {STATE_VERSION}"
         ));
     }
     let (tick, next_id, hunter_immigrants) = (r.u32()?, r.u32()?, r.u32()?);
@@ -270,11 +316,27 @@ fn decode(bytes: &[u8], d: Dims) -> Result<Decoded, String> {
     for a in grazers.iter_mut().chain(&mut hunters) {
         a.traits = Traits::from_array([r.f32()?, r.f32()?, r.f32()?]);
     }
-    if version == STATE_VERSION {
+    if version >= STATE_VERSION_HANDLING {
         for h in &mut hunters {
             h.handling = r.u32()?;
         }
     }
+    let water = if version == STATE_VERSION {
+        let cells = r.count("ground cell")?;
+        let ponded = r.f64s(cells)?;
+        let soil = r.f64s(d.cols())?;
+        let mut ledger = [0.0; 6];
+        for v in &mut ledger {
+            *v = r.f64()?;
+        }
+        let mut row = [0.0f32; WATER_FIELDS];
+        for v in &mut row {
+            *v = r.f32()?;
+        }
+        Some(WaterState { ponded, soil, ledger, row })
+    } else {
+        None
+    };
     if r.at != bytes.len() {
         return Err(format!("state.bin: {} trailing bytes", bytes.len() - r.at));
     }
@@ -292,6 +354,7 @@ fn decode(bytes: &[u8], d: Dims) -> Result<Decoded, String> {
         hunters,
         grazer_grid,
         total_burnt,
+        water,
     })
 }
 
@@ -358,9 +421,40 @@ impl Sim {
             total_burnt: d.total_burnt,
             log_events: false,
             events: Vec::new(),
+            hydro: None,
         };
+        sim.restore_water(d.water)?;
         sim.recompute_derived();
         Ok(sim)
+    }
+
+    /// Put the water tier back: rebuild the routing from the world, then load the stores and the
+    /// ledger the snapshot carried. A file whose water section disagrees with `hydro.enabled` is
+    /// rejected rather than silently restored onto the other moisture path.
+    fn restore_water(&mut self, water: Option<WaterState>) -> Result<(), String> {
+        match (self.params.hydro.enabled, water) {
+            (false, None) => Ok(()),
+            (true, Some(w)) => {
+                let mut h = Hydro::new(&self.world, &self.params);
+                if h.ponded.len() != w.ponded.len() || h.soil.len() != w.soil.len() {
+                    return Err(format!(
+                        "state.bin: water section holds {} cells and {} columns, the world has {} and {}",
+                        w.ponded.len(),
+                        w.soil.len(),
+                        h.ponded.len(),
+                        h.soil.len()
+                    ));
+                }
+                (h.ponded, h.soil) = (w.ponded, w.soil);
+                let l = w.ledger;
+                h.ledger = Ledger { rain: l[0], evap: l[1], et: l[2], drain: l[3], outflow: l[4], start: l[5] };
+                h.water = Water::from_array(w.row);
+                self.hydro = Some(h);
+                Ok(())
+            }
+            (true, None) => Err("state.bin: no water section, but these params have hydro.enabled".into()),
+            (false, Some(_)) => Err("state.bin: has a water section, but these params have hydro off".into()),
+        }
     }
 
     /// Recompute every field `state.bin` leaves out from the fields it holds.
@@ -414,7 +508,7 @@ mod tests {
 
     fn restored(sim: &Sim) -> Sim {
         let dir = scratch_dir();
-        write_snapshot(sim, &dir, true).unwrap();
+        write_snapshot(sim, &dir, true, true).unwrap();
         let r = Sim::restore(sim.params.clone(), &dir.join(snapshot_dir_name(sim.tick))).unwrap();
         fs::remove_dir_all(&dir).unwrap();
         r
@@ -478,19 +572,27 @@ mod tests {
         restore_steps_identically(7, 1234).unwrap();
     }
 
+    /// Params with the water tier off, for the tests that check the two older layouts.
+    fn dry_params() -> Params {
+        let mut p = Params::load_square();
+        p.hydro.enabled = false;
+        p
+    }
+
     /// With handling on, `state.bin` is version 4 and carries each hunter's handling ticks left, so a
     /// restore taken while hunters are mid-handling steps identically. With it off, the file is
-    /// version 3 and the same size as before handling existed.
+    /// version 3 and the same size as before handling existed. Both are with the water tier off;
+    /// with it on the file is version 5.
     #[test]
     fn restore_regression_mid_handling() {
-        let mut p = Params::load_square();
+        let mut p = dry_params();
         p.hunter.handling_ticks = 400;
         let mut a = stepped_with(p, 42, 300);
         while !a.hunters.iter().any(|h| h.alive && h.handling > 0) {
             a.step();
         }
         let bytes = encode(&a);
-        assert_eq!(bytes[8..12], STATE_VERSION.to_le_bytes());
+        assert_eq!(bytes[8..12], STATE_VERSION_HANDLING.to_le_bytes());
         assert_eq!(bytes.len(), encode_len_without_handling(&a) + 4 * a.hunters.len());
         let mut b = restored(&a);
         assert_same(&a, &b).unwrap();
@@ -500,10 +602,16 @@ mod tests {
             assert_eq!(a.stats(), b.stats(), "diverged at tick {}", a.tick);
         }
         assert_same(&a, &b).unwrap();
-        let off = stepped(42, 300);
+        let off = stepped_with(dry_params(), 42, 300);
         let bytes = encode(&off);
         assert_eq!(bytes[8..12], STATE_VERSION_NO_HANDLING.to_le_bytes());
         assert_eq!(bytes.len(), encode_len_without_handling(&off));
+        let wet = stepped(42, 300);
+        let bytes = encode(&wet);
+        assert_eq!(bytes[8..12], STATE_VERSION.to_le_bytes());
+        let h = wet.hydro.as_ref().unwrap();
+        let water = 4 + 8 * (h.ponded.len() + h.soil.len() + 6) + 4 * crate::output::WATER_FIELDS;
+        assert_eq!(bytes.len(), encode_len_without_handling(&wet) + 4 * wet.hunters.len() + water);
     }
 
     /// Length of `state.bin` without the handling section, from the layout table.
@@ -534,7 +642,7 @@ mod tests {
     fn restore_rejects_terrain_built_with_other_params() {
         let sim = stepped(1, 10);
         let dir = scratch_dir();
-        write_snapshot(&sim, &dir, true).unwrap();
+        write_snapshot(&sim, &dir, true, true).unwrap();
         let mut p = sim.params.clone();
         p.world.soil_depth += 1;
         let err = Sim::restore(p, &dir.join(snapshot_dir_name(10))).err().unwrap();

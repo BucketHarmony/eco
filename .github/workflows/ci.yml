@@ -245,11 +245,16 @@ jobs:
           rm -f target/release/ecosim
           cargo build --release
           # The reference world at defaults: the 256x64 strip, format 3 (ecoview/DECISIONS.md, shot 16).
-          ./target/release/ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100
+          # `hydro.enabled=false` pins the renderer's data to the pre-water dynamics: with the water
+          # tier on, shot G4 makes every run format 4, and the renderer would load the strip's
+          # `world/` grid and render it as a bundle world. At rate 0 the run is byte-identical to the
+          # data the reference screenshots were rendered from. Shot G8 teaches the renderer the water
+          # tier and removes both pins (ecosim/DECISIONS.md, shot G4).
+          ./target/release/ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100 --set hydro.enabled=false
           # The Capitol reference run, which shots 12-15 render (ecoview/DECISIONS.md, shot G7).
           # runs/ is gitignored, so the renderer's job regenerates it; every bundle run carries these
           # two overrides. Snapshots every 1000, since the shots only need t=0 and t=20000.
-          ./target/release/ecosim run --world worlds/capitol --seed 42 --ticks 20000 --out runs/capitol-s42 --snapshot-every 1000 --set animals.enabled=false --set climate.rain_gradient=0
+          ./target/release/ecosim run --world worlds/capitol --seed 42 --ticks 20000 --out runs/capitol-s42 --snapshot-every 1000 --set animals.enabled=false --set climate.rain_gradient=0 --set hydro.enabled=false
           cd ..
           bash scripts/sync-data.sh
 

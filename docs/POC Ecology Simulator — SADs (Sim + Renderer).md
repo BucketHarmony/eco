@@ -132,13 +132,13 @@ All integers little-endian. `meta.json` carries a `format_version: 1`. The rende
 Later versions only add files (`ecosim/DECISIONS.md` has the details). Version 2 adds `state.bin` to each snapshot and `forked_from` to `meta.json`. Version 3 adds `events.csv` (plain CSV; a seed-42 20000-tick run writes about 1.7 MB, so it is not compressed):
 
 - Header `tick,kind,species,patch_x,patch_y,x,y,cause,detail`, then one row per event in the order they happen within the run. Absent fields are empty.
-- `kind` is one of `death`, `birth`, `ignition`, `spread`, `burnout`, `germination`, `tree_death`, `immigration`, or `seed_drop` (reserved, not written yet).
+- `kind` is one of `death`, `birth`, `ignition`, `spread`, `burnout`, `germination`, `tree_death`, `immigration`, `storm` (version 4), or `seed_drop` (reserved, not written yet).
 - `species` is `grazer`, `hunter` or `tree`, and empty for the three fire kinds. `patch_x`, `patch_y` are 0–7. `x`, `y` are the column, and empty for fire kinds.
 - `cause`: for `death`, one of `starved`, `eaten`, `old_age`, `crowded`, `burnt`; for `tree_death`, one of `old_age`, `drought`, `crowded`, `burnt`; empty otherwise.
 - `detail`: the entity's id for entity kinds (the newborn's for `birth`); for `spread`, the source patch index `patch_x + 8·patch_y`; empty for `ignition` and `burnout`.
 - Tick 0 has no events. The file is appended at each snapshot, so rows up to a snapshot's tick are on disk when its directory is.
 
-Version 4 is a run whose world was built from a world bundle (`ecosim run --world`, `docs/SCENE-CONTRACT.md`) rather than from noise. Everything above is unchanged; the bundle's static ground grid is added once at the run root, not per snapshot:
+Version 4 is a run that carries a ground grid: one built from a world bundle (`ecosim run --world`, `docs/SCENE-CONTRACT.md`), or any run with the water tier on (`hydro.enabled`, shot G4), which since that shot is every run at the defaults. A noise world's ground grid is the ecology grid at 1 m, all `soil` except its water columns. Everything above is unchanged; the static ground grid is added once at the run root, not per snapshot:
 
 ```
 runs/g1/
@@ -149,7 +149,17 @@ runs/g1/
     pipes.json        [{id, inlet: [x, y], outlet: [x, y], capacity_m3h, illustrative}], metres from the SW corner
 ```
 
-`meta.json` gains `"world": {"name", "ground_cell_m", "ground_width", "ground_depth", "media": [...]}`, where `ground_width` × `ground_depth` is the ground grid (`gw`, `gd` above) and `media` maps a `medium.bin` code to its name. The ground grid is finer than the ecology grid: `ground_width = dims.x / ground_cell_m`, with cell (0, 0) at the south-west corner, x east and y north, the same orientation as the voxel fields.
+`meta.json` gains `"world": {"name", "bundle", "ground_cell_m", "ground_width", "ground_depth", "media": [...]}`, where `bundle` is false for a noise world (`name` is then `"noise"`), `ground_width` × `ground_depth` is the ground grid (`gw`, `gd` above), and `media` maps a `medium.bin` code to its name. The ground grid is finer than the ecology grid: `ground_width = dims.x / ground_cell_m`, with cell (0, 0) at the south-west corner, x east and y north, the same orientation as the voxel fields.
+
+Version 4 also adds two water files to each snapshot, written when the water tier is on. `--format-version 2` writes neither, and neither does a run with `hydro.enabled = false`:
+
+```
+  snap_000000/
+    water.bin         gw·gd × u16 LE, ponded depth in units of 0.1 mm, saturating at 6553.5 mm
+    soil_water.bin    x·y × f32 LE, soil water per ecology column, in mm
+```
+
+`series.csv` ends with six water columns, all world means in millimetres: `rain_mm` (rain this tick), `runoff_mm` (the share of it that ran off the cell it fell on), `ponded_mm` and `soil_water_mm` (standing now), `drainage_mm` (percolated below the roots this tick) and `outflow_mm` (left the world). They are 0 on every tick with the tier off. `events.csv` gains a `storm` kind: one row per raining tick, no species, no column, `detail` `"<depth> <runoff> <outflow>"` in millimetres to four decimal places.
 
 ### Debug loop and tests
 

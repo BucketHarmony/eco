@@ -122,8 +122,10 @@ fn assert_same_manifest(want: &BTreeMap<String, String>, got: &BTreeMap<String, 
 fn fresh_s42_matches_committed_manifest() {
     let want = read_manifest("s42-manifest.sha256");
     let got = hash_run(fresh_s42(), |_, b| b);
-    // 8 files per snapshot since format_version 2 added state.bin, and events.csv since version 3.
-    assert_eq!(got.len(), 2 + 201 * 8);
+    // 10 files per snapshot since the water tier added water.bin and soil_water.bin (shot G4, which
+    // also made every run format_version 4 and so gave it the four `world/` files); events.csv
+    // since version 3.
+    assert_eq!(got.len(), 2 + 201 * 10 + 4);
     assert!(want.contains_key(EVENTS_FILE));
     assert_eq!(want.keys().filter(|k| k.ends_with("/state.bin")).count(), 201);
     assert_same_manifest(&want, &got);
@@ -170,11 +172,11 @@ fn s42_event_log_matches_the_series_and_stays_small() {
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn square_world_reproduces_the_shot_14_manifest() {
     let dir = tmp("s42_square");
-    let set = common::square_set(&["world.depth=64", "world.height=32", "world.patch=8"]);
+    let set = common::square_set(&["world.depth=64", "world.height=32", "world.patch=8", "hydro.enabled=false"]);
     run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
     let meta: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["dims"], serde_json::json!({"x": 64, "y": 64, "z": 32, "patch": 8}));
-    assert_same_manifest(&read_manifest("s42-64-manifest.sha256"), &hash_run(&dir, |_, b| b));
+    assert_same_manifest(&read_manifest("s42-64-manifest.sha256"), &hash_run(&dir, common::without_water));
 }
 
 /// Identity case for food-limited hunters (shots 14a and 14a-rev): the pre-shot hunting economics
@@ -191,9 +193,10 @@ fn old_hunting_economics_via_set_reproduce_the_shot_14_manifest() {
         "hunter.kill_energy=40",
         "hunter.hunt_cost=0",
         "hunter.handling_ticks=0",
+        "hydro.enabled=false",
     ]);
     run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
-    let got = hash_run(&dir, |_, b| b);
+    let got = hash_run(&dir, common::without_water);
     assert_eq!(got.len(), 2 + 201 * 8);
     assert_same_manifest(&read_manifest("s42-64-manifest.sha256"), &got);
     assert_same_manifest(&read_manifest("s42-manifest-preshot14a.sha256"), &without_events(got));
@@ -202,8 +205,15 @@ fn old_hunting_economics_via_set_reproduce_the_shot_14_manifest() {
 /// Default params on the square world with shot 11 switched off: mutation 0 (the immigration floors
 /// already default to 0).
 fn pre_shot_11() -> Params {
-    let mut p = common::square();
+    let mut p = pre_g4();
     p.heredity.mutation = 0.0;
+    p
+}
+
+/// Default params on the square world with the water tier off: the pre-G4 moisture update.
+fn pre_g4() -> Params {
+    let mut p = common::square();
+    p.hydro.enabled = false;
     p
 }
 
@@ -217,7 +227,7 @@ fn pre_shot_11() -> Params {
 fn heredity_off_reproduces_the_pre_shot_11_manifest() {
     let dir = tmp("s42_heredity_off");
     run(pre_shot_11(), 42, 20_000, 100, &[], &dir).unwrap();
-    let got = hash_run(&dir, common::without_traits);
+    let got = hash_run(&dir, |f, b| common::without_traits(f, common::without_water(f, b)));
     assert_eq!(got.len(), 2 + 201 * 8);
     assert_same_manifest(&read_manifest("s42-manifest-preshot11.sha256"), &without_events(got));
 }
@@ -241,7 +251,7 @@ fn pre_shot_10() -> Params {
 fn crowding_off_reproduces_the_pre_shot_10_manifest() {
     let dir = tmp("s42_crowding_off");
     run(pre_shot_10(), 42, 20_000, 100, &[], &dir).unwrap();
-    let got = hash_run(&dir, common::without_traits);
+    let got = hash_run(&dir, |f, b| common::without_traits(f, common::without_water(f, b)));
     assert_eq!(got.len(), 2 + 201 * 8);
     assert_same_manifest(&read_manifest("s42-manifest-preshot10.sha256"), &without_events(got));
 }
@@ -257,9 +267,29 @@ fn fire_off_reproduces_the_pre_fire_manifest() {
     let mut p = pre_shot_10();
     p.fire.base_rate = 0.0;
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
-    let got = hash_run(&dir, |f, b| common::without_fire(f, common::without_traits(f, b)));
+    let got = hash_run(&dir, |f, b| common::without_fire(f, common::without_traits(f, common::without_water(f, b))));
     assert_eq!(got.len(), 2 + 201 * 8);
     assert_same_manifest(&read_manifest("s42-manifest-prefire.sha256"), &without_events(got));
+}
+
+/// Rate-0 identity for the water tier: with `hydro.enabled=false`, seed 42 on the reference strip
+/// hashes to the manifest as it stood before shot G4 (`s42-manifest-preG4.sha256`) once the six
+/// water columns are cut (`common::without_water`, which asserts every cut value is 0). So with the
+/// tier off the storm draws nothing, writes no field and adds no file: the run is the pre-G4 run,
+/// format_version 3 and all, byte for byte in all 201 snapshots.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn water_off_reproduces_the_pre_g4_manifest() {
+    let dir = tmp("s42_water_off");
+    let mut p = Params::load_default();
+    p.hydro.enabled = false;
+    run(p, 42, 20_000, 100, &[], &dir).unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["format_version"], 3);
+    assert!(!dir.join("world").exists(), "no world directory without the water tier");
+    let got = hash_run(&dir, common::without_water);
+    assert_eq!(got.len(), 2 + 201 * 8);
+    assert_same_manifest(&read_manifest("s42-manifest-preG4.sha256"), &got);
 }
 
 /// A 2-value × 1-seed × 500-tick sweep writes 2 rows and 2 cell CSVs, and each cell equals a

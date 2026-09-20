@@ -8,6 +8,7 @@ pub mod check;
 pub mod events;
 pub mod fire;
 pub mod heredity;
+pub mod hydro;
 pub mod output;
 pub mod params;
 pub mod plants;

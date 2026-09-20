@@ -3,7 +3,8 @@
 
 use crate::animals::{Cause, CAUSES};
 use crate::events::{deaths_per_tick, parse_events, EVENTS_FILE};
-use crate::output::{snapshot_dir_name, SERIES_FIELDS, SERIES_HEADER, TRAIT_FIELDS};
+use crate::hydro::Water;
+use crate::output::{snapshot_dir_name, SERIES_FIELDS, SERIES_HEADER, TRAIT_FIELDS, WATER_FIELDS};
 use crate::sim::StatsRow;
 use std::collections::BTreeSet;
 use std::fs;
@@ -68,7 +69,8 @@ pub fn read_series_for_stats(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
 pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
     let mut lines = text.lines();
     let header = lines.next().ok_or("unexpected header")?;
-    let fields = [SERIES_FIELDS, SERIES_FIELDS - TRAIT_FIELDS, SERIES_FIELDS - TRAIT_FIELDS - FIRE_FIELDS]
+    let dry = SERIES_FIELDS - WATER_FIELDS;
+    let fields = [SERIES_FIELDS, dry, dry - TRAIT_FIELDS, dry - TRAIT_FIELDS - FIRE_FIELDS]
         .into_iter()
         .find(|&n| header_without(SERIES_FIELDS - n) == header)
         .ok_or("unexpected header")?;
@@ -96,7 +98,7 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                 deaths: [[u(11)?, u(12)?, u(13)?, u(14)?, u(15)?], [u(16)?, u(17)?, u(18)?, u(19)?, u(20)?]],
                 patches_burning: if fields > 21 { u(21)? } else { 0 },
                 total_burnt: if fields > 21 { u(22)? } else { 0 },
-                traits: if fields == SERIES_FIELDS {
+                traits: if fields >= dry {
                     let mut t = [[0.0; TRAIT_FIELDS / 2]; 2];
                     for (k, v) in t.iter_mut().flatten().enumerate() {
                         *v = x(23 + k)?;
@@ -104,6 +106,18 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                     t
                 } else {
                     Default::default()
+                },
+                water: if fields == SERIES_FIELDS {
+                    Water {
+                        rain_mm: x(dry)?,
+                        runoff_mm: x(dry + 1)?,
+                        ponded_mm: x(dry + 2)?,
+                        soil_water_mm: x(dry + 3)?,
+                        drainage_mm: x(dry + 4)?,
+                        outflow_mm: x(dry + 5)?,
+                    }
+                } else {
+                    Water::default()
                 },
             })
         })
@@ -529,7 +543,7 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
 }
 
 /// Every `check --long` key in report order; `long_run_length` only appears for short runs.
-pub const LONG_KEYS: [&str; 3] = ["long_run_length", "long_no_extinction", "long_band"];
+pub const LONG_KEYS: [&str; 4] = ["long_run_length", "long_no_extinction", "long_fertility", "long_band"];
 
 /// `ecosim check --long` on a run directory.
 pub fn check_run_long(run_dir: &Path) -> Result<CheckReport, String> {
@@ -537,8 +551,11 @@ pub fn check_run_long(run_dir: &Path) -> Result<CheckReport, String> {
 }
 
 /// The long-run invariants, for runs of at least `LONG_TICKS`: no species reaches 0 at any tick,
-/// and grazers and hunters stay within [0.2×, 5×] of their tick-20000 count over ticks 20000–60000.
-/// These replace, rather than extend, the 20000-tick invariants.
+/// fertility_mean stays inside the same [40, 220] band the short check uses, and grazers and
+/// hunters stay within [0.2×, 5×] of their tick-20000 count over ticks 20000–60000. These replace,
+/// rather than extend, the 20000-tick invariants. Fertility is here because a 20000-tick run ends
+/// a few hundred ticks after fertility crosses 220 in the noise world, so the short check never
+/// saw the saturation the long run has always had (shot G4, DECISIONS.md "Fertility has a sink").
 pub fn evaluate_long(rows: &[StatsRow], animals: bool) -> Result<CheckReport, String> {
     if rows.is_empty() {
         return Err("series.csv has no rows".into());
@@ -563,6 +580,14 @@ pub fn evaluate_long(rows: &[StatsRow], animals: bool) -> Result<CheckReport, St
         mins.iter().all(|m| m.1 > 0),
         mins.iter().map(|(n, m)| format!("min {n}={m}")).collect::<Vec<_>>().join(" "),
         tightest(mins.iter().map(|&(_, m)| (m as f64, 1.0, margin_at_least(m as f64, 1.0)))),
+    );
+    let (fmin, fmax) = range(rows.iter().map(|r| r.fertility_mean));
+    out.push(
+        "long_fertility",
+        "fertility_mean in [40, 220] over the whole run",
+        fmin >= 40.0 && fmax <= 220.0,
+        format!("[{fmin:.2}, {fmax:.2}]"),
+        band(fmin as f64, fmax as f64, 40.0, 220.0),
     );
     let band_name = "grazers and hunters over ticks 20000-60000 within [0.2x, 5x] of their tick-20000 count";
     if !animals {
@@ -984,6 +1009,7 @@ mod tests {
                 patches_burning: 0,
                 total_burnt: 0,
                 traits: Default::default(),
+                water: Default::default(),
             })
             .collect()
     }
@@ -1280,6 +1306,7 @@ mod tests {
                 patches_burning: 0,
                 total_burnt: 0,
                 traits: Default::default(),
+                water: Default::default(),
             })
             .collect();
         Series { rows, mature_at_10000: Some(Ok(h.mature)), timing: Timing::Ms(h.ms, RUNTIME_LIMIT_MS), animals: true }
@@ -1401,6 +1428,14 @@ mod tests {
         // Ticks after 60000 are outside the band window (but still watched for extinction).
         let mut rows = rows_from(base, n + 10);
         rows[n + 5].grazers = 10_000;
+        assert!(failing_long(&rows).is_empty());
+        // Fertility is watched over the whole long run, which is where it saturates.
+        let mut rows = healthy.clone();
+        rows[45_000].fertility_mean = 220.1;
+        assert_eq!(failing_long(&rows), ["long_fertility"]);
+        rows[45_000].fertility_mean = 39.9;
+        assert_eq!(failing_long(&rows), ["long_fertility"]);
+        rows[45_000].fertility_mean = 220.0;
         assert!(failing_long(&rows).is_empty());
     }
 

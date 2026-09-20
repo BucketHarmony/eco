@@ -84,7 +84,7 @@ impl Sim {
     fn ignite(&mut self, p: usize, from: Option<usize>) {
         self.patches[p].burning_ticks_left = self.params.fire.duration.max(1);
         match from {
-            Some(q) => self.log_with(EventKind::Spread, "", p, None, "", Some(q as u32)),
+            Some(q) => self.log_with(EventKind::Spread, "", p, None, "", crate::events::Detail::Id(q as u32)),
             None => self.log(EventKind::Ignition, "", p, None),
         }
     }

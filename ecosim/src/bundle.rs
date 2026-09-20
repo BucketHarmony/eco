@@ -511,7 +511,7 @@ pub(crate) mod tests {
         assert!(w.height.iter().all(|&h| h == 8 + 3), "every column is base_z + round(3.2)");
         assert!(w.class.iter().all(|&k| k == ColClass::Soil));
         // The medium grid is kept at full resolution.
-        let g = w.ground_grid.as_ref().unwrap();
+        let g = &w.ground_grid;
         assert_eq!((g.width, g.depth, g.ratio), (32, 32, 2));
         assert_eq!(g.medium_at(0), Medium::Lawn);
     }

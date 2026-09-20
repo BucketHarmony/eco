@@ -26,12 +26,18 @@ pub const FORMAT_VERSION: u32 = 3;
 pub const BUNDLE_FORMAT_VERSION: u32 = 4;
 
 /// The first line of `series.csv`. Columns 11–20 are that tick's deaths by species and cause,
-/// grazers then hunters, causes in `Cause` order; 21–22 are the fire columns; the last 12 are the
-/// mean and standard deviation of each heritable trait, grazers then hunters (`TraitStats` order).
-pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt,patches_burning,total_burnt,grazer_energy_cost_mult_mean,grazer_energy_cost_mult_sd,grazer_flee_distance_mean,grazer_flee_distance_sd,grazer_repro_threshold_mean,grazer_repro_threshold_sd,hunter_energy_cost_mult_mean,hunter_energy_cost_mult_sd,hunter_flee_distance_mean,hunter_flee_distance_sd,hunter_repro_threshold_mean,hunter_repro_threshold_sd";
+/// grazers then hunters, causes in `Cause` order; 21–22 are the fire columns; then the mean and
+/// standard deviation of each heritable trait, grazers then hunters (`TraitStats` order); the last
+/// 6 are the water columns (shot G4), world means in millimetres, all zero when the water tier is
+/// off. `rain_mm`, `runoff_mm`, `drainage_mm` and `outflow_mm` are this tick's amounts;
+/// `ponded_mm` and `soil_water_mm` are what is in store at the end of it.
+pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt,patches_burning,total_burnt,grazer_energy_cost_mult_mean,grazer_energy_cost_mult_sd,grazer_flee_distance_mean,grazer_flee_distance_sd,grazer_repro_threshold_mean,grazer_repro_threshold_sd,hunter_energy_cost_mult_mean,hunter_energy_cost_mult_sd,hunter_flee_distance_mean,hunter_flee_distance_sd,hunter_repro_threshold_mean,hunter_repro_threshold_sd,rain_mm,runoff_mm,ponded_mm,soil_water_mm,drainage_mm,outflow_mm";
 
 /// Number of fields in a `series.csv` line.
-pub const SERIES_FIELDS: usize = 35;
+pub const SERIES_FIELDS: usize = 41;
+
+/// Number of water columns at the end of a `series.csv` line.
+pub const WATER_FIELDS: usize = 6;
 
 /// Number of trait columns at the end of a `series.csv` line.
 pub const TRAIT_FIELDS: usize = 12;
@@ -47,9 +53,13 @@ struct Dims {
 }
 
 /// `meta.json`'s `world`: the ground grid the run's `world/` files are on (format version 4).
+/// `bundle` says whether it came from a world bundle; a noise world's grid mirrors its ecology
+/// grid, and only a bundle run carries terrain a snapshot cannot rebuild, so only a bundle run
+/// refuses to fork.
 #[derive(Serialize)]
 struct WorldMeta<'a> {
     name: &'a str,
+    bundle: bool,
     ground_cell_m: f32,
     ground_width: usize,
     ground_depth: usize,
@@ -57,13 +67,15 @@ struct WorldMeta<'a> {
 }
 
 impl<'a> WorldMeta<'a> {
-    fn of(b: &'a Bundle) -> WorldMeta<'a> {
+    fn of(sim: &'a Sim, bundle: Option<&'a Bundle>) -> WorldMeta<'a> {
+        let g = &sim.world.ground_grid;
         WorldMeta {
-            name: &b.name,
-            ground_cell_m: b.ground.cell_m(),
-            ground_width: b.ground.width,
-            ground_depth: b.ground.depth,
-            media: b.ground.media.iter().map(|m| m.name()).collect(),
+            name: bundle.map_or("noise", |b| b.name.as_str()),
+            bundle: bundle.is_some(),
+            ground_cell_m: g.cell_m(),
+            ground_width: g.width,
+            ground_depth: g.depth,
+            media: g.media.iter().map(|m| m.name()).collect(),
         }
     }
 }
@@ -186,7 +198,27 @@ pub fn format_row(r: &StatsRow) -> String {
     for v in r.traits.iter().flatten() {
         let _ = write!(line, ",{v:.4}");
     }
+    let w = &r.water;
+    for v in [w.rain_mm, w.runoff_mm, w.ponded_mm, w.soil_water_mm, w.drainage_mm, w.outflow_mm] {
+        let _ = write!(line, ",{v:.4}");
+    }
     line
+}
+
+/// Ponded water as `water.bin` stores it: u16 little-endian, in tenths of a millimetre, saturating.
+fn ponded_u16(sim: &Sim) -> Vec<u8> {
+    let h = sim.hydro.as_ref().expect("water tier");
+    let mut out = Vec::with_capacity(h.ponded.len() * 2);
+    for &v in &h.ponded {
+        out.extend_from_slice(&((v * 10.0).clamp(0.0, u16::MAX as f64) as u16).to_le_bytes());
+    }
+    out
+}
+
+/// Soil water as `soil_water.bin` stores it: f32 little-endian millimetres, column order.
+fn soil_water_f32(sim: &Sim) -> Vec<u8> {
+    let h = sim.hydro.as_ref().expect("water tier");
+    h.soil.iter().flat_map(|&v| (v as f32).to_le_bytes()).collect()
 }
 
 fn surface_u8(field: &[f32], sim: &Sim) -> Vec<u8> {
@@ -233,8 +265,9 @@ fn entities(sim: &Sim) -> Vec<EntityOut> {
     out
 }
 
-/// Write the current state as `snap_NNNNNN/` under `run_dir`, with `state.bin` when `state` is set.
-pub fn write_snapshot(sim: &Sim, run_dir: &Path, state: bool) -> io::Result<()> {
+/// Write the current state as `snap_NNNNNN/` under `run_dir`, with `state.bin` when `state` is set
+/// and the two water files when `water` is set (only format version 4 carries them).
+pub fn write_snapshot(sim: &Sim, run_dir: &Path, state: bool, water: bool) -> io::Result<()> {
     let dir = run_dir.join(snapshot_dir_name(sim.tick));
     fs::create_dir_all(&dir)?;
     debug_assert_eq!(sim.world.material.len(), sim.world.dims.voxels());
@@ -243,6 +276,22 @@ pub fn write_snapshot(sim: &Sim, run_dir: &Path, state: bool) -> io::Result<()> 
     fs::write(dir.join("moisture.bin"), surface_u8(&sim.moisture, sim))?;
     fs::write(dir.join("fertility.bin"), surface_u8(&sim.fertility, sim))?;
     fs::write(dir.join("height.bin"), &sim.world.height)?;
+    if let Some(h) = &sim.hydro {
+        // The water balance is checked here rather than every tick: it costs one pass over the
+        // grids, and every run this ecosim writes takes snapshots. A run whose ledger has stopped
+        // closing is wrong, so it fails rather than finishing quietly (shot G4).
+        let e = h.balance_error();
+        if e.abs() >= WATER_BALANCE_EPS {
+            return Err(io::Error::other(format!(
+                "tick {}: the water ledger is off by {e:e} relative, over {WATER_BALANCE_EPS:e}",
+                sim.tick
+            )));
+        }
+        if water {
+            fs::write(dir.join("water.bin"), ponded_u16(sim))?;
+            fs::write(dir.join("soil_water.bin"), soil_water_f32(sim))?;
+        }
+    }
     fs::write(dir.join("patches.json"), serde_json::to_vec(&sim.patches)?)?;
     fs::write(dir.join("entities.json"), serde_json::to_vec(&entities(sim))?)?;
     if state {
@@ -250,6 +299,10 @@ pub fn write_snapshot(sim: &Sim, run_dir: &Path, state: bool) -> io::Result<()> 
     }
     Ok(())
 }
+
+/// How far the water ledger may be from closing at a snapshot, relative to the rain that has
+/// fallen. The acceptance of shot G4 asks for 1e-9.
+pub const WATER_BALANCE_EPS: f64 = 1e-9;
 
 /// Write `meta.json`: format version, dimensions, run settings, species colours, params and overrides.
 pub fn write_meta(
@@ -298,7 +351,7 @@ fn write_meta_info(sim: &Sim, info: &RunInfo, run_dir: &Path) -> io::Result<()> 
         year_len: sim.params.climate.year_len,
         water_level: sim.params.world.water_level,
         animals: (!sim.params.animals.enabled).then_some(false),
-        world: info.bundle.map(WorldMeta::of),
+        world: (format_version == BUNDLE_FORMAT_VERSION).then(|| WorldMeta::of(sim, info.bundle)),
         snapshots: info.snapshots.clone(),
         species: species_list(),
         params: &sim.params,
@@ -306,6 +359,22 @@ fn write_meta_info(sim: &Sim, info: &RunInfo, run_dir: &Path) -> io::Result<()> 
         forked_from,
     };
     fs::write(run_dir.join("meta.json"), serde_json::to_vec(&meta)?)
+}
+
+/// Write the run root's `world/` directory (format version 4): the ground grid's height, medium
+/// and building fields and the scene's pipes. A bundle run copies its own files, so its bytes are
+/// the bundle's; a noise world writes the 1 m grid its columns mirror, and no pipes.
+pub fn write_world_dir(world: &crate::world::World, bundle: Option<&Bundle>, run_dir: &Path) -> io::Result<()> {
+    if let Some(b) = bundle {
+        return b.write_world_dir(run_dir);
+    }
+    let dir = run_dir.join("world");
+    fs::create_dir_all(&dir)?;
+    let f32s = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    fs::write(dir.join("ground_h.bin"), f32s(&world.ground_h))?;
+    fs::write(dir.join("medium.bin"), &world.ground_grid.medium)?;
+    fs::write(dir.join("building_h.bin"), f32s(&world.building_h))?;
+    fs::write(dir.join("pipes.json"), b"[]")
 }
 
 /// Prepare an output directory: create it, or clear it if it is a previous run directory.
@@ -468,14 +537,13 @@ fn run_inner(
 ) -> io::Result<RunSummary> {
     let &RunSpec { seed, ticks, snapshot_every, overrides } = spec;
     assert!(snapshot_every > 0, "snapshot_every must be > 0");
-    assert_eq!(
-        opts.bundle.is_some(),
-        opts.format_version == BUNDLE_FORMAT_VERSION,
-        "format_version {BUNDLE_FORMAT_VERSION} is the bundle world's, and only its"
-    );
     assert!(
         matches!(opts.format_version, 2 | FORMAT_VERSION | BUNDLE_FORMAT_VERSION),
         "format_version must be 2, {FORMAT_VERSION} or {BUNDLE_FORMAT_VERSION}"
+    );
+    assert!(
+        opts.bundle.is_none() || opts.format_version == BUNDLE_FORMAT_VERSION,
+        "a world bundle writes format_version {BUNDLE_FORMAT_VERSION}"
     );
     let start = Instant::now();
     prepare_dir(out)?;
@@ -483,12 +551,19 @@ fn run_inner(
         None => (Sim::new(params, seed), PlantImport::default()),
         Some(b) => Sim::from_bundle(params, seed, b).map_err(io::Error::other)?,
     };
-    if let Some(b) = opts.bundle {
-        b.write_world_dir(out)?;
+    // Version 4 carries the `world/` directory and the water files. A bundle always needs it; so
+    // does the water tier, whatever the world. Only `--format-version 2` opts out of both.
+    let format_version = match opts.format_version {
+        2 => 2,
+        _ if opts.bundle.is_some() || sim.hydro.is_some() => BUNDLE_FORMAT_VERSION,
+        _ => FORMAT_VERSION,
+    };
+    if format_version == BUNDLE_FORMAT_VERSION {
+        write_world_dir(&sim.world, opts.bundle, out)?;
     }
     let snapshots = (0..=ticks).filter(|t| t % snapshot_every == 0).collect();
     let info = RunInfo {
-        format_version: opts.format_version,
+        format_version,
         seed,
         ticks,
         snapshot_every,
@@ -498,7 +573,7 @@ fn run_inner(
         bundle: opts.bundle,
     };
     write_meta_info(&sim, &info, out)?;
-    sim.log_events = opts.format_version >= 3;
+    sim.log_events = format_version >= 3;
     if sim.log_events {
         fs::write(
             out.join(EVENTS_FILE),
@@ -511,7 +586,7 @@ fn run_inner(
     lap(&mut prof, Phase::Setup);
     let rows = simulate_profiled(&mut sim, ticks, prof.as_deref_mut(), |s, mut p| {
         if s.tick % snapshot_every == 0 {
-            write_snapshot(s, out, opts.state)?;
+            write_snapshot(s, out, opts.state, format_version == BUNDLE_FORMAT_VERSION)?;
             lap(&mut p, Phase::SnapshotWrite);
             flush_events(&mut s.events, out)?;
             lap(&mut p, Phase::Events);
@@ -587,8 +662,12 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
     let start = Instant::now();
     let parent = spec.parent;
     let meta = read_meta(parent)?;
+    let parent_version = meta["format_version"].as_u64().unwrap_or(0) as u32;
     match meta["format_version"].as_u64() {
         Some(3) => {}
+        // A noise world at format 4 (the water tier is on): its `world/` files mirror the ecology
+        // grid, which the restored snapshot rebuilds, so it forks like a version-3 run.
+        Some(4) if meta["world"]["bundle"] != serde_json::Value::Bool(true) => {}
         Some(2) => {
             return Err(format!(
                 "{}: format_version 2 run directories have no events.csv, so a fork's event log would \
@@ -656,11 +735,14 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
     for &t in parent_snaps.iter().filter(|&&t| t < spec.at) {
         copy_dir(&parent.join(snapshot_dir_name(t)), &out.join(snapshot_dir_name(t))).map_err(io)?;
     }
+    if parent_version == BUNDLE_FORMAT_VERSION {
+        copy_dir(&parent.join("world"), &out.join("world")).map_err(io)?;
+    }
     let snapshots =
         parent_snaps.iter().copied().filter(|&t| t < spec.at).chain((spec.at..=end).filter(|t| t % every == 0));
     let from = ForkedFrom { run: parent.to_string_lossy().replace('\\', "/"), tick: spec.at };
     let info = RunInfo {
-        format_version: FORMAT_VERSION,
+        format_version: parent_version,
         seed,
         ticks: end,
         snapshot_every: every,
@@ -680,7 +762,7 @@ pub fn fork(spec: &ForkSpec, out: &Path) -> Result<RunSummary, String> {
     sim.log_events = true;
     let rows = simulate(&mut sim, end, |s| {
         if s.tick % every == 0 {
-            write_snapshot(s, out, true)?;
+            write_snapshot(s, out, true, true)?;
             flush_events(&mut s.events, out)?;
         }
         Ok(())
@@ -801,7 +883,11 @@ mod tests {
     #[test]
     fn fork_can_switch_handling_on() {
         let (parent, child, grandchild) = (scratch_dir(), scratch_dir(), scratch_dir());
-        run(Params::load_square(), 3, 400, 100, &[], &parent).unwrap();
+        // The water tier is off here: with it on every `state.bin` is version 5, whatever handling
+        // does, and this test is about the handling section.
+        let mut p = Params::load_square();
+        p.hydro.enabled = false;
+        run(p, 3, 400, 100, &[], &parent).unwrap();
         assert!(meta(&parent)["params"]["hunter"].get("handling_ticks").is_none());
         let set = ["hunter.handling_ticks=60".to_string()];
         fork(&ForkSpec { parent: &parent, at: 100, overrides: &set, ticks: 300 }, &child).unwrap();
@@ -845,9 +931,13 @@ mod tests {
         m["format_version"] = 5.into();
         fs::write(parent.join("meta.json"), serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(err(&parent, 50, &[], &out).contains("unsupported format_version"));
+        // A noise run is format_version 4 too since the water tier (shot G4); it is a bundle run
+        // that can't be forked, and `meta.json` says which it is.
         m["format_version"] = BUNDLE_FORMAT_VERSION.into();
+        m["world"]["bundle"] = true.into();
         fs::write(parent.join("meta.json"), serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(err(&parent, 50, &[], &out).contains("built from a world bundle"));
+        m["world"]["bundle"] = false.into();
         m["format_version"] = 2.into();
         fs::write(parent.join("meta.json"), serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(err(&parent, 50, &[], &out).contains("no events.csv"));

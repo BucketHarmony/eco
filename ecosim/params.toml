@@ -36,6 +36,95 @@ initial_fertility = 128.0
 # Rain at column x is rain × (1 + rain_gradient × (2x/(width − 1) − 1)), clamped at 0: dry west, wet east.
 rain_gradient = 0.6
 
+[rain]
+# Storms (shot G4). Each tick a storm starts with probability storm_p × the season's rain factor
+# (climate.rain_base − rain_amp·sin(2πt/year_len), over rain_base), and its depth is drawn
+# exponentially with mean storm_mean_mm and falls in that tick. climate.rain_gradient scales the
+# depth by column as it scaled the old rain. storm_p 0 leaves the rain out but keeps the draw.
+storm_p = 0.10
+storm_mean_mm = 10.0
+
+[hydro]
+# Surface water and soil water (shot G4). false leaves the whole water tier out: the pre-G4
+# moisture update runs instead, no water field is allocated, no water file is written and the
+# storm draw never happens, so a run is byte-identical to the pre-G4 one apart from the six
+# always-zero water columns of series.csv.
+enabled = true
+# Ponded water evaporates at evap_mm_h, soil water evaporates and transpires at et_mm_h, both
+# per hour, scaled by the temperature factor (climate.evap_base + T/evap_div, normalised to 1 at
+# climate.temp_base) and, for ET, by 0.2 + 0.8 × the patch's grass and shrub cover.
+evap_mm_h = 0.05
+et_mm_h = 0.12
+# Soil water of every column at tick 0, as a fraction of its field capacity.
+initial_fill = 0.5
+# The most a column's soil holds, as a multiple of field capacity. Water between field capacity
+# and this is the part that drains away, so 1.0 would mean no drainage and no leaching.
+saturation = 1.2
+# Leaching: a soil update that drains `d` mm out of the bottom of a column takes
+# min(1, leach_k × d) of its fertility with it. 0 turns leaching off and fertility has no sink.
+leach_k = 0.0002
+
+# The nine media of the scene contract (docs/SCENE-CONTRACT.md), one table each (shot G4).
+# infiltration_mm_h is how fast water soaks in, field_capacity_mm how much soil water a column of
+# this medium holds, percolation_mm_h how fast the excess drains out of the bottom, and plantable
+# whether anything roots in it (the Rock rule of a bundle column reads it). A noise world is all
+# soil, except its water voxels.
+[medium.soil]
+infiltration_mm_h = 20.0
+field_capacity_mm = 150.0
+percolation_mm_h = 4.0
+plantable = true
+
+[medium.lawn]
+infiltration_mm_h = 15.0
+field_capacity_mm = 150.0
+percolation_mm_h = 3.0
+plantable = true
+
+[medium.bed]
+infiltration_mm_h = 30.0
+field_capacity_mm = 200.0
+percolation_mm_h = 6.0
+plantable = true
+
+[medium.mulch]
+infiltration_mm_h = 40.0
+field_capacity_mm = 200.0
+percolation_mm_h = 8.0
+plantable = true
+
+[medium.gravel]
+infiltration_mm_h = 60.0
+field_capacity_mm = 50.0
+percolation_mm_h = 30.0
+plantable = true
+
+[medium.concrete]
+infiltration_mm_h = 1.0
+field_capacity_mm = 0.0
+percolation_mm_h = 0.0
+plantable = false
+
+[medium.asphalt]
+infiltration_mm_h = 0.5
+field_capacity_mm = 0.0
+percolation_mm_h = 0.0
+plantable = false
+
+[medium.roof]
+infiltration_mm_h = 0.0
+field_capacity_mm = 0.0
+percolation_mm_h = 0.0
+plantable = false
+
+# Open water: it neither soaks in nor holds soil water, and a cell of it carries whatever reaches
+# it out of the world, as the world's edge does.
+[medium.water]
+infiltration_mm_h = 0.0
+field_capacity_mm = 0.0
+percolation_mm_h = 0.0
+plantable = false
+
 [season]
 # Temperature swing: temp_base ± amplitude over one year (was climate.temp_amp).
 amplitude = 15.0

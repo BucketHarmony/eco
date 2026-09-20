@@ -97,7 +97,7 @@ impl Sim {
             let (dm, df) = (cp.moisture_draw * growth, cp.fertility_draw * growth);
             for i in 0..n_soil {
                 let c = self.world.patch_soil[p][i];
-                self.moisture[c] = (self.moisture[c] - dm).max(0.0);
+                self.draw_moisture(c, dm);
                 self.fertility[c] = (self.fertility[c] - df).max(0.0);
             }
         }

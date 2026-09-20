@@ -16,6 +16,12 @@ pub struct Params {
     pub world: WorldParams,
     /// `[climate]`
     pub climate: ClimateParams,
+    /// `[rain]`
+    pub rain: RainParams,
+    /// `[hydro]`
+    pub hydro: HydroParams,
+    /// `[medium.*]`
+    pub medium: MediaParams,
     /// `[season]`
     pub season: SeasonParams,
     /// `[cover]`
@@ -175,6 +181,92 @@ pub struct ClimateParams {
     /// clamped at 0, so the west edge is drier and the east edge wetter. 0 is uniform rain.
     #[serde(default)]
     pub rain_gradient: f32,
+}
+
+/// Storms (shot G4). Rain arrives as whole storms instead of a trickle every soil update.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RainParams {
+    /// Chance per tick that a storm starts, before the season's rain factor.
+    pub storm_p: f32,
+    /// Mean storm depth in millimetres; the depth is drawn exponentially.
+    pub storm_mean_mm: f32,
+}
+
+/// Surface water and soil water (shot G4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HydroParams {
+    /// Whether the water tier runs at all. False restores the pre-G4 moisture update.
+    pub enabled: bool,
+    /// Evaporation of ponded water, mm per hour at the mean temperature.
+    pub evap_mm_h: f32,
+    /// Evaporation and transpiration from soil water, mm per hour at the mean temperature and
+    /// full plant cover.
+    pub et_mm_h: f32,
+    /// Soil water at tick 0, as a fraction of field capacity.
+    pub initial_fill: f32,
+    /// The most a column's soil holds, as a multiple of field capacity: what is above field
+    /// capacity is the part that percolates away as drainage.
+    pub saturation: f32,
+    /// Fertility leached per millimetre drained out of the bottom of a column. 0 turns it off.
+    pub leach_k: f32,
+}
+
+/// One row of the media table: what a surface does with water, and whether anything grows in it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediumParams {
+    /// Fastest rate water soaks in, mm per hour.
+    pub infiltration_mm_h: f32,
+    /// Soil water a column of this medium holds, mm.
+    pub field_capacity_mm: f32,
+    /// Drainage out of the bottom above field capacity, mm per hour.
+    pub percolation_mm_h: f32,
+    /// Whether a plant roots in it.
+    pub plantable: bool,
+}
+
+/// The media table, one entry per medium of the scene contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaParams {
+    /// `[medium.soil]`
+    pub soil: MediumParams,
+    /// `[medium.lawn]`
+    pub lawn: MediumParams,
+    /// `[medium.bed]`
+    pub bed: MediumParams,
+    /// `[medium.mulch]`
+    pub mulch: MediumParams,
+    /// `[medium.gravel]`
+    pub gravel: MediumParams,
+    /// `[medium.concrete]`
+    pub concrete: MediumParams,
+    /// `[medium.asphalt]`
+    pub asphalt: MediumParams,
+    /// `[medium.roof]`
+    pub roof: MediumParams,
+    /// `[medium.water]`
+    pub water: MediumParams,
+}
+
+impl MediaParams {
+    /// The row for a medium.
+    pub fn get(&self, m: crate::bundle::Medium) -> &MediumParams {
+        use crate::bundle::Medium as M;
+        match m {
+            M::Soil => &self.soil,
+            M::Lawn => &self.lawn,
+            M::Bed => &self.bed,
+            M::Mulch => &self.mulch,
+            M::Gravel => &self.gravel,
+            M::Concrete => &self.concrete,
+            M::Asphalt => &self.asphalt,
+            M::Roof => &self.roof,
+            M::Water => &self.water,
+        }
+    }
 }
 
 /// Seasonal forcing. Temperature is `temp_base + amplitude·sin(2π t / year_len)`.
@@ -756,11 +848,19 @@ mod tests {
         let set = Params::from_toml_str_with(&defaults(), &[format!("{key}={text}")]).map_err(TestCaseError::fail)?;
         let (mut got, base) = (stored(&set), stored(&Params::load_default()));
         prop_assert_eq!(lookup(&got, key), &want, "{} = {}", key, text);
-        let (section, field) = key.split_once('.').unwrap();
+        // Put the leaf back the way it was, then nothing else may have moved. Keys nest more than
+        // one level deep since the media table (shot G4), so this walks the whole path.
+        let path: Vec<&str> = key.split('.').collect();
+        let (field, parents) = path.split_last().unwrap();
+        let (mut g, mut b) = (&mut got, &base);
+        for p in parents {
+            g = &mut g[*p];
+            b = &b[*p];
+        }
         // A key left out at its off value (`is_zero`) is absent from the base, not null.
-        match base[section].get(field) {
-            Some(v) => got[section][field] = v.clone(),
-            None => _ = got[section].as_object_mut().unwrap().remove(field),
+        match b.get(field) {
+            Some(v) => g[*field] = v.clone(),
+            None => _ = g.as_object_mut().unwrap().remove(*field),
         }
         prop_assert_eq!(got, base, "setting {} changed another key", key);
         Ok(())

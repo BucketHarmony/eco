@@ -4,6 +4,7 @@ use crate::animals::{Animal, Kind, CAUSES};
 use crate::bundle::Bundle;
 use crate::events::Event;
 use crate::heredity::{trait_stats, TraitStats, Traits, TRAIT_CLAMP};
+use crate::hydro::{Hydro, Water};
 use crate::params::Params;
 use crate::plants::PlantImport;
 use crate::profile::{lap, Phase, Profiler};
@@ -64,6 +65,8 @@ pub struct StatsRow {
     pub total_burnt: u32,
     /// Heritable trait means and standard deviations per species.
     pub traits: TraitStats,
+    /// The six water columns (shot G4); all zero when the water tier is off.
+    pub water: Water,
 }
 
 /// Marks a column with no trunk in `Sim::trunk_at`.
@@ -105,6 +108,8 @@ pub struct Sim {
     pub moisture: Vec<f32>,
     /// Surface fertility per column (soil columns only; others stay 0).
     pub fertility: Vec<f32>,
+    /// Surface and soil water, or `None` when `hydro.enabled` is false (shot G4).
+    pub hydro: Option<Hydro>,
     /// Per-patch state, indexed by patch.
     pub patches: Vec<Patch>,
     /// Trees, live and dead since the last compaction.
@@ -210,6 +215,7 @@ impl Sim {
             world,
             moisture,
             fertility,
+            hydro: None,
             patches,
             trees: Vec::new(),
             grazers: Vec::new(),
@@ -232,6 +238,12 @@ impl Sim {
         };
         sim.seek_offsets = offsets_within(sim.params.hunter.seek_radius);
         sim.flee_offsets = flee_offsets(&sim.params);
+        if sim.params.hydro.enabled {
+            sim.hydro = Some(Hydro::new(&sim.world, &sim.params));
+            for c in 0..cols {
+                sim.derive_moisture(c);
+            }
+        }
         let import = match bundle {
             None => {
                 sim.place_initial_trees();
@@ -256,6 +268,7 @@ impl Sim {
         p.hunter.immigration_floor = 0;
         p.grazer.immigration_floor = 0;
         p.tree.immigration_floor = 0;
+        p.hydro.enabled = false;
         p.heredity.mutation = 0.0;
         p.fire.base_rate = 0.0;
         p.disease.grazer_rate = 0.0;
@@ -360,6 +373,9 @@ impl Sim {
         lap(&mut prof, Phase::Trees);
         self.update_fire(t);
         lap(&mut prof, Phase::Fire);
+        if self.params.hydro.enabled {
+            self.storm(t);
+        }
         if t.is_multiple_of(10) {
             self.update_soil(t);
         }
@@ -440,6 +456,7 @@ impl Sim {
             patches_burning: self.patches.iter().filter(|p| p.burning_ticks_left > 0).count() as u32,
             total_burnt: self.total_burnt,
             traits: [trait_stats(&self.grazers), trait_stats(&self.hunters)],
+            water: self.hydro.as_ref().map(|h| h.water).unwrap_or_default(),
         }
     }
 }

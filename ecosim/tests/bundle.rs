@@ -153,7 +153,9 @@ fn a_bundle_run_writes_a_format_4_run_dir_that_check_reads() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// `ecosim run --world` builds the bundle world, and the format version and `--world` go together.
+/// `ecosim run --world` builds the bundle world and writes format version 4. Asking for an older
+/// version with `--world` is an error; asking for version 4 without one is not, since the water
+/// tier writes it on a noise world too (shot G4).
 #[test]
 fn the_cli_runs_a_bundle_and_pairs_format_4_with_world() {
     let exe = Path::new(env!("CARGO_BIN_EXE_ecosim"));
@@ -182,28 +184,42 @@ fn the_cli_runs_a_bundle_and_pairs_format_4_with_world() {
 
     let mismatch = run(&["--world", dir.to_str().unwrap(), "--format-version", "3"], &tmp("bundle_cli_bad"));
     assert!(!mismatch.status.success());
-    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("use it with --world"));
-    let lonely = run(&["--format-version", "4"], &tmp("bundle_cli_bad2"));
-    assert!(!lonely.status.success());
-    assert!(String::from_utf8_lossy(&lonely.stderr).contains("use it with --world"));
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("--world writes format_version 4"));
+    let lonely_out = tmp("bundle_cli_noise4");
+    let lonely = run(&["--format-version", "4"], &lonely_out);
+    assert!(lonely.status.success(), "{}", String::from_utf8_lossy(&lonely.stderr));
+    assert_eq!(meta(&lonely_out)["world"]["bundle"], Value::Bool(false), "a noise world, not a bundle");
     let missing = run(&["--world", "no-such-bundle"], &tmp("bundle_cli_bad3"));
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("bundle.json"));
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// A noise world is untouched by the bundle work: it still writes format version 3, with no
-/// `world/` directory and no `world` key in `meta.json`.
+/// A noise world writes format version 4 too since the water tier (shot G4): the same `world/`
+/// directory, with its ground grid all soil, and `world.bundle` false. With the tier off it is the
+/// version-3 directory it was before, with no `world/` directory and no `world` key in `meta.json`.
 #[test]
-fn a_noise_run_still_writes_format_3_without_a_world_directory() {
+fn a_noise_run_writes_format_4_with_a_synthetic_world_directory() {
     let out = tmp("bundle_noise");
-    let (p, set) = params(&["world.width=64", "climate.rain_gradient=0", "world.slope_bias=0"]);
+    let square = ["world.width=64", "climate.rain_gradient=0", "world.slope_bias=0"];
+    let (p, set) = params(&square);
     run_with(p, 1, 100, 50, &set, &out, RunOptions::default()).unwrap();
     let m = meta(&out);
+    assert_eq!(m["format_version"], BUNDLE_FORMAT_VERSION);
+    assert_eq!((&m["world"]["name"], &m["world"]["bundle"]), (&Value::from("noise"), &Value::Bool(false)));
+    for f in ["ground_h.bin", "medium.bin", "building_h.bin", "pipes.json"] {
+        assert!(out.join("world").join(f).exists(), "{f}");
+    }
+
+    let dry = tmp("bundle_noise_dry");
+    let (p, set) = params(&[square.as_slice(), &["hydro.enabled=false"]].concat());
+    run_with(p, 1, 100, 50, &set, &dry, RunOptions::default()).unwrap();
+    let m = meta(&dry);
     assert_eq!(m["format_version"], 3);
     assert_eq!(m["world"], Value::Null);
-    assert!(!out.join("world").exists());
+    assert!(!dry.join("world").exists());
     fs::remove_dir_all(&out).unwrap();
+    fs::remove_dir_all(&dry).unwrap();
 }
 
 /// The committed Capitol bundle (shot G2), the first real world in the repo. The exporter runs in

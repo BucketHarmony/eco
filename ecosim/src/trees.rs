@@ -237,7 +237,7 @@ impl Sim {
             let before = self.tree_stage(&self.trees[i]);
             let c = self.trees[i].col(self.world.dims);
             self.trees[i].age += tp.update_every;
-            self.moisture[c] = (self.moisture[c] - tp.moisture_draw).max(0.0);
+            self.draw_moisture(c, tp.moisture_draw);
             if self.moisture[c] < tp.dry_moisture {
                 self.trees[i].dry_ticks += tp.update_every;
             } else {

@@ -54,7 +54,8 @@ Architecture points that span modules:
   - Voxel fields are flat `Vec<u8>`, indexed `x + width*(y + depth*z)`, with z up. Light is recomputed per column, only when a tree is planted or dies. Moisture and fertility update every 10 ticks, on surface voxels only.
   - Patch fields (grass, shrub, detritus, temperature) update every 10 ticks, staggered so about 6 patches update per tick.
   - Trees update every 50 ticks and animals every tick. Entities are stored as `Vec<Animal>` and `Vec<Tree>` with an `alive` flag and periodic compaction. Don't use an ECS crate, chunking, or an octree.
-- **Fixed tick order:** animals → producers → moisture/fertility (every 10 ticks) → temperature/season (every 100) → snapshot (every N) → stats row.
+- **Fixed tick order:** animals → producers → storm (any tick that rains) → moisture/fertility (every 10 ticks) → temperature/season (every 100) → snapshot (every N) → stats row.
+- **Water is its own tier** (`hydro.enabled`, shot G4): storms fall on the ground grid, run downhill along a flow graph built once at load, soak into per-column soil water and pond in depressions. The u8 `moisture` field is derived from soil water, not stored. `ecosim/sweeps/shotG4/FINDINGS.md` has the measurements.
 - **Determinism is tested.** All randomness comes from one `ChaCha8Rng` seeded from the CLI. Never iterate a `HashMap` in sim logic; use `Vec` or `BTreeMap`. Two runs with the same seed and params must produce byte-identical run directories.
 - **All species and tuning parameters live in `params.toml`**, loaded at startup. Nothing tunable is hard-coded. That includes the fallback knobs in the SAD's risk table: kill probability, refugium threshold, seed radius, and sapling light need.
 - **The five stability rules under "Consumers" must be implemented exactly as written:** type II grazing intake, hunter satiation and kill probability, the shrub refugium, movement energy cost, and corpse detritus. Without them the populations oscillate to extinction.
@@ -83,14 +84,15 @@ Architecture points that span modules:
 ## The run directory contract
 
 The run directory is the only interface between the two projects. Its full format is in SAD 1 under "Run directory format". The key points:
-- `meta.json` must contain `format_version` (currently 3 for a noise world, 4 for a world built from a bundle; each version only adds files: `state.bin` per snapshot in 2, `events.csv` in 3, `world/` in 4). `ecosim run --format-version 2` still writes version 2 for readers that know only 1 and 2.
+- `meta.json` must contain `format_version` (currently 4 for every run at the defaults, and 3 for a noise world with the water tier off; each version only adds files: `state.bin` per snapshot in 2, `events.csv` in 3, `world/` and the two water files in 4). `ecosim run --format-version 2` still writes version 2 for readers that know only 1 and 2, water files and all.
 - `series.csv` has one row per tick.
 - `events.csv` (version 3) has one row per event: `tick,kind,species,patch_x,patch_y,x,y,cause,detail`. The kinds and field meanings are in SAD 1's run directory format.
 - Each snapshot is a `snap_NNNNNN/` directory (tick zero-padded to 6 digits) with:
   - `material.bin` and `light.bin`: x·y·z bytes each (from `meta.json` `dims`), x-fastest
   - `moisture.bin`, `fertility.bin`, and `height.bin`: x·y bytes each
+  - with the water tier on (shot G4): `water.bin`, ponded depth on the ground grid in 0.1 mm u16, and `soil_water.bin`, soil water per ecology column in f32 mm
   - `patches.json` and `entities.json`
-- A bundle run (`ecosim run --world <dir>`, format version 4) also writes `world/{ground_h.bin, medium.bin, building_h.bin, pipes.json}` once at the run root, and a `world` object in `meta.json` describing the ground grid. The bundle format is `docs/SCENE-CONTRACT.md`; the ecology grid stays at 1 m columns, the ground grid is finer. `ecosim/worlds/capitol/` is the committed reference bundle (256 m of the Michigan State Capitol grounds, 512×512 ground cells), written by `ecosim/tools/blend_export.py` from a Blender scene kept outside the repo; its `medium.u8` is ODbL, so keep the credit in `ecosim/worlds/capitol/README.md` with it.
+- Any format-4 run writes `world/{ground_h.bin, medium.bin, building_h.bin, pipes.json}` once at the run root, and a `world` object in `meta.json` describing the ground grid; `world.bundle` says whether it came from a bundle or is the synthesized all-soil grid of a noise world. The bundle format is `docs/SCENE-CONTRACT.md`; the ecology grid stays at 1 m columns, the ground grid is finer. `ecosim/worlds/capitol/` is the committed reference bundle (256 m of the Michigan State Capitol grounds, 512×512 ground cells), written by `ecosim/tools/blend_export.py` from a Blender scene kept outside the repo; its `medium.u8` is ODbL, so keep the credit in `ecosim/worlds/capitol/README.md` with it.
 - All integers are little-endian.
 
 If you change the format, update both projects and the SAD together.

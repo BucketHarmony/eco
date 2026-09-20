@@ -187,12 +187,13 @@ fn main() -> ExitCode {
                 eprintln!("--profile must be outside the run directory --out");
                 return ExitCode::FAILURE;
             }
+            // Version 4 is what a world bundle and the water tier both need; the writer settles
+            // which of 3 and 4 a noise run gets, so only an explicit `--format-version 2` is a
+            // request here, and a bundle can't be squeezed into it.
             let format_version =
                 format_version.unwrap_or(if world.is_some() { BUNDLE_FORMAT_VERSION } else { FORMAT_VERSION });
-            if world.is_some() != (format_version == BUNDLE_FORMAT_VERSION) {
-                eprintln!(
-                    "--format-version {BUNDLE_FORMAT_VERSION} is the world-bundle format: use it with --world, and only with it"
-                );
+            if world.is_some() && format_version != BUNDLE_FORMAT_VERSION {
+                eprintln!("--world writes format_version {BUNDLE_FORMAT_VERSION}");
                 return ExitCode::FAILURE;
             }
             let bundle = match world.as_deref().map(Bundle::load).transpose() {

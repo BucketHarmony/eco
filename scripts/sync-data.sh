@@ -13,10 +13,13 @@ done
 #   ecosim run --world worlds/capitol --seed 42 --ticks 20000 --out runs/capitol-s42 \
 #     --snapshot-every 1000 --set animals.enabled=false --set climate.rain_gradient=0
 # Every bundle-world run carries those two overrides (MASTER.md, 2026-09-19 21:05).
-for d in runs/s42 runs/capitol-s42 "$mini:fixtures/s42-mini" fixtures/capitol-mini; do
+# worlds/capitol is the committed reference bundle; ecoview shot E1's editor loads it with ?world=
+# fixtures/capitol-world, and Playwright needs it committed, since public/runs/ is gitignored.
+for d in runs/s42 runs/capitol-s42 "$mini:fixtures/s42-mini" fixtures/capitol-mini "worlds/capitol:fixtures/capitol-world"; do
   src="$root/ecosim/${d%%:*}"
   dst="$root/ecoview/public/${d##*:}"
-  [ -f "$src/meta.json" ] || { echo "missing $src/meta.json — run ecosim first" >&2; exit 1; }
+  # A run directory is known by meta.json and a world bundle by bundle.json.
+  [ -f "$src/meta.json" ] || [ -f "$src/bundle.json" ] || { echo "missing $src — run ecosim first" >&2; exit 1; }
   rm -rf "$dst"; mkdir -p "$(dirname "$dst")"; cp -r "$src" "$dst"
-  echo "copied ${d%%:*} -> ${d##*:} ($(ls -d "$dst"/snap_* | wc -l) snapshots)"
+  echo "copied ${d%%:*} -> ${d##*:} ($(ls -d "$dst"/snap_* 2>/dev/null | wc -l) snapshots)"
 done

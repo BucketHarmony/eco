@@ -174,6 +174,8 @@ fn main() {
             primary_window: Some(Window {
                 title: format!("ecoview-native: {}", bundle.name),
                 resolution: (1280u32, 800u32).into(),
+                // Uncapped, so `--bench` measures the renderer and not the 60 Hz display.
+                present_mode: bevy::window::PresentMode::AutoNoVsync,
                 ..default()
             }),
             ..default()

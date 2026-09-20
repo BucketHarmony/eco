@@ -427,3 +427,177 @@ export class Pipes {
     this.lines.visible = top;
   }
 }
+
+// ---- edit mode: the ground grid drawn as itself, in chunks (shot E1) ----
+
+/** Ground cells to a side of one chunk, and so of one InstancedMesh. */
+export const CHUNK = 32;
+/** How far a ground box reaches below its top face; every box's bottom is the same, so no gap can show. */
+export const GROUND_SKIRT = 1;
+/** The targeted cell's outline, lifted this far above its top face so it never z-fights it. */
+export const OUTLINE_LIFT = 0.05;
+export const OUTLINE_COLOR = '#ff2ba6';
+
+/**
+ * A world bundle drawn at the ground grid's own resolution: one `InstancedMesh` of ground boxes and one of
+ * building boxes per `CHUNK` × `CHUNK` cells, so an edit rebuilds only the chunks it touched. The Capitol is
+ * 512 × 512 cells, which is 256 chunks of 1024 boxes (DECISIONS.md, shot E1).
+ */
+export class GroundChunks {
+  readonly group = new THREE.Group();
+  /** Chunks along x and along y. */
+  readonly cx: number;
+  readonly cy: number;
+  private readonly ground: THREE.InstancedMesh[] = [];
+  private readonly building: THREE.InstancedMesh[] = [];
+  private readonly geometry = new THREE.BoxGeometry(1, 1, 1);
+  private readonly palette: RGB[];
+  private readonly groundMat: [THREE.MeshLambertMaterial, THREE.MeshBasicMaterial];
+  private readonly buildingMat: [THREE.MeshLambertMaterial, THREE.MeshBasicMaterial];
+
+  /** `depthM` is the world's north-south extent in metres: sim +y is three -z, as everywhere else. */
+  constructor(readonly world: WorldData, readonly depthM: number) {
+    this.cx = Math.ceil(world.gw / CHUNK);
+    this.cy = Math.ceil(world.gd / CHUNK);
+    this.palette = world.meta.media.map((name) => mediumColor(name));
+    this.groundMat = [
+      new THREE.MeshLambertMaterial({ color: 0xffffff }),
+      new THREE.MeshBasicMaterial({ color: 0xffffff }),
+    ];
+    const b = new THREE.Color().setStyle(BUILDING_COLOR, THREE.SRGBColorSpace);
+    this.buildingMat = [
+      new THREE.MeshLambertMaterial({ color: b, flatShading: true }),
+      new THREE.MeshBasicMaterial({ color: b }),
+    ];
+    for (let c = 0; c < this.cx * this.cy; c++) {
+      const { w, d } = this.range(c);
+      const g = new THREE.InstancedMesh(this.geometry, this.groundMat[0], w * d);
+      g.setColorAt(0, new THREE.Color(1, 1, 1)); // allocate instanceColor up front
+      const bl = new THREE.InstancedMesh(this.geometry, this.buildingMat[0], w * d);
+      for (const m of [g, bl]) {
+        m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        this.group.add(m);
+      }
+      this.ground.push(g);
+      this.building.push(bl);
+      this.rebuild(c);
+    }
+  }
+
+  /** The cell range of chunk `c`, clipped at the grid's edges. */
+  range(c: number): { x0: number; y0: number; w: number; d: number } {
+    const x0 = (c % this.cx) * CHUNK;
+    const y0 = Math.floor(c / this.cx) * CHUNK;
+    return { x0, y0, w: Math.min(CHUNK, this.world.gw - x0), d: Math.min(CHUNK, this.world.gd - y0) };
+  }
+
+  chunkOf(gx: number, gy: number): number {
+    return Math.floor(gx / CHUNK) + this.cx * Math.floor(gy / CHUNK);
+  }
+
+  /** The chunks holding the given ground-cell indexes, each once. */
+  chunksOf(cells: Iterable<number>): number[] {
+    const out = new Set<number>();
+    for (const i of cells) out.add(this.chunkOf(i % this.world.gw, Math.floor(i / this.world.gw)));
+    return [...out];
+  }
+
+  /** Writes chunk `c`'s boxes from the current grids; the only place the geometry follows an edit. */
+  rebuild(c: number): void {
+    const w = this.world;
+    const { x0, y0, w: cw, d: cd } = this.range(c);
+    const m = new THREE.Matrix4();
+    const col = new THREE.Color();
+    const g = this.ground[c];
+    const b = this.building[c];
+    let nb = 0;
+    for (let ly = 0; ly < cd; ly++) {
+      for (let lx = 0; lx < cw; lx++) {
+        const i = x0 + lx + w.gw * (y0 + ly);
+        const h = w.ground_h[i];
+        const x = (x0 + lx + 0.5) * w.cell;
+        const z = this.depthM - (y0 + ly + 0.5) * w.cell;
+        const t = h + GROUND_SKIRT;
+        m.makeScale(w.cell, t, w.cell);
+        m.setPosition(x, h - t / 2, z);
+        g.setMatrixAt(ly * cw + lx, m);
+        const [r, gr, bl] = this.palette[w.medium[i]] ?? mediumColor('unknown');
+        g.setColorAt(ly * cw + lx, col.setRGB(r / 255, gr / 255, bl / 255, THREE.SRGBColorSpace));
+        const bh = w.building_h[i];
+        if (bh > 0) {
+          m.makeScale(w.cell, bh, w.cell);
+          m.setPosition(x, h + bh / 2, z);
+          b.setMatrixAt(nb++, m);
+        }
+      }
+    }
+    g.instanceMatrix.needsUpdate = true;
+    g.instanceColor!.needsUpdate = true;
+    b.count = nb;
+    b.instanceMatrix.needsUpdate = true;
+    // An instanced mesh is culled by its own bounding sphere, which has to be taken from the matrices: with
+    // it, a first-person view pays for the chunks it can see rather than all 256 of them.
+    for (const m of [g, b]) m.computeBoundingSphere();
+  }
+
+  setLit(lit: boolean): void {
+    const k = lit ? 0 : 1;
+    for (const m of this.ground) m.material = this.groundMat[k];
+    for (const m of this.building) m.material = this.buildingMat[k];
+  }
+
+  /** Boxes drawn: ground is every cell, buildings only the cells with a height. */
+  get instances(): [number, number] {
+    return [this.world.gw * this.world.gd, this.building.reduce((n, m) => n + m.count, 0)];
+  }
+}
+
+/** The brush outline: the top square of every cell in the brush, at that cell's top face. */
+export class Outline {
+  readonly lines: THREE.LineSegments;
+  private readonly capacity: number;
+  private readonly position: THREE.BufferAttribute;
+
+  constructor(readonly world: WorldData, readonly depthM: number, maxCells: number) {
+    this.capacity = maxCells;
+    this.position = new THREE.BufferAttribute(new Float32Array(maxCells * 8 * 3), 3);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', this.position);
+    this.lines = new THREE.LineSegments(
+      geometry,
+      new THREE.LineBasicMaterial({
+        color: new THREE.Color().setStyle(OUTLINE_COLOR, THREE.SRGBColorSpace),
+        depthTest: false,
+      }),
+    );
+    this.lines.renderOrder = 20;
+    this.lines.frustumCulled = false;
+    this.lines.visible = false;
+  }
+
+  /** `cells` are ground-cell indexes; an empty list hides the outline. */
+  set(cells: number[]): void {
+    const w = this.world;
+    const p = this.position;
+    let v = 0;
+    for (const i of cells.slice(0, this.capacity)) {
+      const gx = i % w.gw;
+      const gy = Math.floor(i / w.gw);
+      const y = w.ground_h[i] + w.building_h[i] + OUTLINE_LIFT;
+      const x0 = gx * w.cell;
+      const x1 = x0 + w.cell;
+      const z0 = this.depthM - gy * w.cell;
+      const z1 = z0 - w.cell;
+      const corners: [number, number][] = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
+      for (let k = 0; k < 4; k++) {
+        const [ax, az] = corners[k];
+        const [bx, bz] = corners[(k + 1) % 4];
+        p.setXYZ(v++, ax, y, az);
+        p.setXYZ(v++, bx, y, bz);
+      }
+    }
+    this.lines.geometry.setDrawRange(0, v);
+    p.needsUpdate = true;
+    this.lines.visible = v > 0;
+  }
+}

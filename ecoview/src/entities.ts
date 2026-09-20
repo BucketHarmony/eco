@@ -1,7 +1,7 @@
 // Trees as stacked cubes (trunk + canopy by stage) and animals as spheres, one InstancedMesh per part.
 import * as THREE from 'three';
-import { speciesColor, type Grid, type Meta, type Snapshot } from './loader';
-import { traitColor, voxelCenter, type RGB } from './world';
+import { speciesColor, type BundleShrub, type BundleTree, type Grid, type Meta, type Snapshot, type WorldData } from './loader';
+import { COLORS, traitColor, voxelCenter, type RGB } from './world';
 
 export const CANOPY_FIELD_OPACITY = 0.25;
 export const ANIMAL_RADIUS = 0.45;
@@ -134,5 +134,75 @@ export class Entities {
     this.hunters.set(hunters, lit, !view.traits);
     this.traitGrazers.set(view.traits ? grazers : [], lit, view.traits, traits);
     this.grayHunters.set(view.traits ? hunters : [], lit, view.traits);
+  }
+}
+
+// ---- a world bundle's own plants (shot E1) ----
+
+/** Trunk side in metres; the bundle gives a crown radius but no trunk thickness. */
+export const TRUNK_SIDE = 0.5;
+
+/** Ground height in metres at a scene position, from the ground cell it falls in. */
+export function groundHeightAt(w: WorldData, x: number, y: number): number {
+  const gx = Math.min(w.gw - 1, Math.max(0, Math.floor(x / w.cell)));
+  const gy = Math.min(w.gd - 1, Math.max(0, Math.floor(y / w.cell)));
+  return w.ground_h[gx + w.gw * gy];
+}
+
+/**
+ * The trees and shrubs a world bundle carries, drawn as a trunk box under an ellipsoid crown and as one
+ * ellipsoid per shrub. The editor never changes them; they are here so the ground being edited is read in
+ * the scene it belongs to (shot E1). A bundle has no `meta.json`, so the two colours come from `COLORS`.
+ */
+export class BundlePlants {
+  readonly group = new THREE.Group();
+  private readonly meshes: [THREE.InstancedMesh, THREE.MeshLambertMaterial, THREE.MeshBasicMaterial][] = [];
+
+  constructor(world: WorldData, depthM: number, trees: BundleTree[], shrubs: BundleShrub[]) {
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const ball = new THREE.SphereGeometry(0.5, 12, 8);
+    const q = new THREE.Quaternion();
+    const pos = new THREE.Vector3();
+    const scale = new THREE.Vector3();
+    const m = new THREE.Matrix4();
+    const add = (geometry: THREE.BufferGeometry, n: number, color: string): THREE.InstancedMesh => {
+      const c = new THREE.Color().setStyle(color, THREE.SRGBColorSpace);
+      const lit = new THREE.MeshLambertMaterial({ color: c });
+      const unlit = new THREE.MeshBasicMaterial({ color: c });
+      const mesh = new THREE.InstancedMesh(geometry, lit, Math.max(1, n));
+      mesh.frustumCulled = false;
+      mesh.count = n;
+      this.group.add(mesh);
+      this.meshes.push([mesh, lit, unlit]);
+      return mesh;
+    };
+    const trunks = add(box, trees.length, COLORS.soil);
+    const crowns = add(ball, trees.length, COLORS.shrub);
+    trees.forEach((t, i) => {
+      const base = groundHeightAt(world, t.x, t.y);
+      const z = depthM - t.y;
+      const crownH = Math.max(0.5, t.height - t.crown_base);
+      trunks.setMatrixAt(i, m.compose(
+        pos.set(t.x, base + t.crown_base / 2, z), q, scale.set(TRUNK_SIDE, Math.max(0.5, t.crown_base), TRUNK_SIDE),
+      ));
+      crowns.setMatrixAt(i, m.compose(
+        pos.set(t.x, base + t.crown_base + crownH / 2, z), q,
+        scale.set(2 * t.crown_radius, crownH, 2 * t.crown_radius),
+      ));
+    });
+    const bushes = add(ball, shrubs.length, COLORS.shrub);
+    shrubs.forEach((sh, i) => {
+      const base = groundHeightAt(world, sh.x, sh.y);
+      bushes.setMatrixAt(i, m.compose(
+        pos.set(sh.x, base + sh.height / 2, depthM - sh.y),
+        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), sh.angle),
+        scale.set(2 * sh.rx, sh.height, 2 * sh.ry),
+      ));
+    });
+    for (const [mesh] of this.meshes) mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  setLit(lit: boolean): void {
+    for (const [mesh, on, off] of this.meshes) mesh.material = lit ? on : off;
   }
 }

@@ -1,6 +1,7 @@
 // Controls, URL-parameter state, and the Canvas 2D population chart.
 import { OVERLAYS, mediumColor, type Overlay } from './world';
 import { DEATH_CAUSES, type DeathCause, type Series } from './loader';
+import { MAX_BRUSH, SLOTS, STEP, isSlot, type PanelView, type Slot } from './edit';
 
 export const CAMS = ['iso', 'top', 'side'] as const;
 export type Cam = (typeof CAMS)[number];
@@ -28,6 +29,50 @@ export function parseParams(search: string): ViewState {
 
 export function toSearch(s: ViewState): string {
   return `?run=${s.run}&tick=${s.tick}&overlay=${s.overlay}&cam=${s.cam}`;
+}
+
+/** A first-person viewpoint: metres, then yaw and pitch in degrees (yaw 0 looks north, + turns west). */
+export type Eye = [number, number, number, number, number];
+
+/** A `?world=` page: a world bundle and the editor's state (shot E1). A `?run=` page is unchanged. */
+export interface WorldState {
+  world: string;
+  cam: Cam;
+  edit: boolean;
+  slot: Slot;
+  brush: number;
+  /** The cell the crosshair is pinned to, so a screenshot needs no mouse; null picks by raycast. */
+  aim: [number, number] | null;
+  /** Where to stand in the fly camera, so a close-up screenshot needs no pointer lock; null stays in orbit. */
+  eye: Eye | null;
+}
+
+export function parseWorldParams(search: string): WorldState | null {
+  const p = new URLSearchParams(search);
+  const world = (p.get('world') ?? '').replace(/^\/+|\/+$/g, '');
+  if (!world) return null;
+  const c = p.get('cam');
+  const slot = p.get('slot') ?? '';
+  const brush = Math.round(Number(p.get('brush') ?? 1));
+  const a = (p.get('aim') ?? '').split(',').map(Number);
+  const aimed = a.length === 2 && a.every((v) => Number.isInteger(v) && v >= 0);
+  const e = (p.get('eye') ?? '').split(',').map(Number);
+  const eyed = e.length === 5 && e.every((v) => Number.isFinite(v));
+  return {
+    world,
+    cam: (CAMS as readonly string[]).includes(c ?? '') ? (c as Cam) : 'iso',
+    edit: p.get('edit') === '1',
+    slot: isSlot(slot) ? slot : 'lawn',
+    brush: Number.isFinite(brush) ? Math.min(MAX_BRUSH, Math.max(1, brush)) : 1,
+    aim: aimed ? [a[0], a[1]] : null,
+    eye: eyed ? [e[0], e[1], e[2], e[3], e[4]] : null,
+  };
+}
+
+export function worldSearch(s: WorldState): string {
+  const aim = s.aim ? `&aim=${s.aim[0]},${s.aim[1]}` : '';
+  const eye = s.eye ? `&eye=${s.eye.join(',')}` : '';
+  return `?world=${s.world}&cam=${s.cam}&edit=${s.edit ? 1 : 0}&slot=${s.slot}&brush=${s.brush}${aim}${eye}`;
 }
 
 // ---- chart ----
@@ -322,6 +367,15 @@ export interface Controls {
   chart: HTMLCanvasElement;
   legend: HTMLElement;
   status: HTMLElement;
+  /** The overlay row and the play row, hidden on a `?world=` page (shot E1). */
+  overlayRow: HTMLElement;
+  playRow: HTMLElement;
+  /** The editor's sidebar panel, its hotbar and readout, and the crosshair over the canvas. */
+  edit: HTMLElement;
+  hotbar: HTMLElement;
+  editInfo: HTMLElement;
+  editNote: HTMLElement;
+  cross: HTMLElement;
 }
 
 export function getControls(): Controls {
@@ -339,6 +393,13 @@ export function getControls(): Controls {
     chart: q('chart'),
     legend: q('legend'),
     status: q('status'),
+    overlayRow: q('overlayrow'),
+    playRow: q('playrow'),
+    edit: q('edit'),
+    hotbar: q('hotbar'),
+    editInfo: q('editinfo'),
+    editNote: q('editnote'),
+    cross: q('cross'),
   };
 }
 
@@ -365,4 +426,68 @@ export function syncControls(c: Controls, s: ViewState, snapshots: number[], sna
   c.slider.value = String(Math.max(0, snapshots.indexOf(snapTick)));
   c.readout.textContent = `tick ${snapTick} / ${snapshots[snapshots.length - 1]}`;
   c.play.textContent = playing ? 'Pause' : 'Play';
+}
+
+// ---- the editor's sidebar (shot E1) ----
+
+/**
+ * A world bundle has no snapshots and no series, so the tick slider, the play button and the overlay
+ * selector go away and the chart area is left empty rather than drawn with a fake one.
+ */
+export function prepareWorldSidebar(c: Controls): void {
+  for (const el of [c.overlayRow, c.playRow]) el.hidden = true;
+  c.slider.hidden = true;
+  // The edit panel takes the room four chart panels had, so the empty chart area shrinks to keep the
+  // medium legend and the status line on screen.
+  c.chart.style.height = `${WORLD_CHART_H}px`;
+  const ctx = c.chart.getContext('2d')!;
+  ctx.fillStyle = CHART_BG;
+  ctx.fillRect(0, 0, c.chart.width, c.chart.height);
+  c.edit.hidden = false;
+}
+
+/** The empty chart area's height on a world page, in CSS pixels. */
+export const WORLD_CHART_H = 150;
+
+/** The note the shot asks for: a click is half a metre, but the sim rounds a whole 1 m column. */
+export const STEP_NOTE =
+  `One click is ${STEP} m of bundle height. The sim averages ground height over each 1 m ecology column and `
+  + 'rounds it to a whole metre, so one click can change the picture without changing the sim; two move a column by one voxel.';
+
+/** Draws the hotbar, the target readout and the dirty flag, and puts the crosshair over the picked cell. */
+export function drawEditPanel(c: Controls, v: PanelView, media: string[]): void {
+  c.cross.hidden = !v.editing;
+  c.cross.style.left = `${Math.round(v.crosshair[0])}px`;
+  c.cross.style.top = `${Math.round(v.crosshair[1])}px`;
+  c.hotbar.replaceChildren(...SLOTS.map((slot, i) => {
+    const b = document.createElement('span');
+    b.className = slot.key === v.slot ? 'slot on' : 'slot';
+    b.dataset.slot = slot.key;
+    const sw = document.createElement('i');
+    const [r, g, bl] = mediumColor(slot.key === 'building' ? 'roof' : slot.key === 'ground' ? 'soil' : slot.key);
+    sw.style.background = `rgb(${r}, ${g}, ${bl})`;
+    b.append(document.createTextNode(`${i + 1} `), sw, document.createTextNode(slot.label));
+    return b;
+  }));
+  // Out of edit mode the panel is one line of invitation: a hotbar would offer actions that do nothing.
+  c.hotbar.hidden = !v.editing;
+  c.editNote.hidden = !v.editing;
+  if (!v.editing) {
+    c.editInfo.textContent = 'edit off · press E to edit this bundle';
+    c.editInfo.classList.remove('dirty');
+    return;
+  }
+  const t = v.target;
+  const st = v.state;
+  c.editInfo.textContent = [
+    `edit ${v.editing ? 'on' : 'off'} (E) · camera ${v.fly ? 'fly' : 'orbit'} (F) · brush ${v.brush} ([ ])`,
+    t && st
+      ? `cell (${t.gx}, ${t.gy}) ${media[st.medium] ?? '?'} · ground ${st.ground_h.toFixed(2)} m`
+        + ` · building ${st.building_h.toFixed(2)} m · ${t.top ? 'top' : 'side'} face`
+      : 'no cell under the crosshair',
+    `${v.undo} undo (Ctrl-Z) · ${v.redo} redo (Ctrl-Y) · ${v.saves} saved (Ctrl-S)`
+      + (v.dirty ? ' · ● unsaved edits' : ''),
+    v.message,
+  ].join('\n');
+  c.editInfo.classList.toggle('dirty', v.dirty);
 }

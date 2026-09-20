@@ -397,10 +397,10 @@ export function joinUrl(base: string, path: string): string {
   return base.endsWith('/') ? base + path : `${base}/${path}`;
 }
 
-/** One `world/pipes.json` row, with the shape the renderer relies on checked. */
-function parsePipe(raw: unknown, i: number): Pipe {
+/** One `pipes.json` row, with the shape the renderer relies on checked. */
+function parsePipe(raw: unknown, i: number, file = 'world/pipes.json'): Pipe {
   const p = raw as Pipe;
-  const at = `world/pipes.json[${i}]`;
+  const at = `${file}[${i}]`;
   if (!p || typeof p !== 'object') throw new Error(`${at}: not an object`);
   for (const end of ['inlet', 'outlet'] as const) {
     const v = p[end];
@@ -428,7 +428,154 @@ export async function loadWorld(base: string, meta: WorldMeta, fetcher: Fetcher 
   for (const code of medium) {
     if (code >= meta.media.length) throw new Error(`${u('medium.bin')}: code ${code} is not in world.media`);
   }
-  return { meta, gw, gd, cell: meta.ground_cell_m, ground_h, medium, building_h, pipes: raw.map(parsePipe) };
+  return { meta, gw, gd, cell: meta.ground_cell_m, ground_h, medium, building_h, pipes: raw.map((p, i) => parsePipe(p, i)) };
+}
+
+// ---- world bundles (shot E1) ----
+
+/**
+ * `bundle.json` of a world bundle (`docs/SCENE-CONTRACT.md`). Only the fields the viewer reads are typed;
+ * `source` and `counts` ride along in the verbatim text a save writes back.
+ */
+export interface BundleJson {
+  format: string;
+  version: number;
+  name: string;
+  size_m: number;
+  ground_cell_m: number;
+  ground_width: number;
+  ground_depth: number;
+  media: string[];
+}
+
+export const BUNDLE_FORMAT = 'ecosim-world-bundle';
+/** The one bundle version this reader and ecosim's `Bundle::load` share. */
+export const BUNDLE_JSON_VERSION = 2;
+/** Files the editor never changes: they are written back verbatim, so a no-edit save is byte-identical. */
+export const BUNDLE_VERBATIM = ['bundle.json', 'trees.json', 'shrubs.json', 'pipes.json'] as const;
+/** The three grids, in the order a save writes them. */
+export const BUNDLE_GRIDS = ['ground_h.f32', 'medium.u8', 'building_h.f32'] as const;
+
+/** `trees.json`: metres from the south-west corner, like every bundle position. */
+export interface BundleTree {
+  x: number;
+  y: number;
+  height: number;
+  crown_radius: number;
+  crown_base: number;
+}
+
+/** `shrubs.json`: `rx` and `ry` are the half-axes and `angle` the rotation about z, in radians. */
+export interface BundleShrub {
+  x: number;
+  y: number;
+  height: number;
+  rx: number;
+  ry: number;
+  angle: number;
+}
+
+export interface Bundle {
+  base: string;
+  json: BundleJson;
+  /** Verbatim text of each `BUNDLE_VERBATIM` file, by file name. */
+  raw: Record<string, string>;
+  /** The editable grids, in the same shape a format-4 run's `world/` gives (`WorldData` is not forked). */
+  world: WorldData;
+  trees: BundleTree[];
+  shrubs: BundleShrub[];
+  /** The ecology grid the viewer draws the bundle on: `size_m` columns a side, as tall as the scene is. */
+  grid: Grid;
+}
+
+function checkBundleJson(raw: unknown): BundleJson {
+  const j = raw as BundleJson;
+  const bad = (m: string): never => {
+    throw new Error(`bundle.json: ${m}`);
+  };
+  if (!j || typeof j !== 'object') bad('not an object');
+  if (j.format !== BUNDLE_FORMAT) bad(`format ${JSON.stringify(j.format)}, expected ${JSON.stringify(BUNDLE_FORMAT)}`);
+  if (j.version !== BUNDLE_JSON_VERSION) bad(`version ${String(j.version)}, expected ${BUNDLE_JSON_VERSION}`);
+  // The sim's limits: one ecology column is 1 m and its sides are u8 (ecosim `Bundle::load`).
+  if (!Number.isInteger(j.size_m) || j.size_m < 1 || j.size_m > 256) bad(`size_m ${String(j.size_m)} is not 1..=256 whole metres`);
+  if (!(j.ground_cell_m > 0)) bad(`ground_cell_m ${String(j.ground_cell_m)}`);
+  for (const side of ['ground_width', 'ground_depth'] as const) {
+    const want = j.size_m / j.ground_cell_m;
+    if (j[side] !== want) bad(`${side} ${String(j[side])}, expected ${want} for size_m ${j.size_m} at ${j.ground_cell_m} m cells`);
+  }
+  if (!Array.isArray(j.media) || j.media.some((m) => typeof m !== 'string')) bad('media is not a list of names');
+  // ecosim rejects a bundle whose media[0] is not soil, so the editor refuses to load one it could not save.
+  if (j.media[0] !== 'soil') bad(`media[0] is ${JSON.stringify(j.media[0])}, expected "soil"`);
+  return j;
+}
+
+/** Checks the numeric fields the viewer draws a plant from, and keeps the row as it is otherwise. */
+function parsePlants<T>(text: string, file: string, keys: readonly (keyof T & string)[]): T[] {
+  const raw = JSON.parse(text) as unknown;
+  if (!Array.isArray(raw)) throw new Error(`${file}: not an array`);
+  return raw.map((row, i) => {
+    const r = row as Record<string, number>;
+    if (!r || typeof r !== 'object') throw new Error(`${file}[${i}]: not an object`);
+    for (const k of keys) {
+      if (typeof r[k] !== 'number' || !Number.isFinite(r[k])) throw new Error(`${file}[${i}]: ${k} is not a number`);
+    }
+    return row as T;
+  });
+}
+
+/**
+ * A world bundle: the same three grids a format-4 run carries under `world/`, plus the scene's plants and
+ * pipes. Every file is validated against `bundle.json` before anything is drawn, and the four files the
+ * editor never touches are kept as text so a save can write them back byte for byte (shot E1).
+ */
+export async function loadBundle(base: string, fetcher: Fetcher = fetch): Promise<Bundle> {
+  const u = (f: string) => joinUrl(base, f);
+  const texts = await Promise.all(BUNDLE_VERBATIM.map(async (f) => (await get(fetcher, u(f))).text()));
+  const raw: Record<string, string> = {};
+  BUNDLE_VERBATIM.forEach((f, i) => (raw[f] = texts[i]));
+  const json = checkBundleJson(JSON.parse(raw['bundle.json']));
+  const gw = json.ground_width;
+  const gd = json.ground_depth;
+  const n = gw * gd;
+  const [ground_h, medium, building_h] = await Promise.all([
+    getF32(fetcher, u('ground_h.f32'), n),
+    getBin(fetcher, u('medium.u8'), n),
+    getF32(fetcher, u('building_h.f32'), n),
+  ]);
+  for (const code of medium) {
+    if (code >= json.media.length) throw new Error(`${u('medium.u8')}: code ${code} is not in bundle.json media`);
+  }
+  const pipesRaw = JSON.parse(raw['pipes.json']) as unknown;
+  if (!Array.isArray(pipesRaw)) throw new Error(`${u('pipes.json')}: not an array`);
+  const meta: WorldMeta = {
+    name: json.name,
+    ground_cell_m: json.ground_cell_m,
+    ground_width: gw,
+    ground_depth: gd,
+    media: json.media,
+  };
+  const world: WorldData = {
+    meta,
+    gw,
+    gd,
+    cell: json.ground_cell_m,
+    ground_h,
+    medium,
+    building_h,
+    pipes: pipesRaw.map((p, i) => parsePipe(p, i, 'pipes.json')),
+  };
+  // A bundle has no ecology height, so the view is as tall as the scene: the highest roof plus a metre.
+  let top = 0;
+  for (let i = 0; i < n; i++) top = Math.max(top, ground_h[i] + building_h[i]);
+  return {
+    base,
+    json,
+    raw,
+    world,
+    trees: parsePlants<BundleTree>(raw['trees.json'], 'trees.json', ['x', 'y', 'height', 'crown_radius', 'crown_base']),
+    shrubs: parsePlants<BundleShrub>(raw['shrubs.json'], 'shrubs.json', ['x', 'y', 'height', 'rx', 'ry', 'angle']),
+    grid: new Grid({ x: json.size_m, y: json.size_m, z: Math.max(8, Math.ceil(top) + 1) }),
+  };
 }
 
 export async function loadRun(base: string, fetcher: Fetcher = fetch): Promise<Run> {

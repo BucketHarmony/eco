@@ -18,6 +18,11 @@ export const SHOTS = [
   ['13_capitol_medium_t0_top.png', 'run=runs/capitol-s42&tick=0&overlay=medium&cam=top'],
   ['14_capitol_light_t0_top.png', 'run=runs/capitol-s42&tick=0&overlay=light&cam=top'],
   ['15_capitol_material_t20000_iso.png', 'run=runs/capitol-s42&tick=20000&overlay=material&cam=iso'],
+  // 16 and 17 are edit mode on the committed Capitol bundle (shot E1). ?eye= stands the first-person camera
+  // at a fixed spot in metres east, north and up with yaw and pitch, so the crosshair picks without a mouse:
+  // 16 looks down the south front onto the roof, 17 stands on the lawn by the east road.
+  ['16_edit_hotbar.png', 'world=fixtures/capitol-world&cam=iso&edit=1&slot=building&brush=3&eye=128,6,44,0,-9'],
+  ['17_edit_brush5.png', 'world=fixtures/capitol-world&cam=iso&edit=1&slot=lawn&brush=5&eye=70,4,10,0,-20'],
 ];
 
 /**

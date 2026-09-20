@@ -1,12 +1,15 @@
 // Entry point: wires loader, world, entities and ui together. Renders on demand only.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { loadRun, loadSnapshot, pickSnapshot, speciesColor, type Grid, type Run, type Snapshot } from './loader';
+import {
+  loadBundle, loadRun, loadSnapshot, pickSnapshot, speciesColor, type Grid, type Run, type Snapshot,
+} from './loader';
 import { Buildings, GroundDrape, Pipes, World } from './world';
 import { Entities } from './entities';
+import { Editor, type EditorHost } from './edit';
 import {
-  drawChart, drawLegend, getControls, initControls, parseParams, syncControls, toSearch,
-  type Cam, type ViewState,
+  STEP_NOTE, drawChart, drawEditPanel, drawLegend, getControls, initControls, parseParams, parseWorldParams,
+  prepareWorldSidebar, syncControls, toSearch, worldSearch, type Cam, type ViewState, type WorldState,
 } from './ui';
 
 declare global {
@@ -89,10 +92,12 @@ function makeCamera(cam: Cam, g: Grid): THREE.Camera {
 
 let camera: THREE.Camera = new THREE.PerspectiveCamera();
 let orbit: OrbitControls | null = null;
+/** The camera `orbit` drives, kept while the editor's fly camera is the one being drawn with. */
+let orbitCamera: THREE.Camera = camera;
 
 function setCamera(cam: Cam, g: Grid): void {
   orbit?.dispose();
-  camera = makeCamera(cam, g);
+  camera = orbitCamera = makeCamera(cam, g);
   orbit = new OrbitControls(camera, canvas);
   if (cam === 'top') {
     orbit.target.set(g.x / 2, 0, g.y / 2);
@@ -222,6 +227,71 @@ async function apply(next: ViewState): Promise<void> {
   }
 }
 
+// ---- a world bundle: the editor's page (shot E1) ----
+
+let editor: Editor | null = null;
+let worldState: WorldState | null = parseWorldParams(location.search);
+
+const host: EditorHost = {
+  scene,
+  canvas,
+  render,
+  camera: () => camera,
+  useCamera: (c) => {
+    camera = c ?? orbitCamera;
+    render();
+  },
+  setOrbit: (on) => {
+    if (orbit) orbit.enabled = on;
+  },
+  panel: (v) => drawEditPanel(ui, v, editor!.bundle.world.meta.media),
+  pushState: (s) => {
+    worldState = { ...worldState!, ...s };
+    history.replaceState(null, '', worldSearch(worldState));
+  },
+};
+
+async function applyWorld(s: WorldState): Promise<void> {
+  window.__ecoviewReady = false;
+  try {
+    ui.status.textContent = `Loading ${s.world}…`;
+    const bundle = await loadBundle(`/${s.world}`);
+    const g = bundle.grid;
+    prepareWorldSidebar(ui);
+    ui.editNote.textContent = STEP_NOTE;
+    setCamera(s.cam, g);
+    const t = target(g);
+    sun.target.position.copy(t);
+    sun.position.set(t.x + 40, t.y + 88, t.z + 60);
+    editor = new Editor(bundle, host);
+    editor.setState(s);
+    editor.setLit(s.eye !== null || s.cam !== 'top');
+    if (s.eye) editor.setEye(...s.eye);
+    drawLegend(ui.legend, 'medium', bundle.world.meta.media);
+    const w = bundle.world;
+    ui.status.textContent = `${s.world} · ${bundle.json.name} · ${g.x}×${g.y} m over ${w.gw}×${w.gd} ground cells`
+      + ` at ${w.cell} m · ${bundle.trees.length} trees, ${bundle.shrubs.length} shrubs, ${w.pipes.length} pipes`;
+    ui.status.classList.remove('error');
+    editor.refresh();
+    requestAnimationFrame(() => {
+      window.__ecoviewReady = true;
+    });
+  } catch (err) {
+    fail(err);
+  }
+}
+
+/** The camera selector on a world page: no snapshot to reload, so it only reframes and redraws. */
+function setWorldCam(cam: Cam): void {
+  if (!editor || !worldState) return;
+  worldState = { ...worldState, cam };
+  history.replaceState(null, '', worldSearch(worldState));
+  setCamera(cam, editor.bundle.grid);
+  host.setOrbit(!worldState.edit);
+  editor.setLit(cam !== 'top');
+  editor.refresh();
+}
+
 function stepTo(index: number): void {
   if (!run) return;
   const snaps = run.meta.snapshots;
@@ -245,7 +315,7 @@ function togglePlay(): void {
 
 initControls(ui, {
   onOverlay: (overlay) => void apply({ ...state, overlay }),
-  onCam: (c) => void apply({ ...state, cam: c }),
+  onCam: (c) => (worldState ? setWorldCam(c) : void apply({ ...state, cam: c })),
   onSnapshotIndex: stepTo,
   onPlayToggle: togglePlay,
 });
@@ -267,4 +337,5 @@ window.__ecoviewBench = (n) => {
   return ms;
 };
 
-void apply(state);
+if (worldState) void applyWorld(worldState);
+else void apply(state);

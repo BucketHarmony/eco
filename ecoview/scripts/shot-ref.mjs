@@ -1,23 +1,23 @@
 // Visual regression against shots/reference/. `check` compares the fresh shots/*.png with pixelmatch
-// (threshold 0.1) and fails if more than 2% of any image's pixels differ, writing diffs to shots/diff/.
+// (threshold 0.1) and fails if a gated region differs by more than 2% of the screenshot, writing diffs to
+// shots/diff/. The regions are the #view canvas and the sidebar (scripts/shot-diff.mjs): the view is
+// gated everywhere, the sidebar only on the platform the references were rendered on, so the check
+// runs on Linux CI instead of being skipped there (shot E5).
 // `accept` copies the fresh shots over the references and records the rendering platform; with name
 // substrings after it, only the matching shots are accepted, which is how a shot that adds references
 // avoids a mass re-accept (overnight/MASTER.md).
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
 import { SHOTS } from './shots.mjs';
 import { PLATFORM } from './chromium.mjs';
+import { MAX_DIFF, compareRegions } from './shot-diff.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const shots = path.join(root, 'shots');
 const refDir = path.join(shots, 'reference');
 const diffDir = path.join(shots, 'diff');
-const THRESHOLD = 0.1;
-const MAX_DIFF = 0.02;
-
 const mode = process.argv[2];
 if (mode === 'accept') {
   const only = process.argv.slice(3);
@@ -33,29 +33,34 @@ if (mode === 'accept') {
   console.log(`accepted ${take.length} references (${PLATFORM})${which}`);
 } else if (mode === 'check') {
   const recorded = (await readFile(path.join(refDir, 'PLATFORM'), 'utf8')).trim();
-  if (recorded !== PLATFORM) {
-    console.log(`note: references were rendered on ${recorded}, this is ${PLATFORM}; expect platform drift`);
+  const samePlatform = recorded === PLATFORM;
+  if (!samePlatform) {
+    console.log(`note: references were rendered on ${recorded}, this is ${PLATFORM};`
+      + ' the sidebar is measured but not gated, the view canvas is gated as usual');
   }
   await mkdir(diffDir, { recursive: true });
   let failed = 0;
   for (const [file] of SHOTS) {
     const ref = PNG.sync.read(await readFile(path.join(refDir, file)));
     const cur = PNG.sync.read(await readFile(path.join(shots, file)));
-    if (ref.width !== cur.width || ref.height !== cur.height) {
-      console.error(`FAIL ${file}: size ${cur.width}x${cur.height}, reference ${ref.width}x${ref.height}`);
+    let result;
+    try {
+      result = compareRegions(ref, cur, { samePlatform });
+    } catch (e) {
+      console.error(`FAIL ${file}: ${e.message}`);
       failed++;
       continue;
     }
-    const diff = new PNG({ width: ref.width, height: ref.height });
-    const n = pixelmatch(ref.data, cur.data, diff.data, ref.width, ref.height, { threshold: THRESHOLD });
-    const frac = n / (ref.width * ref.height);
-    await writeFile(path.join(diffDir, file), PNG.sync.write(diff));
-    const ok = frac <= MAX_DIFF;
-    if (!ok) failed++;
-    console.log(`${ok ? 'ok  ' : 'FAIL'} ${file}: ${(frac * 100).toFixed(3)}% pixels differ`);
+    await writeFile(path.join(diffDir, file), PNG.sync.write(result.diff));
+    if (!result.ok) failed++;
+    const parts = result.regions.map(
+      (r) => `${r.name} ${(r.frac * 100).toFixed(3)}% of the page`
+        + ` (${(r.regionFrac * 100).toFixed(3)}% of the region${r.gated ? '' : ', not gated'})`,
+    );
+    console.log(`${result.ok ? 'ok  ' : 'FAIL'} ${file}: ${parts.join(', ')}`);
   }
   if (failed) {
-    console.error(`${failed} of ${SHOTS.length} shots differ from shots/reference by more than ${MAX_DIFF * 100}%`);
+    console.error(`${failed} of ${SHOTS.length} shots differ from shots/reference by more than ${MAX_DIFF * 100}% in a gated region`);
     process.exit(1);
   }
 } else {

@@ -214,8 +214,8 @@ jobs:
   # ecoview gate: build the two runs it renders (the seed-42 strip at format 3, and the Capitol world
   # bundle at format 4 for shots 12-15), then build, unit + scenario tests, screenshots and the s42
   # films (single-view and 2x2 tiled).
-  # shot:check compares against references rendered on the platform in shots/reference/PLATFORM, so it
-  # runs only on a matching runner; elsewhere it is skipped with a notice (ecoview/DECISIONS.md, Shot 6).
+  # shot:check compares the fresh screenshots with the committed references region by region, and runs
+  # on this Linux runner even though the references were rendered on Windows (ecoview/DECISIONS.md, E5).
   ecoview:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -282,17 +282,13 @@ jobs:
       - name: screenshots
         run: npm run shot
 
+      # Since shot E5 this runs on every platform instead of being skipped off Windows: the check gates
+      # the #view canvas, which SwiftShader draws identically on both, and only measures the sidebar's
+      # platform-dependent text (ecoview/DECISIONS.md, "E5 reference screenshots in CI").
       - name: shot:check
-        run: |
-          ref="$(head -n1 shots/reference/PLATFORM)"
-          here="$(node -p 'process.platform + "-" + process.arch') swiftshader"
-          if [ "$ref" = "$here" ]; then
-            node scripts/shot-ref.mjs check
-          else
-            echo "::notice title=shot:check skipped::references were rendered on $ref, this runner is $here"
-          fi
+        run: node scripts/shot-ref.mjs check
 
-      # The film check compares frame 100 with shots/reference/02 on a matching platform, else with the fresh shots/02.
+      # The film check compares frame 100 with shots/reference/02, cropped to #view, on every platform (shot E5).
       - name: film
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg

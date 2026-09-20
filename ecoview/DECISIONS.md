@@ -588,3 +588,92 @@ can sweep up after it, which is what `tests/e2e/sim.spec.ts` does; nothing in th
 so a screenshot or a scripted page can choose the run length without clicking, the same rule the rest of
 ecoview follows. The snapshot cadence is derived, not configured: about ten snapshots whatever the run
 length, which keeps the slider useful at 200 ticks and at 20000.
+
+## E5 reference screenshots in CI
+
+**The hole.** `npm run shot:check` compares the fresh screenshots with `shots/reference/`, and the CI
+step ran it only when `shots/reference/PLATFORM` matched the runner. The references are rendered on
+Windows and CI runs on Linux, so the step has never done anything but print a notice. Shot E2 found
+fifteen of the seventeen references out of date, drifted by ecosim shot G4b's calibration, and no job
+had gone red over it. A check that is skipped exactly where it would be enforced is not a check.
+
+**The measurement that decides it.** The Linux renders are the `ecoview-shots` artifact of CI run
+35536724097 (commit bcecb6f, the E4 gate); the references are the committed Windows ones at that same
+commit, so the only difference is the platform. Split at the page's own seam — the 960×800 `#view`
+canvas and the 320×800 sidebar beside it:
+
+| | `#view` | sidebar |
+| --- | --- | --- |
+| 01–11 (strip) | 0 pixels, 0.000% | 8.31–8.58% of the sidebar |
+| 12–15 (Capitol) | 0 pixels, 0.000% | 5.50–6.78% |
+| 16–17 (editor) | 0 pixels, 0.000% | 9.02–9.04% |
+
+**SwiftShader draws the WebGL canvas identically on the two platforms — not within a tolerance, but
+to the pixel, on all seventeen.** Every differing pixel in all seventeen is text in the sidebar: the
+labels, the readout and the chart's numbers, antialiased differently by the two platforms' font
+stacks. The note at "Shot 6" that Windows and Linux "won't agree within 2%: fonts, antialiasing and
+ANGLE backends differ" is right about the fonts and wrong about the rendering, and it was never
+measured.
+
+**The choice.** Of the three ways out the shot prompt names:
+
+1. *Render a second reference set on Linux in CI and commit it.* Correct, but it makes every future
+   re-accept a CI round trip: a renderer change cannot produce Linux references until it is pushed, so
+   the first run of every such shot would be red by construction. Rejected for that cost, not for
+   dishonesty.
+2. *Raise the tolerance until one set passes on both platforms.* Dead on the numbers. Whole-image
+   platform drift is 1.375–2.260%, and the drift E2 found was 0.213–18.699% whole-image, with five of
+   the fifteen changed pictures under 2.260%. A tolerance wide enough to pass the platform would have
+   passed real drift.
+3. *Compare something coarser than pixels.* Measured and dead too, for the sidebar at least: the
+   total-variation distance between 4-bit RGB colour histograms of the sidebar region is **1.24–7.44%
+   for the platform pair** and **0.19–0.92% for E2's real drift** — the noise is larger than the
+   signal, in every one of the seventeen. No threshold on that statistic separates them.
+
+**What this shot does instead: compare the same references region by region.** `scripts/shot-diff.mjs`
+splits a screenshot into the `#view` canvas and the sidebar. The view region is gated on every
+platform; the sidebar is gated only when `PLATFORM` matches the references, and elsewhere is measured
+and printed but cannot fail. One reference set, rendered on Windows as before, now checked on Linux CI
+for everything except its text. This is also the rule the project already states — CLAUDE.md: "Pixel
+assertions are measured on the `#view` canvas only; the chart sits in a sidebar outside it" — which
+the reference check was the one place not to follow.
+
+**No tolerance moves.** A region fails when it differs by more than `MAX_DIFF` = 2% **of the
+screenshot**, not 2% of the region, so each region keeps the same 20,480-pixel budget the flat
+whole-image check gave the whole page. Gating the sidebar against its own area would have been four
+times stricter and would have failed shots 16 and 17 as they stand (0.663% of the page, 2.652% of the
+sidebar — E4's sim line, accepted under the flat check), i.e. it would have forced a re-accept this
+shot has no business making. The only loosening is that two regions drifting at once now get a budget
+each; `pixelmatch`'s threshold 0.1 is untouched.
+
+**Why the per-pixel threshold stays where it is.** Two runs of `npm run shot` on this machine, same
+commit and same data, differ by 20 pixels of the 1,024,000 at pixelmatch threshold 0 and by 0 at the
+0.1 the check uses (`shots/01_material_t0_iso.png`, re-rendered in this shot's gate). Software
+rendering is not bit-stable even against itself, which is the other reason the SAD's pixel assertions
+are coarse and exact-image goldens are forbidden.
+
+**The honesty test.** Replaying E2's drift — the references at 0190df9 against the ones at HEAD, in
+CI's mode — the new check fails **11 of the 17**, against the 12 the old flat check would have failed
+had it ever run: 03 (9.4% of the page in the view), 04 (11.5%), 05 (17.8%), 06 (2.2%), 07 (3.6%), 09
+(7.3%), 10 (10.7%), 11 (6.3%), 15 (3.1%), 16 (2.2%), 17 (6.7%). The one picture it now misses is 02,
+whose view drifted 1.563% of the page and which the flat check only caught by adding the sidebar's
+0.921%. Eleven red pictures is the same event caught eleven times; the drift could not have hidden.
+
+**The film check loses its fallback too.** `scripts/film-check.mjs` already cropped to `#view`, but
+off the reference platform it compared the film frame with the fresh `shots/02` instead of the
+committed reference — which could only ever prove the film matched this run's own screenshot. It now
+compares with `shots/reference/02` everywhere.
+
+**What a re-accept costs now.** Nothing new: the references stay Windows-rendered, `npm run
+shot:accept` is unchanged, and because the view region is platform-identical a re-accept done locally
+lands green in CI on the same commit. That is the advantage over option 1.
+
+**Proof that it can fail.** PENDING-DRIFT-EXPERIMENT
+
+**Where the constants live.** `REGIONS` in `scripts/shot-diff.mjs` is the one definition of the page's
+two rectangles, built from `VIEW` (`film-lib.mjs`) and `VIEWPORT` (`chromium.mjs`).
+`tests/e2e/view.spec.ts` asserts the real `#view` and `#sidebar` bounding boxes equal them, so a
+layout change that moved the seam would fail a test rather than quietly gate the wrong pixels.
+`tests/unit/shot-diff.test.ts` covers the comparison itself: regions tile the page, a view difference
+fails on both platforms, a sidebar difference fails only on the reference platform, and the diff image
+carries both regions' marks.

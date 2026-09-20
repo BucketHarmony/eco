@@ -1,7 +1,8 @@
 // Checks a film made by scripts/film.mjs: the MP4 has one video frame per PNG, and the frame at tick 10000,
 // with the caption bar cropped off, matches screenshot 02 (material, tick 10000, iso) cropped to #view:
-// pixelmatch threshold 0.1, at most 2% of pixels differ, as in shot-ref.mjs. The reference is
-// shots/reference/02 when it was rendered on this platform, otherwise the fresh shots/02 from `npm run shot`.
+// pixelmatch threshold 0.1, at most 2% of pixels differ, as in shot-ref.mjs. The reference is always
+// shots/reference/02: the crop is the #view canvas, which SwiftShader draws the same on every platform
+// (shot E5), so there is no platform fallback to make.
 // For a tiled film it compares the material:iso tile of that frame, minus its label rows, with the same rows of 02.
 //   node scripts/film-check.mjs film/s42-material.mp4
 import { spawnSync } from 'node:child_process';
@@ -10,7 +11,6 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
-import { PLATFORM } from './chromium.mjs';
 import { LABEL_H, VIEW, cropPng, gridFor, parseTiles, tileRect } from './film-lib.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -52,9 +52,10 @@ else {
 const i = ticks.indexOf(TICK);
 if (i < 0) fail(`no frame at tick ${TICK}`);
 else if (!tiles || tile) {
-  const recorded = (await readFile(path.join(root, 'shots/reference/PLATFORM'), 'utf8')).trim();
-  const refPath = recorded === PLATFORM ? path.join(root, 'shots/reference', REF) : path.join(root, 'shots', REF);
-  if (recorded !== PLATFORM) console.log(`note: references are from ${recorded}; comparing with the fresh shots/${REF}`);
+  // Before shot E5 a run on a platform other than the references' fell back to the fresh shots/02,
+  // which could only prove the film matched this run's own screenshot. The crop below is #view, so the
+  // committed reference is comparable everywhere and is now used everywhere.
+  const refPath = path.join(root, 'shots/reference', REF);
   const top = tile ? LABEL_H : 0;
   const w = VIEW.width;
   const h = VIEW.height - top;

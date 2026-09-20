@@ -89,3 +89,22 @@ wall clock, which is what shot E2 replaced.
 | --- | --- | --- | --- | --- |
 | `s42-material.mp4` (material:iso) | 201 | 960×832 | 83.1 s | 300 s |
 | `s42-tiled.mp4` (2×2) | 201 | 1920×1632 | 342.8 s | 700 s |
+
+## Shot E5: the same pictures, now checked on Linux too
+
+No screenshot changed in this shot and no reference was re-accepted. All seventeen were re-rendered and
+viewed again, and every verdict above still reads true of the image on disk: `npm run shot` wrote them in
+20.9 s of the 60 s budget and `node scripts/shot-ref.mjs check` passed 17/17, with **0.000% of the `#view`
+canvas differing on every row**. The two editor shots still carry E4's sim line in the sidebar (0.663% of
+the page, 2.652% of the sidebar), inside the same budget that accepted it.
+
+What is new is where the check runs. It compares the `#view` canvas and the sidebar separately, gates the
+canvas on every platform and the sidebar only on the platform the references came from, so the CI job on
+Linux now runs it instead of skipping it — the hole that let fifteen references go stale until shot E2
+noticed. The Windows references and the Linux CI renders agree **to the pixel** inside `#view` on all
+seventeen; the whole disagreement is the sidebar's text, 5.5–9.0% of it. The numbers, the two options this
+rejected and the proof that a perturbed reference reddens the job are in `DECISIONS.md` under "E5 reference
+screenshots in CI".
+
+Re-rendering also measured this machine against itself: two runs of `npm run shot` at the same commit
+differ by 20 pixels of 1,024,000 at pixelmatch threshold 0, and by none at the 0.1 the check uses.

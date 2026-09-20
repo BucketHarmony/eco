@@ -1,15 +1,26 @@
 import { expect, test } from '@playwright/test';
 import { FULL, open, trackErrors, viewStats } from './helpers';
+// @ts-expect-error plain .mjs shared with scripts/shot-ref.mjs
+import { REGIONS } from '../../scripts/shot-diff.mjs';
+
+type Rect = { name: string; x: number; y: number; width: number; height: number };
+const region = (name: string): Rect => (REGIONS as Rect[]).find((r) => r.name === name)!;
 
 test('fixture loads, becomes ready within 5 s, no console errors', async ({ page }) => {
   const errors = trackErrors(page);
   await page.goto('/');
   await page.waitForFunction(() => window.__ecoviewReady === true, null, { timeout: 5_000 });
   await expect(page.locator('#readout')).toContainText('tick 0');
+  // shot:check gates these two rectangles separately, so the page had better still be laid out that
+  // way: the canvas where the view region says, the sidebar's chart inside the sidebar region (shot E5).
+  const view = region('view');
   const box = await page.locator('#view').boundingBox();
-  expect(box).toEqual({ x: 0, y: 0, width: 960, height: 800 });
+  expect(box).toEqual({ x: view.x, y: view.y, width: view.width, height: view.height });
+  const sidebar = region('sidebar');
+  const aside = await page.locator('#sidebar').boundingBox();
+  expect(aside).toEqual({ x: sidebar.x, y: sidebar.y, width: sidebar.width, height: sidebar.height });
   const chart = await page.locator('#chart').boundingBox();
-  expect(chart!.x).toBeGreaterThanOrEqual(960);
+  expect(chart!.x).toBeGreaterThanOrEqual(sidebar.x);
   expect(errors).toEqual([]);
 });
 

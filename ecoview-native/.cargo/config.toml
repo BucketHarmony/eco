@@ -1,0 +1,4 @@
+# rust-lld is the fast linker Bevy recommends on Windows; mold is Linux-only and unavailable here.
+# `-Zshare-generics` is nightly and is documented as broken on Windows, so it is not used.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"

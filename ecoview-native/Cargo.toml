@@ -1,0 +1,42 @@
+[package]
+name = "ecoview-native"
+version = "0.1.0"
+edition = "2021"
+description = "Spike: a native Bevy viewer for ecosim world bundles (shot V0)"
+
+[lib]
+name = "ecoview_native"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ecoview-native"
+path = "src/main.rs"
+required-features = ["viewer"]
+
+# `viewer` carries every Bevy dependency, so the mesh golden test -- the only CI gate -- builds and
+# runs with `--no-default-features` and never compiles an engine or touches a GPU.
+[features]
+default = ["viewer"]
+viewer = ["dep:bevy", "dep:bevy_brp_extras"]
+# Dev-profile link speed only. Never in a shipped build (V0-spike.md, build item 1).
+dynamic_linking = ["bevy/dynamic_linking"]
+
+[dependencies]
+binary-greedy-meshing = "=0.5.2"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+bevy = { version = "=0.19.1", optional = true, default-features = false, features = [
+    "3d",
+    "bevy_remote",
+    "png",
+] }
+bevy_brp_extras = { version = "=0.22.6", optional = true, default-features = false }
+
+[profile.release]
+debug = false
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

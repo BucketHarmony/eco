@@ -22,7 +22,7 @@ ecosim diff runs/a runs/b                    # byte-compare two run directories
 ecosim fork runs/s1 --at 10000 --ticks 10000 --out runs/f1 [--set key=value ...]   # continue from a snapshot
 ecosim sweep --baseline --seeds 1,2,3        # margin table; see `ecosim sweep --help`
 ecosim run --seed 42 --ticks 2000 --out runs/p --profile p.json   # also write wall time per tick phase (outside --out)
-ecosim run --world worlds/capitol --seed 1 --ticks 20000 --out runs/g1 --set animals.enabled=false   # build the world from a world bundle instead of noise
+ecosim run --world worlds/capitol --seed 1 --ticks 20000 --out runs/g1 --set animals.enabled=false --set climate.rain_gradient=0   # build the world from a world bundle instead of noise
 cargo bench --bench tick                     # ticks/s on 64x64 and 256x64 against benches/baseline.json
 ```
 
@@ -102,11 +102,12 @@ the bundle has it. `DECISIONS.md` (shots G1 and G3) has the design calls.
 `worlds/capitol/` is the committed reference world: a 256 m square of the Michigan State Capitol
 grounds in Lansing, from public-domain USGS LiDAR, with its walks and plazas from OpenStreetMap
 under the ODbL. Its README has the provenance, the licence per file and the numbers
-`tests/bundle.rs` pins. The garden series runs it with `--set animals.enabled=false`; CI runs it for
-20000 ticks as step 10, and `fixtures/capitol-mini/` is the first 100 ticks of that run, committed
-for the renderer. `sweeps/capitolG3/FINDINGS.md` reports the reference run: what dies of what, how
-the imported wood gives way to the sim's own, canopy fraction, and what building shade and the rain
-gradient do to a real site.
+`tests/bundle.rs` pins. The garden series runs it with `--set animals.enabled=false --set
+climate.rain_gradient=0`; CI runs it for 20000 ticks as step 10, and `fixtures/capitol-mini/` is the
+first 100 ticks of that run, committed for the renderer. `sweeps/capitolG3/FINDINGS.md` reports the
+run as shot G3 made it — what dies of what, how the imported wood gives way to the sim's own, canopy
+fraction, and what building shade and the rain gradient do to a real site — and
+`sweeps/capitolG3-flat/FINDINGS.md` is the reference run as it stands, with the rain ramp off.
 
 `tools/blend_export.py` writes a bundle from a tagged `.blend`:
 

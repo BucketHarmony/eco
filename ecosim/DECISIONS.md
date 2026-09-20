@@ -1096,3 +1096,63 @@ strip, where a west–east climate ramp is the world's point; on a 256 m photogr
 rainfall difference across two city blocks with nothing behind it. G3 does not change it — the prompt
 says not to retune — but G4 should settle whether the Capitol runs at `rain_gradient` = 0 before it
 puts storms and runoff on top.
+## Flat rainfall on a bundle world (shot G3a)
+
+**A bundle-world run overrides `climate.rain_gradient` to 0; the default stays 0.6.** Shot 15 gave
+the 256 × 64 noise strip a west-to-east rain ramp, and a ramp is the whole point of that world: it is
+a synthetic gradient the ecology is meant to sort itself along. A world bundle is a photograph of 256
+metres of real ground, and there the same 0.6 is a 2.5× rainfall difference between one edge of the
+Capitol square and the other, with no measurement behind it. Shot G3's run shows what that costs:
+every tree west of x = 128 dead of drought by tick 5050, and with `tree.seed_radius` = 6 and
+`tree.immigration_floor` = 0, nothing can disperse back across the gap.
+
+**Why an override rather than a new default, and why not a `[bundle]` key.** Three ways to do this
+were on the table:
+
+1. change `climate.rain_gradient` to 0 in `params.toml`;
+2. have `World::from_bundle` (or `Bundle::apply_to`) force the gradient to 0 for bundle worlds;
+3. pass `--set climate.rain_gradient=0` on every bundle-world run, as G0's `animals.enabled=false`
+   is already passed.
+
+(1) is wrong because it re-tunes the noise worlds, which are the regression anchor: seeds 1, 2, 3 and
+42 and every committed manifest are what they are *because* of the ramp, and flattening it would
+retune the strip to fix a bundle. (2) is wrong because it makes a parameter mean different things in
+different worlds — the value in `meta.json` would no longer be the value the run used unless the
+override were written back, and a reader comparing two runs' params could not tell why they differ.
+It is also the sort of hidden special case that makes a later shot's "at rate 0 nothing changes"
+argument hard to check. (3) keeps one parameter with one meaning, puts the choice where a reader of
+the command can see it, records it in `meta.json` like any other `--set`, and leaves the door open to
+a site that really does have a rainfall gradient. So the two overrides travel together: **every
+garden-series run on a bundle world is `--set animals.enabled=false --set climate.rain_gradient=0`.**
+
+**Where that pair is written down,** so it cannot drift: the `capitol` recipe in the `justfile` and
+step 10 of `ci.yml` (`tests/ci.rs` pins the full command text of both, so dropping a flag fails a
+test), `bundle_params` in `tests/bundle.rs` (which is what makes `fixtures/capitol-mini` and the
+synthetic-bundle runs carry it), `README.md`, and `worlds/capitol/README.md`.
+
+**The fixture and the reference run were regenerated, and nothing else was.** `fixtures/capitol-mini`
+is the same command as before with the flag added, so its bytes change; `the_committed_capitol_mini_fixture_matches_a_fresh_run`
+re-runs it and pins the new ones. The noise-world manifests, goldens and fixtures are untouched, and
+`fresh_s42_matches_committed_manifest` is green: the flag exists only on the bundle path.
+
+**What the flat run says about the site** (`sweeps/capitolG3-flat/FINDINGS.md`; `sweeps/capitolG3/`
+stays as it is, as the evidence for the decision). The west half is populated — 424 trees at tick
+20000 against 0 — and the two halves' mean moisture stays within 17% of each other all run instead of
+58 against 173. The site is 13% smaller in trees and a quarter smaller in canopy, and its mortality
+mix turns over: G3 was crowding-limited (4075 crowded, 25 drought, 17 burnt), G3a is
+disturbance-limited (3315 drought, 2055 burnt, 1656 crowded). Fire is the mechanism that changes most
+— 81 spreads become 576 — because ignition and spread both need fuel and dryness in the same patch,
+and only a flat site has them everywhere at once. The west is still three times thinner than the east
+at tick 20000, but that is dispersal from the scene's own 25-versus-54 starting trees at
+`seed_radius` = 6, not climate: the west's density is still climbing (3.4, 10.8, 19.7 trees per 1000
+plantable columns at ticks 10000, 15000, 20000). Nothing was tuned to improve any of this.
+
+**The thinnest margin in the flat run is `fertility_mean` at +0.0076** (peak 218.33 against a ceiling
+of 220, where the ramp peaked at 208.15): a site that all grows also all decays. It passes, so it
+stands, but G4 and G5 work on that same field and G5 replaces fertility outright, so that is the
+invariant to expect complaints from next.
+
+**Building shade is left alone.** It is a hard exclusion on 2056 plantable columns (4.7%) in both
+runs, since `tree.light` = 60 and a shaded column's surface light is 0. The operator's call is to
+revisit it when the water work makes it matter (and shot G9 replaces the fixed sun outright), so this
+shot does not touch it.

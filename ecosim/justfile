@@ -55,9 +55,10 @@ cross:
 long:
     {{ecosim}} run --seed 1 --ticks 60000 --out ci-runs/long-s1 --snapshot-every 10000 && {{ecosim}} check --long ci-runs/long-s1
 
-# 10: the Capitol reference run (shot G3): the committed world bundle, animals off, 20000 ticks.
+# 10: the Capitol reference run (shot G3): the committed world bundle, 20000 ticks, animals off
+# and rainfall flat across the site (shot G3a) — the two overrides every bundle-world run carries.
 capitol:
-    {{ecosim}} run --world worlds/capitol --seed 42 --ticks 20000 --out ci-runs/capitol-s42 --set animals.enabled=false && {{ecosim}} check ci-runs/capitol-s42
+    {{ecosim}} run --world worlds/capitol --seed 42 --ticks 20000 --out ci-runs/capitol-s42 --set animals.enabled=false --set climate.rain_gradient=0 && {{ecosim}} check ci-runs/capitol-s42
 
 # Not part of `ci`: the tick bench (its own job in ci.yml). benches/baseline.json holds CI-runner numbers,
 # so a local run's comparison says little about a regression (DECISIONS.md, shot 15a).

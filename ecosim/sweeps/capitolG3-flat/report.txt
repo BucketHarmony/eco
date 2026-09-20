@@ -1,0 +1,56 @@
+## Event-log cause breakdown
+
+| species | kind | cause | events |
+| --- | --- | --- | --- |
+| - | burnout | - | 651 |
+| - | spread | - | 576 |
+| - | ignition | - | 75 |
+| tree | germination | - | 9240 |
+| tree | tree_death | drought | 3315 |
+| tree | tree_death | burnt | 2055 |
+| tree | tree_death | crowded | 1656 |
+| tree | tree_death | old_age | 311 |
+
+## Trees
+
+| tick | total | imported alive | germinated alive | mature | young | sapling | canopy cols | canopy % of 43831 plantable |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 79 | 79 | 0 | 79 | 0 | 0 | 711 | 1.6% |
+| 10000 | 602 | 0 | 602 | 247 | 103 | 252 | 2173 | 5.0% |
+| 20000 | 1982 | 0 | 1982 | 1113 | 41 | 828 | 8821 | 20.1% |
+
+## Ground
+
+- rock columns: 21705 of 65536 (33.1%)
+- water columns: 0 of 65536 (0.0%)
+- soil columns: 43831 of 65536 (66.9%)
+- ground cells by medium: lawn 169876 (64.8%), asphalt 44879 (17.1%), roof 24705 (9.4%), concrete 22684 (8.7%)
+- tick 0: mean grass 0.088, mean shrub 0.031, mean detritus 0.0
+- tick 10000: mean grass 0.724, mean shrub 0.124, mean detritus 751.6
+- tick 20000: mean grass 0.645, mean shrub 0.224, mean detritus 1403.8
+
+## Building shade
+
+- shaded columns (the air voxel over the surface is dark): 8701 of 65536 (13.3%)
+- of those, plantable: 2056 (4.7% of the 43831 plantable columns)
+- tick 0: 0 trees stand in shade (0 of them imported), 79 in the open
+- tick 10000: 0 trees stand in shade (0 of them imported), 602 in the open
+- tick 20000: 0 trees stand in shade (0 of them imported), 1982 in the open
+- imported trees planted in the open: 79, still alive at 20000: 0
+- cross-check against snap_000000/light.bin: 8701 dark surface columns, 0 of them outside the computed shade
+
+## The imported trees over time
+
+| tick | imported alive | germinated alive |
+| --- | --- | --- |
+| 0 | 79 | 0 |
+| 1000 | 79 | 66 |
+| 2000 | 78 | 188 |
+| 3000 | 57 | 299 |
+| 4000 | 24 | 469 |
+| 5000 | 5 | 683 |
+| 5700 | 0 | 642 |
+
+The last imported tree dies between ticks 5600 and 5700.
+
+wrote sweeps/capitolG3-flat\vegetation-20000.png: 512x512 px, 1982 trunks, north up

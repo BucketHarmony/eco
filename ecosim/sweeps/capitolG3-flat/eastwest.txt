@@ -1,0 +1,33 @@
+## Plantable columns
+
+- west of x = 128: 21492
+- east of x = 128: 22339
+
+## Trees by half
+
+| tick | west | east | west per 1000 plantable | east per 1000 plantable |
+| --- | --- | --- | --- | --- |
+| 0 | 25 | 54 | 1.2 | 2.4 |
+| 5000 | 73 | 615 | 3.4 | 27.5 |
+| 10000 | 73 | 529 | 3.4 | 23.7 |
+| 15000 | 232 | 1018 | 10.8 | 45.6 |
+| 20000 | 424 | 1558 | 19.7 | 69.7 |
+
+## Tree events by half and cause
+
+| event | west | east |
+| --- | --- | --- |
+| burnt | 357 | 1698 |
+| crowded | 266 | 1390 |
+| drought | 391 | 2924 |
+| germination | 1467 | 7773 |
+| old_age | 54 | 257 |
+
+## Mean moisture by half
+
+| tick | west | east |
+| --- | --- | --- |
+| 0 | 84.0 | 87.3 |
+| 5000 | 141.2 | 139.4 |
+| 10000 | 162.6 | 139.3 |
+| 20000 | 167.0 | 172.7 |

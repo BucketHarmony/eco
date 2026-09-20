@@ -83,10 +83,12 @@ fn params(set: &[&str]) -> (Params, Vec<String>) {
     (Params::load_with(&path, &set).unwrap(), set)
 }
 
-/// The params a bundle run uses here: the crate's own with animals off (the garden series runs
-/// without them) and the bundle's dimensions.
+/// The params a bundle run uses here: the crate's own with the two overrides every garden-series
+/// run on a bundle world carries — animals off (shot G0) and flat rainfall (shot G3a: the
+/// west-to-east ramp is the noise strip's point and means nothing on a photographed site) — plus
+/// the bundle's dimensions.
 fn bundle_params(b: &Bundle) -> (Params, Vec<String>) {
-    let (mut p, set) = params(&["animals.enabled=false"]);
+    let (mut p, set) = params(&["animals.enabled=false", "climate.rain_gradient=0"]);
     b.apply_to(&mut p).unwrap();
     (p, set)
 }
@@ -165,7 +167,7 @@ fn the_cli_runs_a_bundle_and_pairs_format_4_with_world() {
             .arg(out)
             .arg("--params")
             .arg(&params)
-            .args(["--set", "animals.enabled=false"])
+            .args(["--set", "animals.enabled=false", "--set", "climate.rain_gradient=0"])
             .args(args)
             .output()
             .expect("spawn ecosim run")

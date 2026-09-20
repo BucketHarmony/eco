@@ -474,3 +474,40 @@ half ends the run treeless while the east closes into woodland. `ecosim check` s
 Capitol at every line, and the shot prompt says not to retune when it does, so 0.6 stands. The
 question of whether a real site should run at `rain_gradient` = 0 belongs to G4, which puts storms
 and runoff on the same field.
+## Flat rainfall on a bundle world (shot G3a)
+
+**No default changed.** The one change is an override carried by every garden-series run on a bundle
+world.
+
+| key | default | bundle-world runs | why |
+|---|---|---|---|
+| `climate.rain_gradient` | 0.6 (shot 15, unchanged) | 0, via `--set climate.rain_gradient=0` | 0.6 is a synthetic west-to-east ramp built for the 256 × 64 noise strip, where sorting an ecology along a climate gradient is the world's purpose. A bundle world is 256 m of photographed ground; the same value there is a 2.5× rainfall difference between one edge of the Capitol square and the other, with nothing measured behind it. |
+
+Before and after on the reference run (seed 42, 20000 ticks, animals off; `sweeps/capitolG3-flat/FINDINGS.md`
+has the full side-by-side):
+
+| | ramp 0.6 (G3) | flat (G3a) |
+|---|---|---|
+| trees at tick 20000 | 2278 | 1982 |
+| trees west of x = 128 at tick 20000 | 0 | 424 |
+| canopy, % of plantable | 27.0% | 20.1% |
+| mean moisture west / east at tick 10000 | 58.0 / 172.8 | 162.6 / 139.3 |
+| tree deaths: crowded / drought / burnt / old age | 4075 / 25 / 17 / 1617 | 1656 / 3315 / 2055 / 311 |
+| fire ignitions / spreads / burnouts | 89 / 81 / 170 | 75 / 576 / 651 |
+| `ecosim check` | PASS, thinnest margin `fertility_mean` +0.0538 | PASS, thinnest margin `fertility_mean` +0.0076 |
+| wall time | 9584 ms | 9694 ms |
+
+**The acceptance line that forced it** is G3a's "the west half is populated: trees stand west of
+x = 128 at tick 20000". It is the only acceptance line in the shot that any parameter could move, and
+the override clears it with 424 trees. Nothing else was touched: no `[tree]`, `[fire]` or `[climate]`
+default moved, the noise worlds keep the ramp, and seeds 1, 2, 3 and 42 pass `ecosim check` with the
+same numbers and the same committed manifest as before.
+
+**Why the ramp stays the default.** Flattening `climate.rain_gradient` in `params.toml` would retune
+the 256 × 64 strip — the regression anchor — to fix a bundle world, which the sim-shot rules forbid.
+`DECISIONS.md` (shot G3a) has why this is a `--set` rather than a `[bundle]` key or a special case
+inside `World::from_bundle`.
+
+**Not tuned, and worth watching.** `fertility_mean` now peaks at 218.33 against its 220 ceiling. The
+honest reading is that the invariant's band was drawn for a half-vegetated site; the first of G4, G5
+or G9 to touch that field should look at it, with the number above as the before.

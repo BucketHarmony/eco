@@ -6,7 +6,7 @@ real world, added in shot G2.
 
 ```sh
 ecosim run --world worlds/capitol --seed 1 --ticks 20000 --out runs/capitol \
-    --snapshot-every 100 --set animals.enabled=false
+    --snapshot-every 100 --set animals.enabled=false --set climate.rain_gradient=0
 ```
 
 ## Shape

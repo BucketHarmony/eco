@@ -15,7 +15,13 @@ const STEPS: [(&str, &str); 10] = [
     ("runs and checks", "--seed \"$s\" --ticks 20000"),
     ("sweep baseline", "sweep --baseline --seeds 1,2,3"),
     ("long run", "check --long ci-runs/long-s1"),
-    ("capitol run", "--world worlds/capitol --seed 42 --ticks 20000"),
+    (
+        "capitol run",
+        concat!(
+            "--world worlds/capitol --seed 42 --ticks 20000 --out ci-runs/capitol-s42 ",
+            "--set animals.enabled=false --set climate.rain_gradient=0"
+        ),
+    ),
 ];
 
 /// Index of the first block containing each step's command; panics naming a missing step.

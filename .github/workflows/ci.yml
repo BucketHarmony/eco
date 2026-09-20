@@ -320,3 +320,80 @@ jobs:
             ecoview/shots/*.png
             ecoview/shots/diff/*.png
           if-no-files-found: ignore
+
+  # ecoview-native (shot V0): the Bevy spike's CI half. This job is new and independent -- it has no
+  # `needs`, so nothing above waits on it and nothing above can be reddened by it.
+  # The mesh golden is the only gate here. It runs with `--no-default-features`, which leaves the
+  # engine out entirely: the loader, the voxel world and the mesher are plain Rust, so the gate needs
+  # no GPU, no display and about a minute of compile. Everything after it is measurement for
+  # MEASUREMENTS.md and carries `continue-on-error: true`.
+  ecoview-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ecoview-native
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ecoview-native/target
+          key: ${{ runner.os }}-native-cargo-${{ hashFiles('ecoview-native/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-native-cargo-
+
+      # THE GATE: three fixed chunks -- flat, stepped, one building -- hashed against committed values.
+      # Timed, because the gate's threshold is "under 60 s on ubuntu-latest".
+      - name: mesh golden
+        run: |
+          start=$SECONDS
+          cargo test --release --no-default-features --test mesh_golden
+          echo "mesh golden: $((SECONDS - start)) s including compile"
+
+      # Measurement only, never a gate. Ten headless screenshots of the stress world on lavapipe.
+      - name: software vulkan
+        continue-on-error: true
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb mesa-vulkan-drivers libasound2-dev libudev-dev
+
+      - name: build the viewer
+        continue-on-error: true
+        run: cargo build --release
+
+      - name: ten headless screenshots on lavapipe
+        continue-on-error: true
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          WGPU_BACKEND: vulkan
+        run: |
+          ok=0
+          for i in $(seq 1 10); do
+            start=$SECONDS
+            if timeout 300 xvfb-run -a ./target/release/ecoview-native \
+                 --stress --headless --frames 300 --screenshot "shots/ci-$i.png" > "shots/ci-$i.log" 2>&1 \
+               && [ -s "shots/ci-$i.png" ]; then
+              ok=$((ok + 1))
+              echo "run $i: ok in $((SECONDS - start)) s, $(stat -c%s shots/ci-$i.png) bytes"
+            else
+              echo "run $i: FAILED after $((SECONDS - start)) s"
+              tail -5 "shots/ci-$i.log" || true
+            fi
+          done
+          echo "lavapipe screenshots: $ok/10 succeeded"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: ecoview-native-shots
+          path: |
+            ecoview-native/shots/ci-*.png
+            ecoview-native/shots/ci-*.log
+          if-no-files-found: ignore

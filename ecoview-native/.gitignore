@@ -2,3 +2,5 @@
 /target-dyn/
 *.log
 
+/target-devplain/
+/target-devdyn/

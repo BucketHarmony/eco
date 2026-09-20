@@ -321,16 +321,26 @@ capacity, so a tree that used to take 50 index units per 50-tick update now take
 was the mis-scaling, not the new one. The strip's total entity count moves much less — 4285 to 4527,
 5.6% — because the grazers fall as the trees rise.
 
-That 5.6% is the whole of the renderer-facing change, and it is not enough to explain the one red
-job. `ecoview`'s `tests/e2e/perf.spec.ts` failed on its own 300 s test timeout while the other 42
-tests passed. Its gates were not breached and are not close: the threshold is a 1000 ms draw median
-and a 1000 ms step median, and on the last green run the sixteen overlay-camera draw medians were
-155.8–246.2 ms and the step median 296.5 ms. What the test costs is fixed by its matrix rather than
-by its gates — 16 pairs × 60 frames at those medians is 195 s, plus 50 steps at 296.5 ms is 15 s,
-plus sixteen overlay switches and reloads — so a green run already spent roughly 80% of the 300 s
-budget, and the run that failed was slower throughout (the 42 passing tests took 4.3 min against
-about 3.5 min for the same tests when the suite including perf finished in 7.0 min).
+That 5.6% is not the whole story, because a software rasteriser is paid in pixels rather than in
+instances, and a tree covers many more of them than a grazer does. `ecoview`'s
+`tests/e2e/perf.spec.ts` failed on its own 300 s test timeout on two consecutive CI runs of this
+shot's code, while the other 42 tests passed both times. Its *gates* were not breached and are not
+close: the threshold is a 1000 ms draw median and a 1000 ms step median, and on the last green run
+before this shot the sixteen overlay-camera draw medians were 155.8-246.2 ms (mean 203 ms) and the
+step median 296.5 ms. What the test costs is fixed by its matrix rather than by its gates - 16 pairs
+x 60 frames at 203 ms is 195 s of the 300 s budget, plus 50 steps at 296.5 ms is 15 s, plus sixteen
+overlay switches and reloads - so a green run already spent about 80% of the budget.
 
-The conclusion for whoever picks this up: the headroom in that test is the problem, not the tree
-count, and the fix belongs in `ecoview/` — which an ecosim shot may not edit. It is written up in
+The two failures locate the growth. The first (run 35508181268) timed out inside the step loop at
+`perf.spec.ts:56`, so the draw matrix still finished; the second (run 35509035354) timed out at
+`perf.spec.ts:53`, the overlay switch immediately after the matrix, so the matrix alone consumed the
+whole 300 s. The draw matrix therefore costs on the order of 300 s where it cost 195 s, about 50%
+more, against 5.6% more entities and 38% more trees - consistent with fill rate rather than instance
+count, and consistent with trees being the instances that grew. The per-draw median it implies is
+around 310 ms, still under a third of the 1000 ms gate.
+
+So the renderer is not drawing anything wrongly and no gate it declares is breached: its perf test
+has a fixed wall-clock ceiling that its own gates do not police, and this shot's heavier canopy used
+up the headroom. The fix belongs in `ecoview/` - a smaller matrix, a per-frame budget, or a timeout
+scaled to the scene - which an ecosim shot may not edit. It is written up in
 `overnight/shots/G4b.BLOCKED.md`.

@@ -203,3 +203,41 @@ fn a_noise_run_still_writes_format_3_without_a_world_directory() {
     assert!(!out.join("world").exists());
     fs::remove_dir_all(&out).unwrap();
 }
+
+/// The committed Capitol bundle (shot G2), the first real world in the repo. The exporter runs in
+/// Blender, which CI does not have, so what CI checks is the bundle as committed: that G1's loader
+/// reads it, and that the world it builds still has the shape shot G2 recorded in DECISIONS.md. A
+/// re-export that moved any of these numbers would show up here rather than in a later shot's run.
+#[test]
+fn the_committed_capitol_bundle_loads_with_its_documented_shape() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("worlds/capitol");
+    let b = Bundle::load(&dir).unwrap();
+    assert_eq!(b.name, "capitol");
+    assert_eq!(b.size_m, 256, "a 256 m crop is 256 x 256 ecology columns");
+    assert_eq!((b.ground.width, b.ground.depth, b.ground.ratio), (512, 512, 2), "0.5 m ground cells");
+    assert_eq!((b.trees.len(), b.shrubs.len(), b.pipes.len()), (81, 64, 4));
+    assert!(b.source.contains("OpenStreetMap"), "the ODbL credit travels with the bundle");
+
+    // Media: the LiDAR-and-OSM raster, in ground cells (256 m² each 0.5 m cell covers 0.25 m²).
+    let mut cells = std::collections::BTreeMap::new();
+    for i in 0..b.ground.cells() {
+        *cells.entry(b.ground.medium_at(i).name()).or_insert(0usize) += 1;
+    }
+    assert_eq!(cells["lawn"], 169_876);
+    assert_eq!(cells["concrete"], 22_684);
+    assert_eq!(cells["asphalt"], 44_879);
+    assert_eq!(cells["roof"], 24_705);
+    assert_eq!(cells.len(), 4, "the scene classified nothing as soil, bed, mulch, gravel or water");
+    let h = |v: &[f32]| (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max));
+    assert_eq!(h(&b.ground_h), (0.0, 8.589), "ground heights are metres above the crop minimum");
+    assert_eq!(h(&b.building_h).1, 76.011, "the dome, the tallest thing in the crop");
+
+    let (p, _) = bundle_params(&b);
+    let w = ecosim::world::World::from_bundle(&b, &p).unwrap();
+    assert_eq!((w.dims.wx, w.dims.wy, w.dims.wz), (256, 256, 32));
+    let rock = w.class.iter().filter(|&&k| k == ecosim::world::ColClass::Rock).count();
+    assert_eq!(rock, 21_705, "sealed columns, 33.1% of the grid: building, street or walk");
+    assert_eq!(w.class.iter().filter(|&&k| k == ecosim::world::ColClass::Water).count(), 0);
+    let (lo, hi) = (*w.height.iter().min().unwrap(), *w.height.iter().max().unwrap());
+    assert_eq!((lo, hi), (8, 16), "base_z = 8 plus 0..8 m of real ground, well under wz = 32");
+}

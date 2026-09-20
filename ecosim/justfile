@@ -7,7 +7,13 @@ export PROPTEST_RNG_SEED := "20260918"
 
 ecosim := "./target/release/ecosim"
 
-ci: fmt clippy docs test coverage build runs baseline cross long
+ci: pyexport fmt clippy docs test coverage build runs baseline cross long
+
+# 0: the pure half of the Blender exporter (tools/blend_export.py), in plain CPython. CI has no
+# Blender; the Capitol bundle it writes is committed under worlds/. $PYTHON overrides the choice.
+pyexport:
+    PY="${PYTHON:-}"; for c in python3 python; do [ -n "$PY" ] || "$c" -c "" 2>/dev/null && PY="${PY:-$c}"; done; \
+    [ -n "$PY" ] || { echo "no python on PATH"; exit 1; }; "$PY" -m unittest discover -s tools -t tools
 
 # 1
 fmt:

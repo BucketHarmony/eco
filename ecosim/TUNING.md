@@ -422,3 +422,19 @@ prompt, and the one that pins `shade_slope > 0` is "a tall block shades the colu
 side and not the others". Both are tested on synthetic bundles in `src/bundle.rs` and
 `src/world.rs`; there is no sweep, because neither key affects a noise run and there is no real
 bundle in the repo until G2.
+
+## The Blender exporter and the Capitol bundle (shot G2)
+
+**No default changed.** The shot adds a tool (`tools/blend_export.py`) and data
+(`worlds/capitol/`); it touches no simulation code and no parameter. Every committed manifest and
+fixture is byte-identical, and seeds 1, 2, 3 and 42 pass `ecosim check` with the same numbers as
+before.
+
+No acceptance line came close to forcing one. The one worth recording as *not* forced is
+`[bundle] base_z` = 8, set in G1 without a real world to try it on: the Capitol's 512 × 512 ground
+spans 0.000–8.589 m, so its columns land on surface layers 8–16 and leave 15 of the 32 layers above
+the highest ground. Nothing needed widening. `[world] height` stays 32 even though the dome stands
+76 m above its footprint, because building height is a shade input and not a voxel column; a world
+tall enough to hold the dome as voxels would be 2.4 × the memory for one building nothing can grow
+on. `[bundle] shade_slope` = 1.0 is likewise untouched; what the Capitol's shadow does to the
+ecology is G3's business, not this shot's.

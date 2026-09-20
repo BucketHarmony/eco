@@ -22,7 +22,7 @@ ecosim diff runs/a runs/b                    # byte-compare two run directories
 ecosim fork runs/s1 --at 10000 --ticks 10000 --out runs/f1 [--set key=value ...]   # continue from a snapshot
 ecosim sweep --baseline --seeds 1,2,3        # margin table; see `ecosim sweep --help`
 ecosim run --seed 42 --ticks 2000 --out runs/p --profile p.json   # also write wall time per tick phase (outside --out)
-ecosim run --world bundles/capitol --seed 1 --ticks 20000 --out runs/g1   # build the world from a world bundle instead of noise
+ecosim run --world worlds/capitol --seed 1 --ticks 20000 --out runs/g1 --set animals.enabled=false   # build the world from a world bundle instead of noise
 cargo bench --bench tick                     # ticks/s on 64x64 and 256x64 against benches/baseline.json
 ```
 
@@ -32,6 +32,7 @@ cargo bench --bench tick                     # ticks/s on 64x64 and 256x64 again
 
 CI is defined in `../.github/workflows/ci.yml`. The `justfile` in this directory runs the same steps in the same order, and `tests/ci.rs` checks that both contain them:
 
+0. `python3 -m unittest discover -s tools -t tools`: the Blender exporter's pure half (`just pyexport`)
 1. `cargo fmt --check`
 2. `cargo clippy --all-targets -- -D warnings`, then (2b) `cargo doc --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 3. `cargo test` (debug)
@@ -83,6 +84,22 @@ per metre of height.
 A bundle run writes `format_version` 4 (`--format-version` picks 2, 3 or 4 explicitly; 4 needs
 `--world` and `--world` needs 4). It cannot be forked: `ecosim fork` rebuilds the terrain, and only
 the bundle has it. `DECISIONS.md` (shot G1) has the design calls.
+
+`worlds/capitol/` is the committed reference world: a 256 m square of the Michigan State Capitol
+grounds in Lansing, from public-domain USGS LiDAR, with its walks and plazas from OpenStreetMap
+under the ODbL. Its README has the provenance, the licence per file and the numbers
+`tests/bundle.rs` pins. The garden series runs it with `--set animals.enabled=false`.
+
+`tools/blend_export.py` writes a bundle from a tagged `.blend`:
+
+```sh
+blender -b <scene.blend> --python tools/blend_export.py -- worlds/<name> --audit 4096
+```
+
+The same scene always exports to a byte-identical bundle. Its rasteriser and file layout are plain
+Python — no Blender, no third-party package — and CI runs their unit tests as step 0
+(`just pyexport`); `DECISIONS.md` (shot G2) says why the sampling is a scanline and what `--audit`
+checks.
 
 ## Behaviour guard
 

@@ -941,3 +941,81 @@ the bundle, in one message naming the file and the offending entry, rather than 
 world; every other position must be inside it. `Pipe.id` is a `String` rather than an index because
 the contract says it is the scene's object name, and the name is what a person reading `pipes.json`
 next to the scene will match on.
+
+## The Blender exporter and the Capitol bundle (shot G2)
+
+**The rasteriser is a scanline over triangles, not one ray cast per cell.** The scene contract
+describes the sampling as a downward ray cast at each ground-cell centre, and that is the result
+`rasterise_tops` produces — but it produces it by walking triangles and filling the cells each one
+covers, keeping the highest z per cell, rather than by asking a BVH tree for a ray hit 262,144
+times. Three reasons. It is deterministic in a way a ray cast is not required to be: a maximum does
+not depend on the order the triangles arrive in, so nothing about the scene's internal ordering can
+reach the bundle. It is robust exactly where this scene is worst: `EcoGround`'s vertices *are* the
+ground-cell centres, so every ray would be aimed at a shared vertex, and the audit below shows
+Blender's own ray caster missing the mesh at 8 of 4,096 sampled cells — the rasteriser has no holes,
+because a point on a vertex is inside all the triangles meeting there. And it is testable without
+Blender, which is what lets CI check the code that decides the committed bundle's contents.
+
+**BVHTree ray casts stay, as an audit.** `--audit N` casts N real downward `BVHTree.ray_cast` rays
+at evenly spaced cell centres and compares them with the rasteriser, failing the export if they
+disagree by more than a millimetre. On the Capitol: 4,088 hits, 8 misses (the ray caster's, at the
+crop edge), worst disagreement 9.5 × 10⁻⁷ m. That is the cross-check the contract's wording is
+really asking for, and it costs one Blender API call per sample instead of one per cell.
+
+**The exporter is split at the `bpy` import.** Everything above it — the grid, the rasteriser, the
+merge, the rounding, the sort, the JSON and binary layout — is plain Python that imports with
+`bpy` set to `None`, and `tools/test_blend_export.py` covers it with 22 unit tests using no
+third-party package. Below it is only Blender plumbing: reading scene properties, turning objects
+into world-space triangles, and pulling the ends off a curve. This is CI step 0, in front of
+`cargo fmt`, and `tests/ci.rs` pins it in both `ci.yml` and the justfile like the other steps. The
+alternative — no CI coverage of the exporter at all, since CI has no Blender — would have made the
+one piece of code that decides what a committed world contains the only untested code in the repo.
+
+**Determinism is a property of the file, not of a promise.** The same `.blend` must export to a
+byte-identical bundle, so: objects are read in name order, never in `bpy.data` order; positions and
+lengths are rounded to millimetres and angles to microradians; `-0.0` is normalised to `0.0`,
+because it is a different byte pattern for the same number; text is written with LF newlines so a
+Windows export matches a Linux one; JSON keys are written in the contract's order, one entity per
+line so a diff is readable; and an exact tie between two overlapping surfaces keeps the earlier
+layer, which by the name ordering is a decision and not an accident. Verified by re-exporting to a
+second directory and diffing: identical.
+
+**Media and building height.** A cell's medium is the winning surface's, and its building height is
+that surface's top above the ground *only where the winner is a roof*, clamped at zero. Reading
+building height off a losing roof would have put a building under a plaza; leaving a wall that dips
+below the terrain negative would have failed G1's loader, which rejects negative building heights.
+Cells no surface covers take `eco_default_medium` (lawn at the Capitol). `bundle.json` always lists
+all nine media, even though this scene uses four, so a medium code means the same thing in every
+bundle; `counts` carries only the three entity counts, since the loader ignores it and the cell
+counts live in the world's README where a person will look for them.
+
+**Heights are relative to the crop minimum**, as the contract says, so the exporter subtracts the
+sampled minimum rather than trusting the scene's Z origin to be at it. At the Capitol the scene's
+lowest ground is 0.011 m, so the two differ by 11 mm — small, and exactly the kind of drift that
+would make one scene's bundle incomparable with another's.
+
+**The bundle is committed, all 3.1 MB of it.** It is data, like `fixtures/`: regenerating it needs a
+17 MB `.blend`, a LiDAR pipeline and Blender, none of which are in the repo or on CI. What CI checks
+instead is the bundle as committed — `tests/bundle.rs` loads it and pins its shape, so a careless
+re-export shows up as a failed test and not as a changed simulation three shots later:
+256 × 256 ecology columns over a 512 × 512 ground grid at 0.5 m; media in ground cells lawn 169,876,
+asphalt 44,879, roof 24,705, concrete 22,684 and nothing else; ground 0.000–8.589 m; building height
+up to 76.011 m (the dome); 81 trees, 64 shrubs, 4 pipes; 21,705 of 65,536 columns (33.1%) sealed to
+`Rock`; surface layers 8–16. The medium counts match the operator's independent rasterisation of the
+same scene cell for cell, which is the strongest evidence available that the exporter reads the
+contract the way the scene writes it.
+
+**Licensing travels with the data.** The Capitol's walks, plazas and two parking lots come from
+OpenStreetMap, so `medium.u8` is a derivative database under the ODbL while everything else in the
+bundle is public-domain USGS LiDAR. `worlds/capitol/README.md` gives the credit word for word and
+says which file is under which licence; the same credit is inside `bundle.json`'s `source` string,
+which G1 already copies into every run's `meta.json`, so a run directory handed to someone else
+carries its attribution without the README. The pipes are marked `illustrative` in the data itself,
+not only in prose: they are low points of the real ground joined to the crop edge, not storm-sewer
+records.
+
+**The scene met the contract.** `check_tags.py` passes on `capitol.blend`, and the export needed no
+exception for it, so there is no mismatch to report and no BLOCKED file. The scene's known rough
+edges — speckled walk detection, the Capitol as a stepped heightfield, the dome 8 m off the crop
+centre — are recorded in the world's README as limitations of the data, which is where a reader of a
+future Capitol run will need them.

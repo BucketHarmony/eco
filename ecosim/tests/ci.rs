@@ -5,7 +5,8 @@ use std::fs;
 use std::path::Path;
 
 /// The required steps, each identified by a command it must contain.
-const STEPS: [(&str, &str); 8] = [
+const STEPS: [(&str, &str); 9] = [
+    ("exporter unit tests", "unittest discover -s tools -t tools"),
     ("fmt", "cargo fmt --check"),
     ("clippy", "cargo clippy --all-targets -- -D warnings"),
     ("test (debug)", "cargo test\n"),

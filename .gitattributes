@@ -3,3 +3,7 @@
 # Snapshot binaries must never be touched
 *.bin binary
 *.png binary
+# World-bundle grids (ecosim/worlds/**). Marked explicitly, not left to git's NUL-byte guess:
+# a medium grid whose codes happen to avoid 0 looks like text, and eol=lf would rewrite its bytes.
+*.f32 binary
+*.u8 binary

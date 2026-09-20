@@ -1,0 +1,26 @@
+{
+  "format": "ecosim-world-bundle",
+  "version": 2,
+  "name": "capitol",
+  "size_m": 256.0,
+  "ground_cell_m": 0.5,
+  "ground_width": 512,
+  "ground_depth": 512,
+  "media": [
+    "soil",
+    "lawn",
+    "bed",
+    "mulch",
+    "gravel",
+    "concrete",
+    "asphalt",
+    "roof",
+    "water"
+  ],
+  "source": "USGS 3DEP MI 31Co Ingham 2017 LPC (public domain), tiles 070447 070450 072447 072450; 256 m crop centred on the Michigan State Capitol dome; walks, plazas and parking in the medium grid from OpenStreetMap as of 2017-05-01: Map data (c) OpenStreetMap contributors, available under the Open Database License (ODbL) https://www.openstreetmap.org/copyright",
+  "counts": {
+    "trees": 81,
+    "shrubs": 64,
+    "pipes": 4
+  }
+}

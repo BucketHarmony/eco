@@ -90,7 +90,7 @@ The run directory is the only interface between the two projects. Its full forma
   - `material.bin` and `light.bin`: x·y·z bytes each (from `meta.json` `dims`), x-fastest
   - `moisture.bin`, `fertility.bin`, and `height.bin`: x·y bytes each
   - `patches.json` and `entities.json`
-- A bundle run (`ecosim run --world <dir>`, format version 4) also writes `world/{ground_h.bin, medium.bin, building_h.bin, pipes.json}` once at the run root, and a `world` object in `meta.json` describing the ground grid. The bundle format is `docs/SCENE-CONTRACT.md`; the ecology grid stays at 1 m columns, the ground grid is finer.
+- A bundle run (`ecosim run --world <dir>`, format version 4) also writes `world/{ground_h.bin, medium.bin, building_h.bin, pipes.json}` once at the run root, and a `world` object in `meta.json` describing the ground grid. The bundle format is `docs/SCENE-CONTRACT.md`; the ecology grid stays at 1 m columns, the ground grid is finer. `ecosim/worlds/capitol/` is the committed reference bundle (256 m of the Michigan State Capitol grounds, 512×512 ground cells), written by `ecosim/tools/blend_export.py` from a Blender scene kept outside the repo; its `medium.u8` is ODbL, so keep the credit in `ecosim/worlds/capitol/README.md` with it.
 - All integers are little-endian.
 
 If you change the format, update both projects and the SAD together.

@@ -35,11 +35,8 @@ fn sources() -> Vec<(PathBuf, String)> {
 #[test]
 fn the_tick_duration_constant_appears_once_and_every_rate_derives_from_it() {
     let src = sources();
-    let hits: Vec<(&Path, usize)> = src
-        .iter()
-        .map(|(p, t)| (p.as_path(), t.matches("8766").count()))
-        .filter(|&(_, n)| n > 0)
-        .collect();
+    let hits: Vec<(&Path, usize)> =
+        src.iter().map(|(p, t)| (p.as_path(), t.matches("8766").count())).filter(|&(_, n)| n > 0).collect();
     assert_eq!(
         hits.iter().map(|&(_, n)| n).sum::<usize>(),
         1,
@@ -111,10 +108,12 @@ fn doubling_params(overrides: &[&str]) -> Params {
 /// field capacity), so how often the store is emptied decides how much of a storm it has room to
 /// take; and a pond is almost always shallower than one update's evaporation allowance, so what
 /// evaporates off the surface measures how much was standing rather than how fast it leaves.
-/// Doubling `schedule.soil_every` moves annual drainage by 23% and ponded evaporation by 54%, with
-/// rain, ET, cover and litter all holding. That is the water tier's integration error: a property of
-/// the model, not evidence about its units, and it is measured in `sweeps/shotG4b/FINDINGS.md`
-/// instead of asserted here.
+/// Measured on this world at the shipped defaults, doubling `schedule.soil_every` leaves the year's
+/// rain untouched and its evapotranspiration within 0.3%, and moves annual drainage by 1.0% — but it
+/// moves runoff by 14% and outflow over the world's edge by 11%, because a store emptied half as
+/// often has less room for the storm that arrives next. That is the water tier's integration error:
+/// a property of the model, not evidence about its units, and it is measured in
+/// `sweeps/shotG4b/FINDINGS.md` instead of asserted here.
 #[derive(Debug, Clone, Copy)]
 struct YearTotals {
     cover: f64,
@@ -203,11 +202,7 @@ fn doubling_an_update_interval_leaves_a_years_totals_within_5_percent() {
         for ((name, a), (_, b)) in base.parts().into_iter().zip(got.parts()) {
             let scale = a.abs().max(b.abs()).max(1e-6);
             let rel = (a - b).abs() / scale;
-            assert!(
-                rel < DOUBLING_TOLERANCE,
-                "{key} doubled moved {name} by {:.2}%: {a} -> {b}",
-                100.0 * rel
-            );
+            assert!(rel < DOUBLING_TOLERANCE, "{key} doubled moved {name} by {:.2}%: {a} -> {b}", 100.0 * rel);
         }
     }
 }

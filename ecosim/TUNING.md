@@ -567,9 +567,9 @@ The acceptance lines referred to below, from `overnight/shots/G4b-units-calibrat
 | `rain.storm_mean_mm` | 10.0 | 6.0 | value | 800 mm in 10 mm storms is 80 rain days; the site records about 130. 6 mm gives 133. **(A)**, R2. |
 | `hydro.et_mm_h` | 0.12 | 0.05 | value | 0.12 mm/h is 1052 mm a year at full cover, about double the published range for well-watered temperate grass; 0.05 is 438 mm. **(B)**, R4. |
 | `hydro.evap_mm_h` | 0.05 | 0.08 | value | 0.05 mm/h is 438 mm a year off open water, well under the region's ~700 mm; 0.08 is 701 mm. **(B)**, R5. |
-| `hydro.leach_k` | 0.0002 | 0.0008 | value | The old value was fitted against 4000 mm of rain a year. At the corrected 800 mm the site drains ~320 mm a year, and 0.0008 leaches 26% of a column's fertility over that — inside the published 15–40% for nitrate loss. At 0.0002 the 50-year run's fertility climbs back towards the ceiling it had before shot G4 gave it a sink. **(D)**, R13. |
+| `hydro.leach_k` | 0.0002 | 0.0008 | value | The old value was fitted against 4000 mm of rain a year. At the corrected 800 mm the site drains ~320 mm a year, and 0.0008 leaches 26% of a column's fertility over that — inside the published 15–40% for nitrate loss. Measured: at 0.0002 the 50-year Capitol run peaks at 238.7, over `check`'s 220 ceiling, where at 0.0008 the same run holds [52.2, 129.0]. **(D)**, R13. |
 | `climate.decay_k` | 0.015 per soil update | 6.0 per year | unit only | 400 soil updates a year. Deliberately not retuned: 6.0 a year is a two-month litter turnover against a published 1–3 years (R11), and that 10× discrepancy is a finding handed to G5 with the field it acts on. |
-| `cover.moisture_draw` → `cover.water_per_growth_mm` | 15 (index units) | 8.8 mm | unit only at the reference soil, rule fixed | 15 of 255 on a 150 mm soil is 8.8 mm, so the reference world sees the same draw. The **rule** changed: the old draw scaled with the column's own capacity, so a plant on a deeper soil paid more water for the same growth. **(H)**, and `UNITS.md` finding 2. |
+| `cover.moisture_draw` → `cover.water_per_growth_mm` | 15 (index units) | 8.8 mm | unit only at the reference soil, rule fixed | 15 of 255 on a 150 mm soil is 8.8 mm, so the reference world sees the same draw. The **rule** changed: the old draw scaled with the column's own capacity, so a plant on a deeper soil paid more water for the same growth. **(B)**, and `UNITS.md` finding 1. |
 | `grass.r`, `grass.g` | 0.05, 0.005 per update | 20.0, 2.0 per year | unit only | 400 cover updates a year. **(F)**. |
 | `shrub.r`, `shrub.g` | 0.01, 0.004 per update | 4.0, 1.6 per year | unit only | Same. |
 | `grass.moisture` | [20, 80, 255, 256] | [0.0784, 0.3137, 1.0, 1.004] | unit only | The curve is now a fraction of available water capacity: 20/255, 80/255, capacity, just above capacity. **(C)**. |
@@ -581,12 +581,12 @@ The acceptance lines referred to below, from `overnight/shots/G4b-units-calibrat
 
 **What moved in the reference runs** is in `sweeps/shotG4b/FINDINGS.md` in full, including the
 per-species event-cause breakdown the reporting rule asks for. The short version, on the 256 × 64 strip
-at seeds 1, 2, 3 and 42: rain falls from about 4000 to 774–816 mm a year, storms from ~2100 to ~650 in
-a run, soil water settles at 84–107 mm of the soil's 150 mm available capacity instead of sitting near
-saturation, trees reach 852 with 478 mature at 2.5 years on seed 42 (the check needs 35), and all four
-seeds pass `ecosim check` on all 12 short invariants including the new `moisture_band`. The thinnest
-margin in the set is seed 1's `mature_trees_10k` at +0.0857 (38 mature against 35), which is named in
-FINDINGS as the number to watch.
+at seeds 1, 2, 3 and 42: rain falls from about 4000 to 763–857 mm a year, storms from ~2100 to 653–703
+in a 20000-tick run, soil water settles at a whole-run mean of 82–113 mm of the soil's 150 mm available
+capacity instead of sitting near saturation, and 413 trees are mature at 2.5 years on seed 42 where the
+check needs 35. All four seeds pass `ecosim check` on all 12 short invariants including the new
+`moisture_band`. The thinnest margin in the set is seed 1's `mature_trees_10k` at +0.0857 (38 mature
+against 35), which is named in FINDINGS as the number to watch.
 
 **Two test-local forcings moved, and no default moved with them.** Both are `--set` values inside
 forced-extinction tests, whose job is to prove that a mechanism taken to an extreme kills a population

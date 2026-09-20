@@ -6,8 +6,8 @@
 //! the worker threads finish in.
 
 use crate::check::{
-    evaluate, extinctions, grazer_maxima, parse_series, signature, CheckReport, Series, Signature, Timing,
-    ticks_in, INVARIANT_KEYS, WINDOW_YEARS,
+    evaluate, extinctions, grazer_maxima, parse_series, signature, ticks_in, CheckReport, Series, Signature, Timing,
+    INVARIANT_KEYS, WINDOW_YEARS,
 };
 use crate::output::{series_csv, simulate};
 use crate::params::Params;

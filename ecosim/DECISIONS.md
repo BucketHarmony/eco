@@ -1221,11 +1221,13 @@ cadences; 5% leaves room for it to compound over a year while still failing anyt
 tick, which would be off by a factor of two. The test asserts the five quantities a declared rate is
 responsible for (standing cover, litter, rain, evapotranspiration, mean temperature) and deliberately
 **excludes** drainage, runoff, ponded evaporation and the standing stores, because none of those is set
-by a rate: what drains is the residual of a store with a ceiling, so how often the store is emptied
-decides how much of a storm it has room to take. Doubling `soil_every` moves annual drainage by 23% and
-ponded evaporation by 54% with rain, ET and cover all holding. That is the water tier's integration
-error — a property of the model, measured in `sweeps/shotG4b/FINDINGS.md` — and hiding it behind a
-loose tolerance would have been the wrong way to record it.
+by a rate: what drains, runs off or leaves the world is the residual of a store with a ceiling, so how
+often the store is emptied decides how much of the next storm it has room to take. Measured at the
+shipped defaults, doubling `soil_every` leaves the year's rain untouched and its evapotranspiration
+within 0.3%, moves annual drainage by 1.0%, and moves runoff by 14% and outflow over the world's edge
+by 11%. That is the water tier's integration error — a property of the model, measured in
+`sweeps/shotG4b/FINDINGS.md` — and hiding it behind a loose tolerance would have been the wrong way to
+record it.
 
 **Where the line was drawn, and what shot G4c gets.** Converted here: climate and rain, soil water,
 plant water demand and growth, fire, and the two nutrient rates that read a clock or a water flow.

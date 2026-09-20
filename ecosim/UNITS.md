@@ -274,8 +274,8 @@ acts on.
   mobile share of a soil nutrient pool divided by the rooting zone's water capacity, and at the
   site's ~320 mm of annual drainage it leaches 26% of a column's fertility a year — inside
   the published 15–40% for nitrate loss from a humid temperate soil (R13). Left at 0.0002 the
-  50-year run's fertility climbs out of `check`'s band on the high side
-  (`sweeps/shotG4b/FINDINGS.md`).
+  50-year Capitol run's fertility peaks at **238.7** against `check`'s ceiling of 220 and spends the
+  run pinned near it (`sweeps/shotG4b/FINDINGS.md` section 5).
 
 **Lifespans and phenology (subsystem 7, not started).** `tree.initial_age` = 500, `young_age` = 500,
 `mature_age` = 1000, `max_age` = 6000, `seed_every` = 200, `bundle.tree_tall_age` = 3000 — all tick

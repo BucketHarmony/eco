@@ -1302,8 +1302,7 @@ mod tests {
         let mut rows = rows_from(|t| 100 + (t % 3000 < 1500) as u32 * 50, 20001);
         rows[5000].fertility_mean = 210.0; // upper side: (220 − 210)/220 ≈ 0.045, tighter than (100 − 40)/40
         rows[6000].grass_mean = 0.04; // below the band: (0.04 − 0.05)/0.05 = −0.2
-        let s =
-            Series { rows, mature_at_10000: Some(Ok(42)), timing: Timing::Excluded, animals: true, year_len: YEAR };
+        let s = Series { rows, mature_at_10000: Some(Ok(42)), timing: Timing::Excluded, animals: true, year_len: YEAR };
         let r = evaluate(&s).unwrap();
         assert!(r.get("runtime").is_none());
         let f = r.get("fertility_band").unwrap();
@@ -1546,7 +1545,13 @@ mod tests {
         // The trees still count: a tree reaching 0 fails, animals off or not.
         rows[30_000].trees = 0;
         assert_eq!(
-            evaluate_long(&rows, false, YEAR).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect::<Vec<_>>(),
+            evaluate_long(&rows, false, YEAR)
+                .unwrap()
+                .lines
+                .iter()
+                .filter(|l| !l.pass)
+                .map(|l| l.key)
+                .collect::<Vec<_>>(),
             ["long_no_extinction"]
         );
     }

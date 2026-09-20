@@ -54,8 +54,15 @@ fn evaluate_matches_committed_s42_check_output() {
         let text: String = report
             .lines
             .iter()
-            .map(|l| format!("{} {}: {}
-", if l.pass { "PASS" } else { "FAIL" }, l.name, l.observed))
+            .map(|l| {
+                format!(
+                    "{} {}: {}
+",
+                    if l.pass { "PASS" } else { "FAIL" },
+                    l.name,
+                    l.observed
+                )
+            })
             .collect();
         fs::write(data_path("s42-check.txt"), text).unwrap();
         return;
@@ -130,8 +137,15 @@ fn data_path(name: &str) -> PathBuf {
 /// `got` equals the committed manifest `name`, or, when [`regenerating`], replaces it.
 fn assert_manifest(name: &str, got: &BTreeMap<String, String>) {
     if regenerating() {
-        let text: String = got.iter().map(|(path, hash)| format!("{hash}  {path}
-")).collect();
+        let text: String = got
+            .iter()
+            .map(|(path, hash)| {
+                format!(
+                    "{hash}  {path}
+"
+                )
+            })
+            .collect();
         fs::write(data_path(name), text).unwrap();
         return;
     }
@@ -420,12 +434,16 @@ fn sweep_cells_equal_standalone_runs() {
 }
 
 /// `--baseline` margins equal `ecosim check` margins on the same seed (runtime excluded), on the
-/// square world (`common::SQUARE`) to keep the coverage run short.
+/// small world (`common::SMALL`) to keep the coverage run short. It reads a margin table, so it
+/// needs a world whose invariants pass: shot G4b moved it off the flat `common::SQUARE`, where the
+/// corrected rainfall leaves too little water for a tree once its own column's grass has drunk
+/// (`sweeps/shotG4b/FINDINGS.md`), and a failing row carries a `!` marker the format assertion
+/// below would trip over.
 #[test]
 fn baseline_margins_equal_check_margins() {
     let cfg = SweepConfig {
         params_path: params_path(),
-        fixed: common::square_set(&[]),
+        fixed: common::small_set(&[]),
         specs: vec![],
         seeds: vec![2],
         ticks: 10_500,
@@ -433,7 +451,8 @@ fn baseline_margins_equal_check_margins() {
     };
     let reports = baseline(&cfg).unwrap();
     let dir = tmp("baseline_s2");
-    run(common::square(), 2, 10_500, 2_500, &common::square_set(&[]), &dir).unwrap();
+    let small = ecosim::Params::load_with(&params_path(), &common::small_set(&[])).unwrap();
+    run(small, 2, 10_500, 2_500, &common::small_set(&[]), &dir).unwrap();
     let check = check_run(&dir).unwrap();
     assert!(check.get("mature_trees_10k").is_some());
     assert_eq!(comparable(&reports[0].1), comparable(&check));

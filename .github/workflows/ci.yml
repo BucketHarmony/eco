@@ -366,7 +366,7 @@ jobs:
           sudo apt-get install -y -qq xvfb mesa-vulkan-drivers libvulkan1 vulkan-tools
           sudo apt-get install -y -qq libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
           ls -l /usr/share/vulkan/icd.d/ || true
-          vulkaninfo --summary 2>&1 | head -30 || true
+          vulkaninfo --summary 2>&1 | head -60 || true
 
       - name: build the viewer
         continue-on-error: true
@@ -375,8 +375,8 @@ jobs:
       - name: ten headless screenshots on lavapipe
         continue-on-error: true
         env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.json
           WGPU_BACKEND: vulkan
         run: |
           ok=0

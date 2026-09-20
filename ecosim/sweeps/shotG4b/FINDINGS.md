@@ -300,3 +300,37 @@ and no single tick duration satisfies both. This shot could not resolve it — t
 mechanism), or a longer tick (which breaks the mm/h rates) — so it is recorded and handed on. The
 honest reading of a `series.csv` after this shot: **the water columns are in real millimetres over a
 real year, and the tree ages are not in real years.**
+
+## 10. What the conversion does to the renderer's data, and the one job it broke
+
+The renderer is a separate component and this shot does not touch it, but CI regenerates two runs for
+it — `runs/s42` and `runs/capitol-s42`, both with `hydro.enabled=false` — and those runs are the
+renderer's input, so the conversion moves them. Measured from the CI logs of the last green run
+before this shot (35493848837) and this shot's run (35508181268):
+
+| run | grazers | hunters | trees | total entities |
+|---|---|---|---|---|
+| `runs/s42` before | 3097 | 74 | 1114 | 4285 |
+| `runs/s42` after | 2898 | 88 | 1541 | 4527 |
+| `runs/capitol-s42` before | 0 | 0 | 1982 | 1982 |
+| `runs/capitol-s42` after | 0 | 0 | 2875 | 2875 |
+
+Trees rise 38% on the strip and 45% on the Capitol for the reason section 7 gives: with the water
+tier off, `draw_water_mm` converts a tree's transpiration to index units at the soil medium's
+capacity, so a tree that used to take 50 index units per 50-tick update now takes 6.4. The old figure
+was the mis-scaling, not the new one. The strip's total entity count moves much less — 4285 to 4527,
+5.6% — because the grazers fall as the trees rise.
+
+That 5.6% is the whole of the renderer-facing change, and it is not enough to explain the one red
+job. `ecoview`'s `tests/e2e/perf.spec.ts` failed on its own 300 s test timeout while the other 42
+tests passed. Its gates were not breached and are not close: the threshold is a 1000 ms draw median
+and a 1000 ms step median, and on the last green run the sixteen overlay-camera draw medians were
+155.8–246.2 ms and the step median 296.5 ms. What the test costs is fixed by its matrix rather than
+by its gates — 16 pairs × 60 frames at those medians is 195 s, plus 50 steps at 296.5 ms is 15 s,
+plus sixteen overlay switches and reloads — so a green run already spent roughly 80% of the 300 s
+budget, and the run that failed was slower throughout (the 42 passing tests took 4.3 min against
+about 3.5 min for the same tests when the suite including perf finished in 7.0 min).
+
+The conclusion for whoever picks this up: the headroom in that test is the problem, not the tree
+count, and the fix belongs in `ecoview/` — which an ecosim shot may not edit. It is written up in
+`overnight/shots/G4b.BLOCKED.md`.

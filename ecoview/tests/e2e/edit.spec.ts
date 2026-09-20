@@ -20,6 +20,12 @@ const url = (params: Record<string, string | number>): string =>
 
 const at = (c: { gx: number; gy: number }): number => c.gx + GW * c.gy;
 
+/** The cube a height sits in, the renderer's rule (src/world.ts `levelOf`), repeated here on purpose. */
+const level = (h: number): number => Math.floor(h / CELL + 1e-6);
+
+/** The hotbar, in key order: Digit1 is the first (src/edit.ts SLOTS). */
+const SLOTS = ['lawn', 'bed', 'concrete', 'asphalt', 'water', 'gravel', 'ground', 'building'] as const;
+
 /** Cells within `r - 1` of the centre, the brush's shape, computed here rather than asked of the page. */
 function disc(gx: number, gy: number, r: number): number[] {
   const reach = r - 1;
@@ -111,7 +117,7 @@ test.describe('edit mode on a world bundle', () => {
     expect(errors).toEqual([]);
   });
 
-  test('paints one cell and touches nothing else', async ({ page }) => {
+  test('places one cube on one cell and touches nothing else', async ({ page }) => {
     const errors = trackErrors(page);
     await open(page, url({ cam: 'iso', edit: 1, slot: 'asphalt', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
     const names = await media(page);
@@ -122,10 +128,12 @@ test.describe('edit mode on a world bundle', () => {
     await page.mouse.click(CENTRE.x, CENTRE.y, { button: 'right' });
     const after = await cell(page, at(LAWN));
     expect(names[after.medium]).toBe('asphalt');
-    expect(after.ground_h).toBe(before.ground_h);
+    // Every slot adds a cube now (shot E3), so this one is a road block one cube above the lawn.
+    expect(level(after.ground_h)).toBe(level(before.ground_h) + 1);
+    expect(after.ground_h).toBeCloseTo((level(before.ground_h) + 1) * CELL, 5); // and on the lattice
     expect(after.building_h).toBe(before.building_h);
     const d1 = await digest(page);
-    expect(d1.ground).toBe(d0.ground); // no height moved anywhere in the grid
+    expect(d1.ground - d0.ground).toBeCloseTo(after.ground_h - before.ground_h, 4); // that cell and no other
     expect(d1.building).toBe(d0.building);
     expect(d1.medium).not.toBe(d0.medium);
     // Exactly one cell in the whole grid changed, and it is the one the crosshair named.
@@ -142,15 +150,18 @@ test.describe('edit mode on a world bundle', () => {
     expect(errors).toEqual([]);
   });
 
-  test('raises a cell half a metre a click, so two clicks are one sim voxel', async ({ page }) => {
+  test('raises a cell one cube a click, so two clicks are one sim voxel here', async ({ page }) => {
     await open(page, url({ cam: 'iso', edit: 1, slot: 'ground', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
     const before = await cell(page, at(LAWN));
     expect(await page.evaluate(() => window.__ecoviewEdit!.act('place'))).toBe(true);
     const mid = await cell(page, at(LAWN));
-    expect(mid.ground_h - before.ground_h).toBeCloseTo(0.5, 5);
+    // The first click snaps the LiDAR height onto the cube lattice as it adds its cube.
+    expect(level(mid.ground_h)).toBe(level(before.ground_h) + 1);
+    expect(mid.ground_h).toBeCloseTo((level(before.ground_h) + 1) * CELL, 5);
     expect(await page.evaluate(() => window.__ecoviewEdit!.act('place'))).toBe(true);
     const after = await cell(page, at(LAWN));
-    expect(after.ground_h - before.ground_h).toBeCloseTo(1, 5);
+    expect(after.ground_h - mid.ground_h).toBeCloseTo(CELL, 5); // and every click after it is one cube
+    expect(level(after.ground_h)).toBe(level(before.ground_h) + 2);
     expect(after.medium).toBe(before.medium);
     expect(after.building_h).toBe(before.building_h);
     // A neighbour outside the radius-1 brush is untouched.
@@ -249,9 +260,10 @@ test.describe('edit mode on a world bundle', () => {
     const i = at(LAWN);
     const names = await media(page);
     const before = await cell(page, i);
-    await page.evaluate(() => window.__ecoviewEdit!.act('place')); // concrete over lawn
+    await page.evaluate(() => window.__ecoviewEdit!.act('place')); // a concrete cube over the lawn
     await page.keyboard.press('Digit7'); // ground
-    await page.evaluate(() => window.__ecoviewEdit!.act('place')); // half a metre up
+    await page.evaluate(() => window.__ecoviewEdit!.act('place')); // one cube more, bare ground
+    const snapped = (level(before.ground_h) + 1) * CELL;
     const files = await save(page);
     const changes = JSON.parse(files.get('changes-1.json')!.toString()) as {
       bundle: string; save: number;
@@ -260,10 +272,12 @@ test.describe('edit mode on a world bundle', () => {
     expect(changes.bundle).toBe('capitol');
     expect(changes.save).toBe(1);
     expect(changes.ops.map((o) => o.kind)).toEqual(['place', 'place']);
-    expect(changes.ops[0].cells).toEqual([{
-      i, before, after: { ...before, medium: names.indexOf('concrete') },
-    }]);
-    expect(changes.ops[1].cells[0].after.ground_h).toBeCloseTo(before.ground_h + 0.5, 5);
+    expect(changes.ops[0].cells).toHaveLength(1);
+    expect(changes.ops[0].cells[0]).toEqual({ i, before, after: expect.objectContaining({
+      medium: names.indexOf('concrete'), building_h: before.building_h,
+    }) });
+    expect(changes.ops[0].cells[0].after.ground_h).toBeCloseTo(snapped, 5);
+    expect(changes.ops[1].cells[0].after.ground_h).toBeCloseTo(snapped + CELL, 5);
     // The saved grids differ from the fixture at that one cell and nowhere else.
     const medium = files.get('capitol-edit-1-medium.u8')!;
     const wasMedium = await fixtureFile(request, 'medium.u8');
@@ -277,10 +291,60 @@ test.describe('edit mode on a world bundle', () => {
       if (!ground.subarray(k, k + 4).equals(wasGround.subarray(k, k + 4))) changedCells.push(k / 4);
     }
     expect(changedCells).toEqual([i]);
-    expect(ground.readFloatLE(4 * i)).toBeCloseTo(before.ground_h + 0.5, 5);
+    expect(ground.readFloatLE(4 * i)).toBeCloseTo(snapped + CELL, 5);
     // The files the editor never touches are still the fixture's bytes, media order and all.
     expect(files.get('capitol-edit-1-bundle.json')!.equals(await fixtureFile(request, 'bundle.json'))).toBe(true);
     expect(files.get('capitol-edit-1-trees.json')!.equals(await fixtureFile(request, 'trees.json'))).toBe(true);
+  });
+
+  test('places and removes one cube with every hotbar slot, back to the bundle it loaded', async ({ page, request }) => {
+    test.slow(); // seventeen ops and a save: about two minutes here, and CI's runner is slower
+    const errors = trackErrors(page);
+    await open(page, url({ cam: 'iso', edit: 1, slot: 'ground', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
+    const i = at(LAWN);
+    // One dig first: that puts the column on the cube lattice, where a place and a remove are mirrors.
+    expect(await page.evaluate(() => window.__ecoviewEdit!.act('remove'))).toBe(true);
+    const dug = await cell(page, i);
+    const d0 = await digest(page);
+    for (let k = 0; k < SLOTS.length; k++) {
+      const slot = SLOTS[k];
+      await page.keyboard.press(`Digit${k + 1}`);
+      expect(await page.evaluate(() => window.__ecoviewEdit!.act('place')), slot).toBe(true);
+      const up = await cell(page, i);
+      expect(level(up.ground_h + up.building_h), slot).toBe(level(dug.ground_h + dug.building_h) + 1);
+      expect(await page.evaluate(() => window.__ecoviewEdit!.act('remove')), slot).toBe(true);
+      expect(await cell(page, i), slot).toEqual(dug); // the cube came off exactly as it went on
+      expect(await digest(page), slot).toEqual(d0);
+    }
+    // Undo the lot, including the dig, and the grids are the bundle's own bytes again.
+    const ops = await page.evaluate(() => window.__ecoviewEdit!.ops());
+    expect(ops).toHaveLength(1 + 2 * SLOTS.length);
+    for (let k = 0; k < ops.length; k++) expect(await page.evaluate(() => window.__ecoviewEdit!.undo())).toBe(true);
+    expect(await page.evaluate(() => window.__ecoviewEdit!.changed())).toEqual([]);
+    const files = await save(page);
+    for (const name of ['ground_h.f32', 'medium.u8', 'building_h.f32']) {
+      expect(files.get(`capitol-edit-1-${name}`)!.equals(await fixtureFile(request, name)), name).toBe(true);
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test('picks the block under the crosshair with the middle button', async ({ page }) => {
+    const errors = trackErrors(page);
+    await open(page, url({ cam: 'iso', edit: 1, slot: 'ground', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
+    const slots = page.locator('#hotbar .slot');
+    await expect(slots.nth(SLOTS.indexOf('ground'))).toHaveClass(/on/);
+    // The crosshair is on lawn, so a middle click takes the hotbar to the lawn slot.
+    await page.mouse.click(CENTRE.x, CENTRE.y, { button: 'middle' });
+    expect(await panel(page)).toContain('picked lawn');
+    await expect(slots.nth(SLOTS.indexOf('lawn'))).toHaveClass(/on/);
+    expect(page.url()).toContain('slot=lawn');
+    // Put a building cube there and it picks the building slot instead, because that is the top cube.
+    await page.keyboard.press(`Digit${SLOTS.indexOf('building') + 1}`);
+    expect(await page.evaluate(() => window.__ecoviewEdit!.act('place'))).toBe(true);
+    await page.keyboard.press(`Digit${SLOTS.indexOf('gravel') + 1}`);
+    expect(await page.evaluate(() => window.__ecoviewEdit!.pickSlot())).toBe('building');
+    await expect(slots.nth(SLOTS.indexOf('building'))).toHaveClass(/on/);
+    expect(errors).toEqual([]);
   });
 
   test('turns edit mode and the first-person camera on and off from the keyboard', async ({ page }) => {

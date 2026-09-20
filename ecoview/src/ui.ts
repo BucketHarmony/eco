@@ -1,7 +1,7 @@
 // Controls, URL-parameter state, and the Canvas 2D population chart.
 import { OVERLAYS, mediumColor, type Overlay } from './world';
 import { DEATH_CAUSES, type DeathCause, type Series } from './loader';
-import { MAX_BRUSH, SLOTS, STEP, isSlot, type PanelView, type Slot } from './edit';
+import { MAX_BRUSH, SLOTS, isSlot, type PanelView, type Slot } from './edit';
 
 export const CAMS = ['iso', 'top', 'side'] as const;
 export type Cam = (typeof CAMS)[number];
@@ -449,10 +449,20 @@ export function prepareWorldSidebar(c: Controls): void {
 /** The empty chart area's height on a world page, in CSS pixels. */
 export const WORLD_CHART_H = 150;
 
-/** The note the shot asks for: a click is half a metre, but the sim rounds a whole 1 m column. */
-export const STEP_NOTE =
-  `One click is ${STEP} m of bundle height. The sim averages ground height over each 1 m ecology column and `
-  + 'rounds it to a whole metre, so one click can change the picture without changing the sim; two move a column by one voxel.';
+/**
+ * The note the shot asks for: one click is one cube, and a cube is the bundle's own cell size, so how many
+ * clicks the sim notices depends on the bundle (shot E3). At the Capitol's 0.5 m cells it takes two; at
+ * 0.25 m it takes four.
+ */
+export function stepNote(cell: number): string {
+  const clicks = Math.max(1, Math.round(1 / cell));
+  const moves = clicks === 1
+    ? 'each click moves a column by one voxel'
+    : `it takes ${clicks} clicks to move a column by one voxel`;
+  return `One click is one ${cell} m cube of bundle height. The sim averages ground height over each `
+    + `1 m ecology column and rounds it to a whole metre, so a click can change the picture without `
+    + `changing the sim: ${moves}.`;
+}
 
 /** Draws the hotbar, the target readout and the dirty flag, and puts the crosshair over the picked cell. */
 export function drawEditPanel(c: Controls, v: PanelView, media: string[]): void {

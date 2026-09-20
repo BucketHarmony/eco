@@ -4,10 +4,12 @@ import {
   BUNDLE_FORMAT, BUNDLE_JSON_VERSION, BUNDLE_VERBATIM, loadBundle, type Bundle, type Fetcher, type WorldData,
 } from '../../src/loader';
 import {
-  History, MAX_BRUSH, SLOTS, SLOT_KEYS, STEP, applyOp, cellState, changesJson, disc, f32Bytes, flySpeed,
-  isSlot, makeOp, opFor, sameState, saveFiles, type Action, type Op, type Slot, type Target,
+  History, MAX_BRUSH, SLOTS, SLOT_KEYS, SUBSURFACE, applyOp, cellState, changesJson, disc, f32Bytes,
+  flySpeed, isSlot, makeOp, opFor, sameState, saveFiles, slotAt, type Action, type Op, type Slot,
+  type Target,
 } from '../../src/edit';
-import { CHUNK, GroundChunks } from '../../src/world';
+import { CHUNK, GroundChunks, levelOf } from '../../src/world';
+import { stepNote } from '../../src/ui';
 
 /** The media of docs/SCENE-CONTRACT.md, in the order a bundle lists them. */
 const MEDIA = ['soil', 'lawn', 'bed', 'mulch', 'gravel', 'concrete', 'asphalt', 'roof', 'water'];
@@ -64,6 +66,20 @@ function serve(s: Synthetic): Fetcher {
 }
 
 const load = (patch?: (s: Synthetic) => void): Promise<Bundle> => loadBundle('/syn', serve(synthetic(patch)));
+
+/** The same scene at another cell size, so nothing may hard-code the Capitol's half metre. */
+const loadCell = (cell: number): Promise<Bundle> => loadBundle('/syn', serve(synthetic((s) => {
+  const gw = SIZE / cell;
+  const n = gw * gw;
+  const ground = new Float32Array(n);
+  for (let gy = 0; gy < gw; gy++) for (let gx = 0; gx < gw; gx++) ground[gx + gw * gy] = 1 + gx / 100;
+  s.json.ground_cell_m = cell;
+  s.json.ground_width = gw;
+  s.json.ground_depth = gw;
+  s.files['/syn/ground_h.f32'] = f32Bytes(ground);
+  s.files['/syn/medium.u8'] = new Uint8Array(n).fill(MEDIA.indexOf('lawn'));
+  s.files['/syn/building_h.f32'] = f32Bytes(new Float32Array(n));
+})));
 
 /** A deterministic generator, so a failing random-op case is reproducible. */
 function rng(seed: number): () => number {
@@ -224,10 +240,13 @@ describe('the operation model', () => {
     const lawn = MEDIA.indexOf('lawn');
     expect(makeOp(w, 'place', disc(w, 4, 4, 5), (s) => ({ ...s, medium: lawn }))).toBe(null);
     const mixed = opFor(w, 'place', target(w, ROOF.lo, ROOF.lo), 'lawn', 3)!;
-    // A radius-3 disc on the roof block's south-west corner: only its 6 roof cells are not lawn already.
-    expect(mixed.cells).toHaveLength(6);
-    expect(mixed.cells.every((c) => c.before.medium === MEDIA.indexOf('roof'))).toBe(true);
+    // A radius-3 disc on the roof block's south-west corner. Placing puts a cube on every cell of it,
+    // so all 13 change now; 6 of them are the roof block's, and all 13 come out lawn.
+    expect(mixed.cells).toHaveLength(13);
+    expect(mixed.cells.filter((c) => c.before.medium === MEDIA.indexOf('roof'))).toHaveLength(6);
     expect(mixed.cells.every((c) => c.after.medium === lawn)).toBe(true);
+    expect(mixed.cells.every((c) => levelOf(c.after.ground_h, CELL) === levelOf(c.before.ground_h, CELL) + 1))
+      .toBe(true);
     // A medium the bundle does not list has no code, so that slot does nothing at all.
     const short = (await load((s) => {
       s.json.media = ['soil', 'lawn'];
@@ -241,21 +260,26 @@ describe('the operation model', () => {
     const w = (await load()).world;
     const roof = target(w, 14, 14);
     const lawn = target(w, 2, 2);
-    // Remove takes half a metre off a building, and digs into bare ground instead.
+    // Remove takes one cube off a building, and digs one cube out of bare ground instead.
     applyOp(w, opFor(w, 'remove', roof, 'lawn', 1)!);
-    expect(w.building_h[roof.i]).toBe(ROOF.height - STEP);
+    expect(levelOf(w.ground_h[roof.i] + w.building_h[roof.i], CELL))
+      .toBe(levelOf(w.ground_h[roof.i] + ROOF.height, CELL) - 1); // one cube off the top, on the lattice
     const h0 = w.ground_h[lawn.i];
     applyOp(w, opFor(w, 'remove', lawn, 'lawn', 1)!);
-    expect(w.ground_h[lawn.i]).toBeCloseTo(h0 - STEP, 6);
-    // Two ground places make a metre: the bundle's step is half the sim's column (DECISIONS.md, shot E1).
+    expect(levelOf(w.ground_h[lawn.i], CELL)).toBe(levelOf(h0, CELL) - 1);
+    expect(w.medium[lawn.i]).toBe(SUBSURFACE); // digging exposes what is under the surface
+    // Two ground places make a metre: a cube is the bundle's 0.5 m cell (DECISIONS.md, shot E3).
     applyOp(w, opFor(w, 'place', lawn, 'ground', 1)!);
     applyOp(w, opFor(w, 'place', lawn, 'ground', 1)!);
-    expect(w.ground_h[lawn.i]).toBeCloseTo(h0 + STEP, 6);
+    expect(w.ground_h[lawn.i]).toBeCloseTo(levelOf(h0, CELL) * CELL + CELL, 6);
+    expect(w.medium[lawn.i]).toBe(SUBSURFACE); // the ground slot raises without repainting
     // A side hit grows the neighbour the ray came from, so a wall extends rather than thickens.
     const side: Target = { i: 20 + GW * 14, gx: 20, gy: 14, top: false, adj: 19 + GW * 14 };
     const wall = opFor(w, 'place', side, 'building', 1)!;
     expect(wall.cells.map((c) => c.i)).toEqual([side.adj]);
-    expect(wall.cells[0].after.building_h).toBe(ROOF.height + STEP);
+    const at = cellState(w, side.adj);
+    expect(levelOf(at.ground_h + wall.cells[0].after.building_h, CELL))
+      .toBe(levelOf(at.ground_h + at.building_h, CELL) + 1);
     // Flatten levels a disc onto the targeted cell's height, and leaves the media alone.
     applyOp(w, opFor(w, 'flatten', target(w, 6, 6), 'lawn', 3)!);
     const cells = disc(w, 6, 6, 3);
@@ -263,13 +287,67 @@ describe('the operation model', () => {
     expect(cells.every((i) => w.medium[i] === MEDIA.indexOf('lawn'))).toBe(true);
   });
 
+  it('places and removes one cube with every slot, and puts the grids back', async () => {
+    const w = (await load()).world;
+    // The mirror holds exactly on a column of sub-surface ground sitting on the cube lattice, which is
+    // what a dig leaves behind; a place on top of unedited LiDAR ground snaps it there first.
+    const t = target(w, 7, 9);
+    applyOp(w, opFor(w, 'remove', t, 'lawn', 1)!);
+    const start = grids(w);
+    for (const slot of SLOT_KEYS) {
+      const place = opFor(w, 'place', t, slot, 1);
+      expect(place, slot).not.toBe(null);
+      expect(place!.cells, slot).toHaveLength(1);
+      applyOp(w, place!);
+      expect(grids(w), slot).not.toEqual(start);
+      const drawn = levelOf(w.ground_h[t.i] + w.building_h[t.i], CELL);
+      expect(drawn, slot).toBe(levelOf(start[0][t.i] + start[2][t.i], CELL) + 1); // exactly one cube taller
+      const remove = opFor(w, 'remove', t, slot, 1);
+      expect(remove, slot).not.toBe(null);
+      applyOp(w, remove!);
+      expect(grids(w), slot).toEqual(start); // and byte for byte back again
+    }
+  });
+
+  it('is a cube on a bundle whose cells are not half a metre', async () => {
+    const quarter = (await loadCell(0.25)).world;
+    expect(quarter.cell).toBe(0.25);
+    const t = target(quarter, 10, 10);
+    const h0 = quarter.ground_h[t.i];
+    applyOp(quarter, opFor(quarter, 'place', t, 'ground', 1)!);
+    // One click is one cell of height, whatever the cell is: 0.25 m here, not the Capitol's 0.5.
+    expect(quarter.ground_h[t.i]).toBeCloseTo((Math.floor(h0 / 0.25 + 1e-6) + 1) * 0.25, 6);
+    expect(levelOf(quarter.ground_h[t.i], 0.25)).toBe(levelOf(h0, 0.25) + 1);
+    applyOp(quarter, opFor(quarter, 'remove', t, 'ground', 1)!);
+    expect(levelOf(quarter.ground_h[t.i], 0.25)).toBe(levelOf(h0, 0.25));
+    // And the sidebar says what that means for the sim, which counts in whole metres.
+    expect(stepNote(0.25)).toContain('0.25 m cube');
+    expect(stepNote(0.25)).toContain('4 clicks');
+    expect(stepNote(0.5)).toContain('2 clicks');
+    expect(stepNote(1)).toContain('each click moves a column by one voxel');
+  });
+
+  it('names the slot of the cube under the crosshair, for the middle-click pick', async () => {
+    const w = (await load()).world;
+    expect(slotAt(w, target(w, 14, 14))).toBe('building'); // the roof block's cubes
+    expect(slotAt(w, target(w, 2, 2))).toBe('lawn');
+    applyOp(w, opFor(w, 'place', target(w, 2, 2), 'asphalt', 1)!);
+    expect(slotAt(w, target(w, 2, 2))).toBe('asphalt');
+    // A medium no slot can place reads as `ground`, which is the slot that leaves the medium alone.
+    applyOp(w, opFor(w, 'remove', target(w, 2, 2), 'asphalt', 1)!);
+    expect(MEDIA[SUBSURFACE]).toBe('soil');
+    expect(slotAt(w, target(w, 2, 2))).toBe('ground');
+  });
+
   it('tracks the cells a session changed, dropping the ones edited back', async () => {
     const w = (await load()).world;
+    // Dig first, so the column sits on the cube lattice and a place and a remove there are exact mirrors.
+    applyOp(w, opFor(w, 'remove', target(w, 8, 8), 'ground', 1)!);
     const h = new History(w);
     h.push(opFor(w, 'place', target(w, 8, 8), 'asphalt', 1)!);
     h.push(opFor(w, 'place', target(w, 9, 8), 'gravel', 1)!);
     expect(h.changed).toEqual([8 + GW * 8, 9 + GW * 8]);
-    h.push(opFor(w, 'place', target(w, 8, 8), 'lawn', 1)!); // back to what it was
+    h.push(opFor(w, 'remove', target(w, 8, 8), 'asphalt', 1)!); // back to what it was
     expect(h.changed).toEqual([9 + GW * 8]);
     expect(h.dirty).toBe(true);
     h.markSaved();
@@ -403,7 +481,9 @@ describe('saving', () => {
     expect(medium[i]).toBe(MEDIA.indexOf('asphalt'));
     const ground = files.find((f) => f.name.endsWith('ground_h.f32'))!.data as Uint8Array;
     const view = new DataView(ground.buffer, ground.byteOffset, ground.byteLength);
-    expect(view.getFloat32(4 * i, true)).toBeCloseTo(h0 + STEP, 5);
+    // Two cubes up from the lattice level the LiDAR height stood at: 1.03 m is level 2, so 2.0 m.
+    const snapped = (levelOf(h0, CELL) + 1) * CELL;
+    expect(view.getFloat32(4 * i, true)).toBeCloseTo(snapped + CELL, 5);
     expect(view.getFloat32(0, true)).toBeCloseTo(1, 5); // and every other cell untouched
     const changes = JSON.parse(changesJson(b, 2, h.applied)) as { ops: Op[] };
     expect(changes.ops).toHaveLength(2);
@@ -411,8 +491,8 @@ describe('saving', () => {
     expect(changes.ops[0].cells).toEqual([{
       i,
       before: { ground_h: h0, medium: MEDIA.indexOf('lawn'), building_h: 0 },
-      after: { ground_h: h0, medium: MEDIA.indexOf('asphalt'), building_h: 0 },
+      after: { ground_h: snapped, medium: MEDIA.indexOf('asphalt'), building_h: 0 },
     }]);
-    expect(changes.ops[1].cells[0].after.ground_h).toBeCloseTo(h0 + STEP, 5);
+    expect(changes.ops[1].cells[0].after.ground_h).toBeCloseTo(snapped + CELL, 5);
   });
 });

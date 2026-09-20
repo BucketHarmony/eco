@@ -436,3 +436,101 @@ diff split between `#view` and the sidebar, and why the change is correct, as MA
 requires. Two findings for the operator are recorded there: fire came back under G4b (37 ignitions in
 20000 ticks against shot E1's 8), so shot 09's tick 17100 is no longer the run's best fire tick, and the
 Capitol run's `fertility_mean` ends at 222.85, over the 220 ceiling the operator flagged before G4.
+
+## E3 block world
+
+**What this shot changes, and what it deliberately does not.** The data model is untouched: a ground cell
+is still one `ground_h` f32, one `medium` u8 and one `building_h` f32, the bundle format is unchanged, and
+`ecosim/` is not touched. What changes is the geometry rule in `GroundChunks.rebuild` and the meaning of a
+hotbar click. A heightfield drawn as cubes still has no overhangs, bridges or caves, and nothing here
+pretends otherwise — one material per column remains the hard limit, and no change in this shot needed a
+second one.
+
+**The culling rule: draw every cube that has an exposed face, and nothing else.** A column of top level
+`L` draws levels `n+1 … L`, where `n` is the lowest of its four neighbours' levels (`cubeRange` in
+`world.ts`). That is exactly the set of cubes with at least one face against air: the face of column A at
+level `k` toward neighbour B is exposed iff `k > level(B)`, which implies `k > n`, so every exposed face
+belongs to a drawn cube, and a cube at or below `n` is buried on all four sides with a drawn cube above
+it. Off the grid the neighbour counts as level −1, so the world's rim is a wall that reaches the floor
+rather than a lip one cube short of it. Buildings use the same rule on `ground_h + building_h` and stop at
+their own ground level (`b0 = max(b0, g1)`), so the two meshes never overlap and the ground mesh owns
+everything below a building.
+
+**The measured cost, on the committed `fixtures/capitol-world`** (512×512 cells at 0.5 m):
+
+| | cubes |
+|---|---|
+| ground tops | 262,144 |
+| ground side cubes | 16,142 |
+| building tops | 24,705 |
+| building side cubes | 63,086 |
+| **total drawn** | **366,077** |
+| E1 drew (one prism per column) | 286,849 |
+| full stacks, for comparison | 3,833,617 |
+
+`tests/unit/cubes.test.ts` asserts 278,286 ground and 87,791 building instances against the fixture by
+building the real `GroundChunks`, so a change that breaks the culling shows up as a count. The increase
+over E1 is **27.6%**, not the 47% the prompt budgeted, which is why `perf.spec.ts` needed nothing from
+this shot: the run pages do not use `GroundChunks` at all (they draw through `GroundDrape` and
+`Buildings`), and the draw medians are unchanged at 280 ms iso / 168 ms top.
+
+**Deviation from the prompt's count table, on purpose.** `overnight/shots/E3-cubes.md` gives 50,192 ground
+and 83,486 building "exposed sides" for a total of 420,527, and asks for that number in a test. Those are
+**faces**, not cubes: counting exposed side faces the same way here gives 45,564 ground and 82,948
+building, total 415,361, within a few percent of the operator's figures (the rest is the floor and rim
+convention). A cube on a two-cube step carries two or three exposed faces and is still one instance, so
+the instance count is necessarily lower than the face count — 366,077 against 415,361 here. Drawing one
+cube per exposed face would place several cubes in the same lattice cell. The test therefore asserts the
+measured instance counts exactly, as the prompt asks, but against the rule that draws each cube once; the
+LOG line for this shot says the same.
+
+**Quantise for display; the data stays continuous.** `levelOf(h, cell) = floor(h / cell + 1e-6)` is applied
+at draw time only. `ground_h` and `building_h` remain f32 metres from the LiDAR import, so a bundle that is
+loaded and saved without an edit is still byte-identical (the e2e test that asserts that is unchanged and
+still passes), the sim still averages continuous heights over each 1 m ecology column, and a future
+importer with finer data loses nothing. Quantising the stored values instead would throw away up to half a
+cube of height per cell on load and make every load-save a lossy operation. The `1e-6` is there so a height
+that a place operation just wrote *onto* the lattice — `(L + 1) * cell`, rounded through `Math.fround` —
+reads back as level `L + 1` and not `L`.
+
+**The cube edge is `ground_cell_m`.** Vertical step equals horizontal step or the cubes are not cubes, so
+every quantisation reads the cell size from the bundle. E1's fixed 0.5 m edit step is gone; `ui.stepNote`
+derives its sidebar sentence from the same number (2 clicks to a sim voxel at 0.5 m, 4 at 0.25 m), and
+`edit.test.ts` covers a synthetic 0.25 m bundle so a hard-coded 0.5 fails the unit suite.
+
+**Place and remove are mirrors, and a dig exposes soil.** A place takes the column to
+`(level(top) + 1) * cell` and paints the slot's medium; the `building` slot does the same to
+`building_h`. A remove takes the top building cube if there is one, else the top ground cube, and stops at
+the floor. For the two to be exact inverses a remove has to say what the newly exposed ground is made of,
+and the only answer a heightfield can give is the sub-surface: `SUBSURFACE = 0`, which the scene contract
+fixes as `soil`. So a place on a dug column restores it byte for byte, which is what the acceptance's
+round trip asserts — `edit.spec.ts` digs once to put the column on the lattice, then places and removes a
+cube with each of the eight slots and compares the whole grid each time, and finally undoes everything and
+saves a bundle byte-identical to the fixture. On an unedited LiDAR column the first place also snaps the
+height onto the lattice, which is visible and intended; after that every click is one cube.
+
+**Placing against a face.** A hit on a vertical face now adds to the neighbour the ray came from for
+*every* slot, not only `building` (E1's `Target.adj`, change 5), so a ground place builds a terrace
+outward from a wall instead of pushing the wall up. The outline follows: twelve edges around the cube a
+click would add or remove, per brushed cell, lifted `OUTLINE_LIFT` so it does not z-fight with the cube's
+own faces.
+
+**Pick block, and the brush default.** Middle-click reads the cube under the crosshair and sets the hotbar
+to it (`slotAt`: the building slot if the top cube is a building's, else the column's medium if a slot
+names it, else `ground` — which is the slot that leaves the medium alone). The brush already defaulted to
+1 from E1, so change 7 needed no code. Nothing from the limiter list was dropped.
+
+**Hand run.** A 49-cell gravel pad placed on the lawn with brush 5, then a three-cube pillar on it and one
+cube taken back off, saved with Ctrl-S and un-prefixed into a directory:
+
+```
+$ ecosim run --seed 42 --world "$TEMP/capitol-e3-edit" --ticks 1000 --out "$TEMP/capitol-e3-run" \
+    --set animals.enabled=false --set climate.rain_gradient=0
+scene: 81 trees -> 79 planted (0 moved, 2 dropped, 0 merged); 64 shrubs over 750 columns in 87 patches
+wrote C:\Users\kenne\AppData\Local\Temp/capitol-e3-run (1000 ticks, 701 ms): grazers=0 hunters=0 trees=135
+```
+
+The edit reaches the sim exactly: diffing this run's `world/` against the same run on the unedited bundle
+gives 49 cells in `ground_h.bin`, the same 49 bytes in `medium.bin`, 1 cell in `building_h.bin` and an
+identical `pipes.json`. The pad's cells read 5.50 m where the lawn was 5.27 m, which is the snap to the
+lattice: one click of gravel is a pad at cube height, not a paint job at LiDAR height.

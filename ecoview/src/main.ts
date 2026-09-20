@@ -8,8 +8,8 @@ import { Buildings, GroundDrape, Pipes, World } from './world';
 import { Entities } from './entities';
 import { Editor, type EditorHost } from './edit';
 import {
-  STEP_NOTE, drawChart, drawEditPanel, drawLegend, getControls, initControls, parseParams, parseWorldParams,
-  prepareWorldSidebar, syncControls, toSearch, worldSearch, type Cam, type ViewState, type WorldState,
+  drawChart, drawEditPanel, drawLegend, getControls, initControls, parseParams, parseWorldParams,
+  prepareWorldSidebar, stepNote, syncControls, toSearch, worldSearch, type Cam, type ViewState, type WorldState,
 } from './ui';
 
 declare global {
@@ -258,7 +258,7 @@ async function applyWorld(s: WorldState): Promise<void> {
     const bundle = await loadBundle(`/${s.world}`);
     const g = bundle.grid;
     prepareWorldSidebar(ui);
-    ui.editNote.textContent = STEP_NOTE;
+    ui.editNote.textContent = stepNote(bundle.world.cell);
     setCamera(s.cam, g);
     const t = target(g);
     sun.target.position.copy(t);

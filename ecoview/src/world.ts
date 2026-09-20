@@ -428,20 +428,70 @@ export class Pipes {
   }
 }
 
-// ---- edit mode: the ground grid drawn as itself, in chunks (shot E1) ----
+// ---- edit mode: the ground grid drawn as itself, in cubes and chunks (shots E1, E3) ----
 
 /** Ground cells to a side of one chunk, and so of one InstancedMesh. */
 export const CHUNK = 32;
-/** How far a ground box reaches below its top face; every box's bottom is the same, so no gap can show. */
-export const GROUND_SKIRT = 1;
-/** The targeted cell's outline, lifted this far above its top face so it never z-fights it. */
+/** The block outline is this much larger than the cube it wraps, so its edges never z-fight the faces. */
 export const OUTLINE_LIFT = 0.05;
 export const OUTLINE_COLOR = '#ff2ba6';
 
 /**
- * A world bundle drawn at the ground grid's own resolution: one `InstancedMesh` of ground boxes and one of
- * building boxes per `CHUNK` × `CHUNK` cells, so an edit rebuilds only the chunks it touched. The Capitol is
- * 512 × 512 cells, which is 256 chunks of 1024 boxes (DECISIONS.md, shot E1).
+ * A height in cube levels: the number of whole cubes a column of that height stands in, so its drawn top
+ * is `level * cell` and its top cube spans `[(level - 1) * cell, level * cell]`. The grids stay f32 and
+ * the levels are only how the renderer and the editor quantise them for display (DECISIONS.md, shot E3).
+ * The epsilon is there because the grids are f32: 1.5 read back as 1.4999999 must still be three cubes.
+ */
+export const LEVEL_EPS = 1e-6;
+export const levelOf = (h: number, cell: number): number => Math.floor(h / cell + LEVEL_EPS);
+
+/** The drawn top of a column, in cube levels: its ground, or its building when it has one. */
+export const topLevelAt = (w: WorldData, i: number): number => levelOf(w.ground_h[i] + w.building_h[i], w.cell);
+/** The drawn top of a column's ground alone, in cube levels. */
+export const groundLevelAt = (w: WorldData, i: number): number => levelOf(w.ground_h[i], w.cell);
+
+/** The cube levels one column draws: ground `[g0, g1)` and building `[b0, b1)`, each empty when b1 <= b0. */
+export interface CubeRange {
+  g0: number;
+  g1: number;
+  b0: number;
+  b1: number;
+}
+
+/**
+ * Face culling, the rule that makes a block world affordable: a column draws its top cube, plus one cube
+ * per cube-edge of the drop to its lowest neighbour, and nothing below that. The cubes below are behind
+ * their neighbours' and can never be seen, because a heightfield has no overhangs. On the Capitol that is
+ * 366077 cubes against the 3968714 of full stacks, and 28% more than E1's one stretched box per column.
+ * Off the grid the neighbour is a column below the floor, so the world's rim is a wall down to level 0.
+ */
+export function cubeRange(w: WorldData, gx: number, gy: number): CubeRange {
+  const i = gx + w.gw * gy;
+  const g1 = groundLevelAt(w, i);
+  const b1 = topLevelAt(w, i);
+  let g0 = g1 - 1;
+  let b0 = b1 - 1;
+  for (let k = 0; k < 4; k++) {
+    const nx = gx + (k === 0 ? 1 : k === 1 ? -1 : 0);
+    const ny = gy + (k === 2 ? 1 : k === 3 ? -1 : 0);
+    if (nx < 0 || ny < 0 || nx >= w.gw || ny >= w.gd) {
+      g0 = Math.min(g0, -1);
+      b0 = Math.min(b0, -1);
+      continue;
+    }
+    const n = nx + w.gw * ny;
+    g0 = Math.min(g0, groundLevelAt(w, n));
+    b0 = Math.min(b0, topLevelAt(w, n));
+  }
+  // A building's cubes stop at its own ground: everything below that belongs to the ground mesh.
+  return { g0, g1, b0: Math.max(b0, g1), b1 };
+}
+
+/**
+ * A world bundle drawn at the ground grid's own resolution, as cubes of `ground_cell_m` on a side: one
+ * `InstancedMesh` of ground cubes and one of building cubes per `CHUNK` x `CHUNK` cells, so an edit
+ * rebuilds only the chunks it touched. The Capitol is 512 x 512 cells, which is 256 chunk pairs
+ * (DECISIONS.md, shots E1 and E3).
  */
 export class GroundChunks {
   readonly group = new THREE.Group();
@@ -454,6 +504,7 @@ export class GroundChunks {
   private readonly palette: RGB[];
   private readonly groundMat: [THREE.MeshLambertMaterial, THREE.MeshBasicMaterial];
   private readonly buildingMat: [THREE.MeshLambertMaterial, THREE.MeshBasicMaterial];
+  private lit = true;
 
   /** `depthM` is the world's north-south extent in metres: sim +y is three -z, as everywhere else. */
   constructor(readonly world: WorldData, readonly depthM: number) {
@@ -469,19 +520,7 @@ export class GroundChunks {
       new THREE.MeshLambertMaterial({ color: b, flatShading: true }),
       new THREE.MeshBasicMaterial({ color: b }),
     ];
-    for (let c = 0; c < this.cx * this.cy; c++) {
-      const { w, d } = this.range(c);
-      const g = new THREE.InstancedMesh(this.geometry, this.groundMat[0], w * d);
-      g.setColorAt(0, new THREE.Color(1, 1, 1)); // allocate instanceColor up front
-      const bl = new THREE.InstancedMesh(this.geometry, this.buildingMat[0], w * d);
-      for (const m of [g, bl]) {
-        m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        this.group.add(m);
-      }
-      this.ground.push(g);
-      this.building.push(bl);
-      this.rebuild(c);
-    }
+    for (let c = 0; c < this.cx * this.cy; c++) this.rebuild(c);
   }
 
   /** The cell range of chunk `c`, clipped at the grid's edges. */
@@ -502,57 +541,97 @@ export class GroundChunks {
     return [...out];
   }
 
-  /** Writes chunk `c`'s boxes from the current grids; the only place the geometry follows an edit. */
+  /**
+   * A chunk's mesh, with room for `need` cubes. A cube world's instance count follows the terrain rather
+   * than the cell count, so each mesh is allocated from the count the rebuild has just measured, with a
+   * quarter's headroom so an edit that adds a cube rarely reallocates.
+   */
+  private mesh(c: number, kind: 'ground' | 'building', need: number): THREE.InstancedMesh {
+    const list = kind === 'ground' ? this.ground : this.building;
+    const old = list[c] as THREE.InstancedMesh | undefined;
+    if (old && old.instanceMatrix.count >= need) return old;
+    if (old) {
+      this.group.remove(old);
+      old.dispose();
+    }
+    const mats = kind === 'ground' ? this.groundMat : this.buildingMat;
+    const m = new THREE.InstancedMesh(this.geometry, mats[this.lit ? 0 : 1], need + (need >> 2) + 16);
+    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    if (kind === 'ground') m.setColorAt(0, new THREE.Color(1, 1, 1)); // allocate instanceColor up front
+    this.group.add(m);
+    list[c] = m;
+    return m;
+  }
+
+  /** Writes chunk `c`'s cubes from the current grids; the only place the geometry follows an edit. */
   rebuild(c: number): void {
     const w = this.world;
+    const cell = w.cell;
     const { x0, y0, w: cw, d: cd } = this.range(c);
+    // The ranges are measured first, because the instance counts, and so the meshes, come from them.
+    const ranges: CubeRange[] = [];
+    let gn = 0;
+    let bn = 0;
+    for (let ly = 0; ly < cd; ly++) {
+      for (let lx = 0; lx < cw; lx++) {
+        const r = cubeRange(w, x0 + lx, y0 + ly);
+        ranges.push(r);
+        gn += r.g1 - r.g0;
+        bn += Math.max(0, r.b1 - r.b0);
+      }
+    }
+    const g = this.mesh(c, 'ground', gn);
+    const b = this.mesh(c, 'building', bn);
     const m = new THREE.Matrix4();
     const col = new THREE.Color();
-    const g = this.ground[c];
-    const b = this.building[c];
-    let nb = 0;
+    let gi = 0;
+    let bi = 0;
     for (let ly = 0; ly < cd; ly++) {
       for (let lx = 0; lx < cw; lx++) {
         const i = x0 + lx + w.gw * (y0 + ly);
-        const h = w.ground_h[i];
-        const x = (x0 + lx + 0.5) * w.cell;
-        const z = this.depthM - (y0 + ly + 0.5) * w.cell;
-        const t = h + GROUND_SKIRT;
-        m.makeScale(w.cell, t, w.cell);
-        m.setPosition(x, h - t / 2, z);
-        g.setMatrixAt(ly * cw + lx, m);
-        const [r, gr, bl] = this.palette[w.medium[i]] ?? mediumColor('unknown');
-        g.setColorAt(ly * cw + lx, col.setRGB(r / 255, gr / 255, bl / 255, THREE.SRGBColorSpace));
-        const bh = w.building_h[i];
-        if (bh > 0) {
-          m.makeScale(w.cell, bh, w.cell);
-          m.setPosition(x, h + bh / 2, z);
-          b.setMatrixAt(nb++, m);
+        const r = ranges[ly * cw + lx];
+        const x = (x0 + lx + 0.5) * cell;
+        const z = this.depthM - (y0 + ly + 0.5) * cell;
+        const [cr, cg, cb] = this.palette[w.medium[i]] ?? mediumColor('unknown');
+        col.setRGB(cr / 255, cg / 255, cb / 255, THREE.SRGBColorSpace);
+        for (let L = r.g0; L < r.g1; L++) {
+          m.makeScale(cell, cell, cell);
+          m.setPosition(x, (L + 0.5) * cell, z);
+          g.setMatrixAt(gi, m);
+          g.setColorAt(gi, col);
+          gi++;
+        }
+        for (let L = r.b0; L < r.b1; L++) {
+          m.makeScale(cell, cell, cell);
+          m.setPosition(x, (L + 0.5) * cell, z);
+          b.setMatrixAt(bi++, m);
         }
       }
     }
+    g.count = gi;
+    b.count = bi;
     g.instanceMatrix.needsUpdate = true;
     g.instanceColor!.needsUpdate = true;
-    b.count = nb;
     b.instanceMatrix.needsUpdate = true;
     // An instanced mesh is culled by its own bounding sphere, which has to be taken from the matrices: with
     // it, a first-person view pays for the chunks it can see rather than all 256 of them.
-    for (const m of [g, b]) m.computeBoundingSphere();
+    for (const mesh of [g, b]) mesh.computeBoundingSphere();
   }
 
   setLit(lit: boolean): void {
+    this.lit = lit;
     const k = lit ? 0 : 1;
     for (const m of this.ground) m.material = this.groundMat[k];
     for (const m of this.building) m.material = this.buildingMat[k];
   }
 
-  /** Boxes drawn: ground is every cell, buildings only the cells with a height. */
+  /** Cubes drawn, ground and building: the measurement `tests/unit/cubes.test.ts` gates. */
   get instances(): [number, number] {
-    return [this.world.gw * this.world.gd, this.building.reduce((n, m) => n + m.count, 0)];
+    return [this.ground.reduce((n, m) => n + m.count, 0), this.building.reduce((n, m) => n + m.count, 0)];
   }
 }
 
-/** The brush outline: the top square of every cell in the brush, at that cell's top face. */
+/** The brush outline: the twelve edges of the cube each brushed cell would place against or remove. */
 export class Outline {
   readonly lines: THREE.LineSegments;
   private readonly capacity: number;
@@ -560,7 +639,7 @@ export class Outline {
 
   constructor(readonly world: WorldData, readonly depthM: number, maxCells: number) {
     this.capacity = maxCells;
-    this.position = new THREE.BufferAttribute(new Float32Array(maxCells * 8 * 3), 3);
+    this.position = new THREE.BufferAttribute(new Float32Array(maxCells * 24 * 3), 3);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', this.position);
     this.lines = new THREE.LineSegments(
@@ -578,22 +657,30 @@ export class Outline {
   /** `cells` are ground-cell indexes; an empty list hides the outline. */
   set(cells: number[]): void {
     const w = this.world;
+    const cell = w.cell;
     const p = this.position;
     let v = 0;
     for (const i of cells.slice(0, this.capacity)) {
       const gx = i % w.gw;
       const gy = Math.floor(i / w.gw);
-      const y = w.ground_h[i] + w.building_h[i] + OUTLINE_LIFT;
-      const x0 = gx * w.cell;
-      const x1 = x0 + w.cell;
-      const z0 = this.depthM - gy * w.cell;
-      const z1 = z0 - w.cell;
+      // The cube under the crosshair: the top one of this column's drawn stack, grown by OUTLINE_LIFT.
+      const top = topLevelAt(w, i) * cell;
+      const y1 = top + OUTLINE_LIFT;
+      const y0 = top - cell - OUTLINE_LIFT;
+      const x0 = gx * cell - OUTLINE_LIFT;
+      const x1 = (gx + 1) * cell + OUTLINE_LIFT;
+      const z0 = this.depthM - gy * cell + OUTLINE_LIFT;
+      const z1 = this.depthM - (gy + 1) * cell - OUTLINE_LIFT;
       const corners: [number, number][] = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
       for (let k = 0; k < 4; k++) {
         const [ax, az] = corners[k];
         const [bx, bz] = corners[(k + 1) % 4];
-        p.setXYZ(v++, ax, y, az);
-        p.setXYZ(v++, bx, y, bz);
+        for (const y of [y0, y1]) {
+          p.setXYZ(v++, ax, y, az); // the bottom square, then the top one
+          p.setXYZ(v++, bx, y, bz);
+        }
+        p.setXYZ(v++, ax, y0, az); // and the upright at this corner
+        p.setXYZ(v++, ax, y1, az);
       }
     }
     this.lines.geometry.setDrawRange(0, v);

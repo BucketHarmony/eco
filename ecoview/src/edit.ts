@@ -3,12 +3,17 @@
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import { BUNDLE_VERBATIM, type Bundle, type WorldData } from './loader';
-import { GroundChunks, Outline } from './world';
+import { GroundChunks, Outline, groundLevelAt, levelOf, topLevelAt } from './world';
 import { BundlePlants } from './entities';
 
-/** One click's vertical step, in metres. The bundle stores a continuous height; the sim rounds it. */
-export const STEP = 0.5;
 export const MAX_BRUSH = 9;
+
+/**
+ * The medium a dig exposes. A column carries one medium, which is its surface, so taking its top cube
+ * away has to leave what is under the surface: `media[0]`, which `ecosim`'s `Bundle::load` requires to be
+ * `soil` and the loader checks (DECISIONS.md, shot E3).
+ */
+export const SUBSURFACE = 0;
 
 /**
  * The hotbar, keys 1-8. The six medium slots name a medium of the scene contract; the labels read in site
@@ -118,9 +123,11 @@ export interface Target {
 }
 
 /**
- * Marches `ray` in quarter-cell steps and returns the first cell whose top (ground plus building) is above
- * the sample. A heightfield march rather than a raycast against the instanced meshes: the Capitol's 262144
- * boxes would be 262144 box intersections per pick (DECISIONS.md, shot E1).
+ * Marches `ray` in quarter-cell steps and returns the first cell whose drawn top is above the sample. A
+ * heightfield march rather than a raycast against the instanced meshes: the Capitol's 364029 cubes would
+ * be 364029 box intersections per pick (DECISIONS.md, shots E1 and E3). The march tests the *drawn* top,
+ * quantised to the cube lattice, so the crosshair lands on the cube the eye sees and not on the
+ * continuous height under it.
  */
 export function pickCell(w: WorldData, depthM: number, ray: THREE.Ray, ceiling: number, maxDist = 1600): Target | null {
   const step = w.cell / 4;
@@ -136,7 +143,7 @@ export function pickCell(w: WorldData, depthM: number, ray: THREE.Ray, ceiling: 
       continue;
     }
     const i = gx + w.gw * gy;
-    if (p.y <= w.ground_h[i] + w.building_h[i]) {
+    if (p.y <= topLevelAt(w, i) * w.cell) {
       const top = prev < 0 || prev === i;
       return { i, gx, gy, top, adj: top ? i : prev };
     }
@@ -145,14 +152,27 @@ export function pickCell(w: WorldData, depthM: number, ray: THREE.Ray, ceiling: 
   return null;
 }
 
-/** The op an action produces, or null when it would change nothing (an unknown medium, a floor at 0). */
+/**
+ * The op an action produces, or null when it would change nothing (an unknown medium, a floor at 0).
+ *
+ * A place adds exactly one cube of the selected slot and a remove takes exactly one away, whichever slot
+ * is held: the two are mirrors, and the cube's edge is the bundle's `ground_cell_m` in every direction
+ * (shot E3). The heights stay continuous in the grids; a place snaps the column onto the cube lattice on
+ * its way up, which is the snap the user sees the first time they click on unedited LiDAR ground.
+ */
 export function opFor(w: WorldData, action: Action, t: Target, slot: Slot, brush: number): Op | null {
+  const c = w.cell;
   const brushAt = (i: number): number[] => disc(w, i % w.gw, Math.floor(i / w.gw), brush);
   if (action === 'remove') {
-    // A cell with a building loses half a metre of it first; bare ground goes down instead.
+    // The top cube of the stack goes: the building's if it has one, otherwise the ground's. Digging into
+    // a column exposes what is under the surface, which is the bundle's first medium, soil.
     return makeOp(w, 'remove', brushAt(t.i), (s) => {
-      if (s.building_h > 0) s.building_h = Math.max(0, s.building_h - STEP);
-      else s.ground_h -= STEP;
+      if (s.building_h > 0) {
+        s.building_h = Math.max(0, (levelOf(s.ground_h + s.building_h, c) - 1) * c - s.ground_h);
+      } else if (levelOf(s.ground_h, c) > 0) {
+        s.ground_h = (levelOf(s.ground_h, c) - 1) * c;
+        s.medium = SUBSURFACE; // what a dig exposes: the bundle's first medium, which ecosim pins to soil
+      }
       return s;
     });
   }
@@ -165,25 +185,34 @@ export function opFor(w: WorldData, action: Action, t: Target, slot: Slot, brush
       return s;
     });
   }
-  if (slot === 'ground') {
-    return makeOp(w, 'place', brushAt(t.i), (s) => {
-      s.ground_h += STEP;
-      return s;
-    });
-  }
+  // A hit on a vertical face places into the cell the ray came from, so a cube lands on the face you can
+  // see rather than inside the column behind it.
+  const cells = brushAt(t.top ? t.i : t.adj);
   if (slot === 'building') {
-    // A hit on a vertical face grows the neighbour the ray came from, so a wall extends sideways.
-    return makeOp(w, 'place', brushAt(t.top ? t.i : t.adj), (s) => {
-      s.building_h += STEP;
+    return makeOp(w, 'place', cells, (s) => {
+      s.building_h = (levelOf(s.ground_h + s.building_h, c) + 1) * c - s.ground_h;
       return s;
     });
   }
-  const code = w.meta.media.indexOf(slot);
-  if (code < 0) return null;
-  return makeOp(w, 'place', brushAt(t.i), (s) => {
-    s.medium = code;
+  // `ground` raises the column in its own material; the six medium slots raise it and paint it as well.
+  const code = slot === 'ground' ? -1 : w.meta.media.indexOf(slot);
+  if (slot !== 'ground' && code < 0) return null;
+  return makeOp(w, 'place', cells, (s) => {
+    s.ground_h = (levelOf(s.ground_h, c) + 1) * c;
+    if (code >= 0) s.medium = code;
     return s;
   });
+}
+
+/**
+ * The slot the cube under the crosshair is made of, for the middle-click pick: `building` for a building
+ * cube, the column's medium when a slot names it, and `ground` for a medium no slot can place (soil,
+ * mulch or a roof cell whose building has been taken away).
+ */
+export function slotAt(w: WorldData, t: Target): Slot {
+  if (topLevelAt(w, t.i) > groundLevelAt(w, t.i)) return 'building';
+  const name = w.meta.media[w.medium[t.i]] ?? '';
+  return isSlot(name) ? name : 'ground';
 }
 
 /** The op stack: unbounded within the session, and the record a save writes out. */
@@ -428,6 +457,8 @@ export interface EditApi {
   ops(): Op[];
   changed(): number[];
   cell(i: number): CellState;
+  /** The middle-click pick: takes the hotbar to the slot of the cube under the crosshair. */
+  pickSlot(): Slot | null;
   /** Applies `n` one-cell raise ops down a diagonal and returns the milliseconds they took. */
   stroke(n: number): number;
 }
@@ -482,6 +513,7 @@ export class Editor {
       ops: () => this.history.applied,
       changed: () => this.history.changed,
       cell: (i) => cellState(w, i),
+      pickSlot: () => this.pickSlot(),
       stroke: (n) => this.stroke(n),
     };
   }
@@ -555,7 +587,7 @@ export class Editor {
     this.host.camera().updateMatrixWorld();
     const p = new THREE.Vector3(
       (t.gx + 0.5) * w.cell,
-      w.ground_h[t.i] + w.building_h[t.i],
+      topLevelAt(w, t.i) * w.cell,
       this.bundle.grid.y - (t.gy + 0.5) * w.cell,
     ).project(this.host.camera());
     return [((p.x + 1) / 2) * canvas.clientWidth, ((1 - p.y) / 2) * canvas.clientHeight];
@@ -643,6 +675,21 @@ export class Editor {
     return true;
   }
 
+  /** Middle-click: takes the hotbar to the slot the cube under the crosshair is made of (shot E3). */
+  pickSlot(): Slot | null {
+    if (!this.editing) return null;
+    const t = this.target ?? this.pick();
+    if (!t) {
+      this.message = 'nothing under the crosshair';
+      this.refresh();
+      return null;
+    }
+    const slot = slotAt(this.bundle.world, t);
+    this.message = `picked ${slot}`;
+    this.setSlot(slot);
+    return slot;
+  }
+
   private step(which: 'undo' | 'redo'): boolean {
     const op = which === 'undo' ? this.history.undo() : this.history.redo();
     if (!op) {
@@ -693,7 +740,8 @@ export class Editor {
       return;
     }
     e.preventDefault();
-    this.act(e.button === 2 ? 'place' : e.ctrlKey ? 'flatten' : 'remove');
+    if (e.button === 1) this.pickSlot();
+    else this.act(e.button === 2 ? 'place' : e.ctrlKey ? 'flatten' : 'remove');
   };
 
   private readonly onContextMenu = (e: MouseEvent): void => {

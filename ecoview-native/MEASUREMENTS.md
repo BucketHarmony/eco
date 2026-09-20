@@ -76,8 +76,21 @@ the chunks. This was a fault in the measurement harness, not in the engine or th
 
 | | |
 |---|---|
-| Clean dependency build, `--release`, no `dynamic_linking` | 771 s (12.9 min) |
-| Incremental rebuild of the binary after a one-line edit, `--release` | 6.2–7.3 s |
+All four dev numbers use a `CARGO_TARGET_DIR` of their own, so "clean" means every dependency compiled
+from scratch. `dynamic_linking` is a dev-profile feature and never appears in a release build, so the
+release row has no second column.
+
+| Profile | Clean | Incremental, after touching `src/main.rs` |
+|---|---|---|
+| dev, no `dynamic_linking` | 1,301 s (21.7 min) | 11 s |
+| dev, `--features dynamic_linking` | 1,310 s (21.8 min) | **4 s** |
+| release | 771 s (12.9 min) | 6.2–7.3 s |
+
+`dynamic_linking` costs nothing at the clean build and takes the edit-compile-run loop from 11 s to 4 s,
+which is the whole point of it: it moves the engine out of the final link. The dev profile is slower than
+release to build clean because `[profile.dev.package."*"] opt-level = 3` optimises every dependency and
+still emits debug info; that setting is what keeps a debug-built viewer usable at interactive frame
+rates. The release rebuild beats the plain dev rebuild for the same reason it links less debug data.
 
 ## CI
 

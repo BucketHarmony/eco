@@ -199,7 +199,7 @@ The job sets its own `defaults.run.working-directory: ecoview`, which overrides 
 - **Summary.** The median, the p95 (nearest rank) and fps = 1000 / median, rounded to 0.01.
 - **World size.** `perf.json` records the world it measured, read from `meta.json` `dims`. It was `64x64x32` when this was written; since shot 16 it is `256x64x32`, and the draw gate scales with it (see "Renderer dims sync").
 
-**Thresholds.** The test fails only if a pair's median draw is over 250 ms or the median step is over 1000 ms, which are the prompt's numbers. The first pair over the draw gate stops the measurement, so a gross regression fails on the gate within seconds instead of on the 5-minute test timeout. `perf.json` is written either way.
+**Thresholds.** The test fails only if a pair's median draw is over 250 ms or the median step is over 1000 ms, which are the prompt's numbers. The first pair over the draw gate stops the measurement, so a gross regression fails on the gate within seconds instead of on the test timeout. `perf.json` is written either way. (The single test and its flat 300 s timeout were split in shot E2; see "E2 perf budget". The gate values are unchanged.)
 
 **Baseline.** SwiftShader is a software GPU, so these numbers measure the viewer's own cost and catch regressions. They are not real-world fps on a graphics card.
 
@@ -344,3 +344,86 @@ capitol-edit (1000 ticks, 787 ms): grazers=0 hunters=0 trees=133
 The run completes, and diffing its `world/` against the same run on the unedited bundle shows exactly the 13 building cells and the 13 medium cells the two strokes touched, and nothing else.
 
 **Line budget.** This shot does not fit the 1,500-line budget: it is 2196 net lines over `ecoview/` excluding fixtures (735 of them `edit.ts`, 766 the two new test files, and 695 the changes to the existing five modules, the page, the shot list and the three write-ups). The limiter in the prompt — drop the first-person camera and pointer lock — was measured at about 200 lines, which would not have closed the gap, so it was not applied and the shot is Blocked on the budget with the work complete and green. `overnight/shots/E1.BLOCKED.md` has the breakdown.
+
+## E2 perf budget
+
+**What failed, and what did not.** `perf.spec.ts` went red in CI on shot G4b's regenerated runs, and
+it went red on wall clock: one Playwright test carried the whole 8-overlay × 2-camera × 60-frame draw
+matrix plus the 50-tick step loop under a flat `test.setTimeout(300_000)`. G4b's units calibration
+raised the tree count 38% on the strip, the per-draw median went from about 203 ms to about 310 ms on
+the runner, and the matrix alone ate the 300 s. **No gate was breached.** The draw gate is 1000 ms per
+pair on this world and the step gate is 1000 ms, so the test died with three times the headroom it
+asserts. `overnight/shots/G4b.BLOCKED.md` has the two CI samples.
+
+**The gate values do not move.** `MAX_DRAW_MS_PER_COLUMN` (250 ms over the 64×64 world's 4096 columns,
+so 1000 ms on the 256×64 strip) and `MAX_STEP_MEDIAN_MS` are untouched, and so is `FRAMES = 60`. There
+is no regression in them to hide, and widening a gate to make CI green is what the standing gate rule
+forbids. The fix is to stop charging one Playwright test for the whole matrix.
+
+**The split is per camera, plus the step loop on its own** — three tests where there was one:
+`perf: draw rate per overlay, cam=iso`, `… cam=top`, and `perf: step rate through consecutive
+snapshots`. Per camera rather than per overlay group because the cameras are what differ in cost
+(`iso` draws the surface at 279 ms a frame here, `top` at 168 ms for the field overlays), so each test
+measures one cost regime and its budget means something. The old assertion that all 16 pairs were
+measured becomes two assertions of 8, one per test; every other assertion and every number in
+`perf/perf.json` is unchanged.
+
+**Each test derives its own timeout from its work**, the way the draw gate already derives itself from
+the world size:
+
+```
+timeout = SETUP_MS + units × budget_per_unit × RUNNER_SLACK
+```
+
+A draw test's unit is one rendered frame and its budget is `maxDrawMs`, the gate the test already
+asserts, so 8 × 60 × 1000 ms; the step test's unit is one snapshot load at `MAX_STEP_MEDIAN_MS`, so
+50 × 1000 ms. Deriving the budget from the gate keeps the property the old comment claimed — a run
+slow enough to breach a gate still reaches its assertion and fails on the gate, never on the clock.
+`SETUP_MS` is 30 s for the page load and the per-pair select switches, which are not measured frames.
+`RUNNER_SLACK` is 1.25: on identical scene weight the CI runner measured 10–20% slower than this
+machine (CI draw medians 155.8–246.2 ms against 160.2–214.8 ms locally, runs 35493848837 and the
+local `perf.json` of the same day), and the alarm below should fire on scene weight, not on which
+machine ran it. The budgets come out at **630 s** for each draw test and **92.5 s** for the step test.
+
+**Measured cost against those budgets**, on `runs/s42` at G4b's weight (1541 trees), win32-x64 with
+SwiftShader:
+
+| test | measured | budget | margin | half-budget alarm |
+| --- | --- | --- | --- | --- |
+| `draw/iso` | 140.7 s | 630 s | 4.5× | 315 s |
+| `draw/top` | 92.8 s | 630 s | 6.8× | 315 s |
+| `step` | 20.1 s | 92.5 s | 4.6× | 46.2 s |
+
+The thinnest margin is 4.5×, against the 3× the shot asks for.
+
+**A test that uses more than half its own budget fails by name.** `expectWithinHalfBudget` compares
+each test's elapsed wall clock with half its timeout and fails with the test's name, both numbers and
+what to do. The next scene-weight increase therefore reports its cause instead of the bare
+`Test timeout of 300000ms exceeded` that G4b got. At today's weight `draw/iso` would have to slow by
+2.2× to trip it, which is more than shot E3's roughly 47% extra geometry and more than a heavier run
+is likely to add in one step.
+
+**`perf/perf.json` keeps its exact shape**, so its numbers stay comparable across shots: same keys,
+same order, `draw` still holding all 16 `overlay/cam` entries with `iso` first. Each test writes its
+own measurements to `perf/parts/<name>.json` and a `test.afterAll` hook merges them. The merge is in
+`afterAll` and not in a fourth test because a hook runs even when a test fails, and CI's
+`upload-artifact` step for `ecoview-perf` is `if-no-files-found: error` — a gate failure must still
+leave the file behind, as it did before the split. `beforeAll` removes stale shards so a previous
+run's numbers cannot leak into this one.
+
+**The step loop no longer skips when the draw matrix is slow.** In the single test, `slow()` also
+short-circuited the step measurement; as its own test it has its own gate and its own 92.5 s budget,
+so a slow draw matrix no longer hides the step number. Within a draw test the early break is
+unchanged: the first pair over the gate ends the measurement there.
+
+**The references were re-accepted, and not because of this shot.** `npm run shot:check` is one of shot
+E2's acceptance commands and it exited 1 when the shot started: ecosim shot G4b is on the branch, the
+ecoview CI job regenerates `runs/s42` and `runs/capitol-s42` from whatever ecosim is there, and the
+calibration moved 15 of the 17 reference screenshots. Nothing went red in CI, because `shot:check` is
+skipped on the Linux runner (the references are Windows), so the drift sat unrecorded. E2 itself is
+pixel-inert: with `perf.spec.ts` and this file reverted to `0190df9`, `npm run shot` produced all 17 PNGs
+byte-identical to the accepted ones. `shots/REACCEPT-E2.md` has every row with its old and new image, its
+diff split between `#view` and the sidebar, and why the change is correct, as MASTER's re-accept rule
+requires. Two findings for the operator are recorded there: fire came back under G4b (37 ignitions in
+20000 ticks against shot E1's 8), so shot 09's tick 17100 is no longer the run's best fire tick, and the
+Capitol run's `fertility_mean` ends at 222.85, over the 220 ceiling the operator flagged before G4.

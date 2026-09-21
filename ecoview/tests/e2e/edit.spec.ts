@@ -297,8 +297,13 @@ test.describe('edit mode on a world bundle', () => {
     expect(files.get('capitol-edit-1-trees.json')!.equals(await fixtureFile(request, 'trees.json'))).toBe(true);
   });
 
+  // The two first-person tests that follow both drive the editor's pick path, and a two-to-three-minute
+  // cost lands on one of them and not reliably the same one. Across CI runs 35585550769, 35587962014 and
+  // 35599849884 this one measured 12.8, 19.7 and 192.0 s while 'picks the block under the crosshair'
+  // measured 84.0, 168.0 and 37.5 s, with every other test in the suite moving by about 1.2x. So both
+  // carry test.slow(): the block's 180 s is not enough for whichever one draws the long straw.
   test('places and removes one cube with every hotbar slot, back to the bundle it loaded', async ({ page, request }) => {
-    test.slow(); // seventeen ops and a save: about two minutes here, and CI's runner is slower
+    test.slow(); // 12.8, 19.7 then 192.0 s -- it needs the whole 540 s on the run where it is the slow one
     const errors = trackErrors(page);
     await open(page, url({ cam: 'iso', edit: 1, slot: 'ground', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
     const i = at(LAWN);
@@ -329,6 +334,7 @@ test.describe('edit mode on a world bundle', () => {
   });
 
   test('picks the block under the crosshair with the middle button', async ({ page }) => {
+    test.slow(); // 84.0, 168.0 then 37.5 s -- 168.0 is 93% of the block's 180 s, and it hit it exactly once
     const errors = trackErrors(page);
     await open(page, url({ cam: 'iso', edit: 1, slot: 'ground', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
     const slots = page.locator('#hotbar .slot');

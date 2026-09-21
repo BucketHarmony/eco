@@ -29,8 +29,8 @@ jobs:
   # and a filter keyed naively on the changed directory would be wrong:
   #
   #     a change to        must run
-  #     ecosim/            ecosim, ecosim-coverage, ecosim-sims, ecosim-bench AND ecoview
-  #     ecoview/           ecoview
+  #     ecosim/            ecosim, ecosim-coverage, ecosim-sims, ecosim-bench AND the two ecoview jobs
+  #     ecoview/           ecoview, ecoview-film
   #     ecoview-native/    ecoview-native
   #     anything else      everything
   #
@@ -39,11 +39,14 @@ jobs:
   # it, and when a fourth component appears, work out which way the arrow points before adding
   # a case below.
   #
-  # THE FULL RUN IS THE DEFAULT. A push that says nothing runs all eight jobs; the narrow run is
+  # THE FULL RUN IS THE DEFAULT. A push that says nothing runs every job; the narrow run is
   # opted into by putting `[ci-narrow]` in the head commit's message. A worker who forgets the
   # marker gets complete coverage rather than partial coverage. Never invert this, and never
   # declare a shot Done on a narrow run: the push that closes a shot carries no marker and runs
-  # all eight (overnight/MASTER.md, "GitHub CI"; overnight/shots/C1-ci-scope.md).
+  # them all (overnight/MASTER.md, "GitHub CI"; overnight/shots/C1-ci-scope.md).
+  # The count is deliberately not written down here: it was "eight" until shot C2 split the films
+  # off `ecoview`, and a number in a comment is a number that goes stale. There are eight job
+  # definitions below and `ecosim-sims` is a matrix of three, so a full run reports ten checks.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -73,7 +76,7 @@ jobs:
           # ends here, running everything. Unknown input must cost time, never coverage.
           everything() {
             printf 'ecosim=true\necoview=true\nnative=true\n' >> "$GITHUB_OUTPUT"
-            echo "FULL RUN, all eight jobs: $1"
+            echo "FULL RUN, every job: $1"
             exit 0
           }
           [ "$EVENT" = push ] || everything "the event is $EVENT, not a push"
@@ -302,10 +305,14 @@ jobs:
           if-no-files-found: error
 
   # ecoview gate: build the two runs it renders (the seed-42 strip at format 3, and the Capitol world
-  # bundle at format 4 for shots 12-15), then build, unit + scenario tests, screenshots and the s42
-  # films (single-view and 2x2 tiled).
+  # bundle at format 4 for shots 12-15), then build, unit + scenario tests and screenshots.
   # shot:check compares the fresh screenshots with the committed references region by region, and runs
   # on this Linux runner even though the references were rendered on Windows (ecoview/DECISIONS.md, E5).
+  #
+  # THE TWO FILMS RUN IN `ecoview-film`, NOT HERE (shot C2). They took 8.1 of this job's worst measured
+  # 24.9 minutes and assert nothing the steps below assert, so they sit on their own runner instead of
+  # on the front of everything else's queue. They are still a gate: that job is not optional and its
+  # `film-check.mjs` comparisons are unchanged (.github/DECISIONS.md, shot C2).
   ecoview:
     runs-on: ubuntu-latest
     needs: changes
@@ -317,6 +324,15 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+
+      # Which machine drew the pictures. This job's wall clock swings about 1.65x run to run on an
+      # unchanged suite, and shot C2 measured that the swing is the runner rather than any one test,
+      # so the next person reading a slow log should not have to do that archaeology again.
+      - name: which runner
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo || true
+          free -g | head -2
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -380,11 +396,78 @@ jobs:
       - name: shot:check
         run: node scripts/shot-ref.mjs check
 
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ecoview-shots
+          path: |
+            ecoview/shots/*.png
+            ecoview/shots/diff/*.png
+          if-no-files-found: ignore
+
+  # The two s42 films, split off `ecoview` by shot C2 so they run beside it instead of after it.
+  # Measured on the slowest of five runs (35587962014): film 2.2 min and tiled film 5.9 min, 8.1 of
+  # that job's 24.9 -- a third of a job that was at 83% of its own timeout. Nothing here asserts
+  # anything `ecoview` asserts, and nothing there depends on a film, so the two are independent work
+  # queued behind one runner for no reason.
+  #
+  # This is a gate, not a measurement. `film-check.mjs` compares frame 100 of each film with
+  # shots/reference/02 cropped to #view (shots E5 and 29), and a red here is a red run. It repeats
+  # `ecoview`'s data step verbatim -- the films render the same two runs -- and shares its cargo cache
+  # key so the ecosim build stays warm.
+  ecoview-film:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.ecoview == 'true'
+    # 8.1 min of films and about 2 of setup on the slowest runner measured, so this is 2x headroom.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ecoview
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ecosim/target
+          key: ${{ runner.os }}-ecoview-cargo-${{ hashFiles('ecosim/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-ecoview-cargo-
+
+      # Identical to the `ecoview` job's data step; see the comments there for the two --set pins.
+      - name: run s42, run the Capitol and sync
+        run: |
+          cd ../ecosim
+          rm -f target/release/ecosim
+          cargo build --release
+          ./target/release/ecosim run --seed 42 --ticks 20000 --out runs/s42 --snapshot-every 100 --set hydro.enabled=false
+          ./target/release/ecosim run --world worlds/capitol --seed 42 --ticks 20000 --out runs/capitol-s42 --snapshot-every 1000 --set animals.enabled=false --set climate.rain_gradient=0 --set hydro.enabled=false
+          cd ..
+          bash scripts/sync-data.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ecoview/package-lock.json
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       # The film check compares frame 100 with shots/reference/02, cropped to #view, on every platform (shot E5).
       - name: film
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          npm run film:check
+        run: npm run film:check
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -403,15 +486,6 @@ jobs:
           name: ecoview-film-tiled
           path: ecoview/film/s42-tiled.mp4
           if-no-files-found: error
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ecoview-shots
-          path: |
-            ecoview/shots/*.png
-            ecoview/shots/diff/*.png
-          if-no-files-found: ignore
 
   # ecoview-native (shot V0): the Bevy spike's CI half. This job is independent -- its only `needs`
   # is `changes`, which decides whether it runs and asserts nothing, so nothing above waits on its

@@ -98,3 +98,94 @@ against 17.9, one job instead of eight, which is exactly the V0a case that promp
 No gate was weakened, removed or made conditional in a way that lets a shot pass without it. The
 coverage floor is still 85%, `MAX_DIFF` is still 0.02, no test is skipped, and the eight jobs keep
 their names. This changes *when* jobs run, never *what they assert*.
+
+## C2: the `ecoview` job's wall clock, and where its variance actually comes from
+
+The row this shot came from measured the job at 17.8, 24.2, 24.5 and then **24 min 57 s** against its
+own 30-minute timeout — 83% — with one outright failure in between: `edit.spec.ts:331` timed out at
+3.0 min and the browser context died with it, and the same test passed in 2.8 min on a re-run of an
+identical tree. It told this shot to measure before cutting, "because a suite whose slowest test swings
+2x is not a suite whose timeout is the problem".
+
+### The measurement: the suite did not get slower, the runner did
+
+Two green runs of the same job, the slow one (35587962014, 24.9 min) and the fast one (35574305358,
+16.3 min), with their per-test durations taken from the `list` reporter's own output. 49 tests are
+common to both.
+
+| | slow run | fast run | ratio |
+|---|---|---|---|
+| all 49 common tests | 876.7 s | 529.9 s | **1.65** |
+| `perf.spec.ts:92` draw rate, cam=iso | 198 s | 120 s | 1.65 |
+| `perf.spec.ts:92` draw rate, cam=top | 132 s | 78 s | 1.69 |
+| `edit.spec.ts:331` pick the block under the crosshair | 168 s | 84 s | **2.00** |
+| `sim.spec.ts:81` R runs the simulator on the edits | 54.7 s | 34.1 s | 1.60 |
+| `edit.spec.ts:241` saves a bundle byte for byte | 46.0 s | 29.6 s | 1.55 |
+| `film.spec.ts:36` 10-frame tiled set is byte-identical | 33.7 s | 23.7 s | 1.42 |
+
+Every test in the suite is between 1.42x and 2.00x slower on the slow run, and the whole-job steps move
+with them: step 9 542 → 886 s, film 89 → 130, tiled film 243 → 354, screenshots 19 → 26. **A uniform
+factor across independent steps is a slower machine, not a slower test.** GitHub's hosted runners vary
+in CPU, and everything in this job renders through SwiftShader on that CPU.
+
+So the row's headline fact — one test swinging 1.4, 2.2, 2.8 minutes and then timing out — is that same
+1.65x acting on a test that had nowhere to go. It is not flakiness in the test's own logic.
+
+### What was cut: the two films now run beside the job instead of inside it
+
+New job `ecoview-film` runs `film:check` and `film:tiled:check` on its own runner. On the slow run those
+two steps were 2.2 and 5.9 minutes, **8.1 of that job's 24.9**, and they assert nothing the rest of the
+job asserts: no test depends on a film and no film depends on a test. The predicted worst case for
+`ecoview` is therefore **16.9 min, 56% of its timeout**, with the films finishing around 10 on a runner
+of their own.
+
+They are still a gate. `film-check.mjs` compares frame 100 of each film against `shots/reference/02`
+cropped to `#view`, exactly as before, and a red in the new job is a red run. Nothing was skipped,
+shortened or made `continue-on-error`. The job duplicates `ecoview`'s data step verbatim (about 40 s:
+the two 20000-tick runs and `sync-data.sh`) and shares its cargo cache key, which is the price of the
+split and is paid on a second runner rather than on the critical path.
+
+### What was not done: `workers` stays 1
+
+A second Playwright worker was the row's own first suspect, and the measurement above argues against
+it. Contention would slow every test, and `edit.spec.ts:331` measured **168 s of a 180 s budget** on the
+slow runner — 93%, with 7% of headroom. Buying throughput by making each test slower is the one trade
+this job cannot afford until that budget is fixed, and the fix is inside a frozen component.
+
+### What was done instead: one retry on CI
+
+`retries: process.env.CI ? 1 : 0` in `ecoview/playwright.config.ts`. A runner 7% slower than the slowest
+one measured reddens a shot that changed nothing, which is precisely what happened on 35585550769. The
+retry turns that into a slower green run, and Playwright prints the test as flaky, so it stays visible
+rather than silent. It costs nothing when nothing fails.
+
+This is a mitigation and is written down as one. It is **not** a widened gate: no assertion, tolerance
+or floor moved, and a test that fails twice still fails.
+
+### Handed up, because it is inside a frozen component
+
+`ecoview` is frozen for features, and its *test bodies* are out of this shot's scope. Two things in them
+are wrong and want a row of their own:
+
+1. **`edit.spec.ts:331` has no slack.** Its budget is the 180 s from `test.describe.configure` at line 92
+   — the config's `timeout: 60_000` never applies in that file — and it measured 168 s. It is the one
+   test in the suite that cannot absorb the runners' ordinary variance.
+2. **`test.slow()` is on the wrong test.** It sits at line 301, inside `edit.spec.ts:300`, which measures
+   **19.7 s** against the 540 s that marker gives it — 3.6% — while the 168 s test next to it has none.
+   Its comment says "about two minutes here"; the test it is attached to takes twenty seconds.
+
+Moving that one marker is a two-line change that would give the failing test 540 s instead of 180, and
+it is the actual fix for the intermittent red. A config shot may not make it.
+
+### Also true, and left alone deliberately
+
+`perf.spec.ts:92` is 5.5 min of the remaining 14.8-minute test step, and its own JSON reports
+`timeout_ms: 630000` — a 10.5-minute ceiling on a 3.3-minute measurement. It is not near its ceiling and
+it is not this shot's problem; it is a measurement that costs what it costs, and cutting it would be an
+ecoview decision about what to measure, not a CI decision about where to run it.
+
+### A runner-identity step
+
+`ecoview` now prints `nproc`, the CPU model and the memory before it does anything. The evidence above
+took an hour of log archaeology across five runs; the next person gets it in the first ten lines of a
+slow job's log.

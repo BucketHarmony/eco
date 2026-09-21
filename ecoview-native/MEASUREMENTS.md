@@ -1,8 +1,8 @@
 # ecoview-native V0: the measurements
 
-Every number below was taken on the machine this repo builds on: Windows 11, Ryzen (24 logical cores),
-RTX 4090, Vulkan, `cargo build --release` unless the line says otherwise. Two worlds are measured
-throughout:
+Every number below was taken on the machine this repo builds on: Windows 11, a 12th Gen Intel Core
+i9-12900KF (16 cores, 24 threads), RTX 4090, Vulkan, `cargo build --release` unless the line says
+otherwise. Two worlds are measured throughout:
 
 - **Capitol** — the committed bundle `ecosim/worlds/capitol/`, 512×512 ground cells at **0.5 m**.
 - **Stress** — synthetic, 512×512 at **0.25 m** with noise terrain, 200 buildings and 200 trees. The

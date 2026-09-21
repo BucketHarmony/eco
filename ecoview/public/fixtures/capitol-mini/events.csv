@@ -1,3 +1,30 @@
 tick,kind,species,patch_x,patch_y,x,y,cause,detail
-78,storm,,0,0,,,,0.4779 0.1354 0.0010
-100,germination,tree,2,4,22,37,,79
+50,germination,tree,6,4,51,35,,79
+50,germination,tree,11,4,88,38,,80
+50,germination,tree,23,4,186,39,,81
+50,germination,tree,13,4,107,38,,82
+50,germination,tree,23,6,188,50,,83
+50,germination,tree,21,8,169,69,,84
+50,germination,tree,29,13,233,104,,85
+50,germination,tree,29,20,234,163,,86
+50,germination,tree,27,23,217,184,,87
+50,germination,tree,28,26,226,214,,88
+50,germination,tree,23,31,188,251,,89
+50,germination,tree,21,31,168,254,,90
+78,storm,,0,0,,,,6.9960 2.3623 0.6600
+79,storm,,0,0,,,,9.3744 3.3806 1.7963
+100,germination,tree,6,3,51,29,,91
+100,germination,tree,13,5,108,45,,92
+100,germination,tree,19,7,158,56,,93
+100,germination,tree,15,6,122,49,,94
+100,germination,tree,27,17,219,142,,95
+100,germination,tree,28,21,224,175,,96
+100,germination,tree,12,23,102,187,,97
+100,germination,tree,24,25,199,200,,98
+100,germination,tree,3,27,24,219,,99
+100,germination,tree,25,26,201,215,,100
+100,germination,tree,27,27,219,221,,101
+100,germination,tree,11,27,88,220,,102
+100,germination,tree,18,27,145,219,,103
+100,germination,tree,12,27,103,219,,104
+100,germination,tree,18,31,148,250,,105

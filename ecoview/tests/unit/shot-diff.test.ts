@@ -126,6 +126,25 @@ describe('compareRegions', () => {
     expect(marked(view.width, VIEWPORT.width)).toBe(by(result, 'sidebar').px);
   });
 
+  it('measures an ungated shot without failing on it, on either platform', () => {
+    // The nine pictures of the simulation (scripts/shots.mjs, shot E6): still compared, still reported
+    // with their percentages, never a red job.
+    const cur = smear(page(PAGE), 'view', MAX_DIFF * 5);
+    for (const samePlatform of [true, false]) {
+      const shown = compareRegions(page(PAGE), cur, { samePlatform, gated: false });
+      expect(shown.ok).toBe(true);
+      expect(shown.regions.every((r: RegionResult) => !r.gated)).toBe(true);
+      expect(by(shown, 'view').frac).toBeGreaterThan(MAX_DIFF);
+      expect(by(shown, 'view').px).toBe(by(compareRegions(page(PAGE), cur, { samePlatform, gated: true }), 'view').px);
+    }
+  });
+
+  it('gates by default, so a caller that names no gate keeps the old behaviour', () => {
+    const cur = smear(page(PAGE), 'view', MAX_DIFF * 2);
+    expect(compareRegions(page(PAGE), cur, { samePlatform: true }).ok).toBe(false);
+    expect(compareRegions(page(PAGE), cur, { samePlatform: true, gated: true }).ok).toBe(false);
+  });
+
   it('throws on a size mismatch instead of comparing', () => {
     const small = { width: 640, height: 400, data: Buffer.alloc(640 * 400 * 4) };
     expect(() => compareRegions(page([0, 0, 0]), small, { samePlatform: true })).toThrow(/size 640x400/);

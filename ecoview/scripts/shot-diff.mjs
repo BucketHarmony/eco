@@ -9,7 +9,8 @@
 //
 // Each region's gate is the same 2% of the *screenshot* the flat whole-image check used, not 2% of
 // the region, so no existing tolerance moves: a difference inside one region fails at exactly the
-// pixel count it failed at before.
+// pixel count it failed at before. Shot E6 added a second, coarser switch on top of it -- whether
+// the shot is gated at all -- and moved no tolerance either.
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
 import { VIEWPORT } from './chromium.mjs';
@@ -37,13 +38,17 @@ export const REGIONS = [
 
 /**
  * Compares two decoded screenshots region by region. With `samePlatform` false the regions that
- * carry platform-dependent text are still measured, but a difference there doesn't fail.
+ * carry platform-dependent text are still measured, but a difference there doesn't fail; with
+ * `gated` false no region of this screenshot fails, which is how the nine pictures of the
+ * simulation are measured and reported without gating a frozen viewer on a moving simulator
+ * (shot E6, scripts/shots.mjs). Gating is per shot and per region, and a shot has to be gated for
+ * either to bite.
  * Each result carries `frac`, the differing share of the whole screenshot, which is what the gate
  * reads, and `regionFrac`, the differing share of the region itself, which is what reads clearly in
  * a report. Returns those results and a full-size diff image made of the regions' diffs.
  * Throws if the two images are different sizes.
  */
-export function compareRegions(ref, cur, { samePlatform }) {
+export function compareRegions(ref, cur, { samePlatform, gated: shotGated = true }) {
   if (ref.width !== cur.width || ref.height !== cur.height) {
     throw new Error(`size ${cur.width}x${cur.height}, reference ${ref.width}x${ref.height}`);
   }
@@ -55,7 +60,7 @@ export function compareRegions(ref, cur, { samePlatform }) {
     const d = new PNG({ width: r.width, height: r.height });
     const px = pixelmatch(a.data, b.data, d.data, r.width, r.height, { threshold: THRESHOLD });
     pastePng(diff, d, r);
-    const gated = r.crossPlatform || samePlatform;
+    const gated = shotGated && (r.crossPlatform || samePlatform);
     const frac = px / page;
     return { name: r.name, px, frac, regionFrac: px / (r.width * r.height), gated, ok: !gated || frac <= MAX_DIFF };
   });

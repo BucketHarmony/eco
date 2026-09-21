@@ -472,14 +472,14 @@ jobs:
         continue-on-error: true
         run: cargo build --release
 
-      # This was ten screenshots; shot C1 cut it to one. It is a measurement, never a gate, and the
-      # measurement has already been made: shot V0 ran ten of them on lavapipe -- 10/10, 136-142 s
-      # each, every PNG 811,550 bytes -- and shot V0a reproduced it. Those numbers are in
-      # MEASUREMENTS.md, and repeating them cost about 40 minutes of every run that reached this
-      # component, the largest single time sink in this pipeline. What is left is a smoke check: the
-      # headless software-rendered path still produces a picture off Windows. A screenshot that stops
-      # working still shows up here; a *timing* regression no longer does, and that is the trade
-      # (.github/DECISIONS.md, shot C1).
+      # This was ten screenshots; shot C1 cut it to one. It is a measurement, never a gate, and it
+      # has been made: V0 ran ten on lavapipe and recorded 10/10 in MEASUREMENTS.md. Ten of them cost
+      # 43m 41s of a 52m 46s run, the largest single time sink in this pipeline, and nobody was
+      # reading the repetition -- MEASUREMENTS.md still says 136-142 s and 811,550 bytes, while the
+      # last ten-run pass (b48e7bd) measured 259-267 s and 815,129 bytes every time. What is left is
+      # a smoke check: the headless software-rendered path still produces a picture off Windows. A
+      # screenshot that stops working still shows up here; variance no longer does, and that is the
+      # trade (.github/DECISIONS.md, shot C1).
       - name: one headless screenshot on lavapipe (smoke check)
         continue-on-error: true
         env:

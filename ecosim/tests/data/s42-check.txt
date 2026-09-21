@@ -5,6 +5,7 @@ PASS moisture_mean above the wilting point every tick, below field capacity on >
 PASS fertility_mean in [40, 220]: [78.59, 114.10]
 PASS grass_mean in [0.05, 0.95]: [0.2441, 0.8752]
 PASS trees at end >= 1.5x trees at tick 0: 1123 vs 12 (need 18.0)
-PASS run time < 30 s per 64x64, at most 90 s: 79155 ms
+PASS run time < 30 s per 64x64, at most 90 s: 41744 ms
 PASS mature trees at 2.5 years >= 35: 503
 PASS at 2.5 years grazers >= 10 and hunters >= 2: grazers=3039 hunters=103
+PASS no tree on a roof or on more than half its ground cells sealed, >= 80% on none: n/a (no bundle ground grid)

@@ -173,8 +173,14 @@ pub fn run_cell(params_text: &str, overrides: &[String], seed: u64, ticks: u32) 
     let hunter_extinction = rows.iter().find(|r| r.hunters == 0).map(|r| r.tick);
     let hunter_immigrants = rows[last].hunter_immigrants;
     let signature = signature(&rows, year_len, animals);
-    let report =
-        evaluate(&Series { rows, mature_at_10000: mature.map(Ok), timing: Timing::Excluded, animals, year_len })?;
+    let report = evaluate(&Series {
+        rows,
+        mature_at_10000: mature.map(Ok),
+        timing: Timing::Excluded,
+        animals,
+        year_len,
+        footing: None,
+    })?;
     Ok(CellResult {
         csv,
         report,

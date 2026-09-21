@@ -2,6 +2,7 @@
 //! themselves live in [`evaluate`], which `check` and `sweep` share.
 
 use crate::animals::{Cause, CAUSES};
+use crate::bundle::{Ground, Medium, ECO_CELL_M};
 use crate::events::{deaths_per_tick, parse_events, EVENTS_FILE};
 use crate::hydro::Water;
 use crate::output::{snapshot_dir_name, SERIES_FIELDS, SERIES_HEADER, TRAIT_FIELDS, WATER_FIELDS};
@@ -58,6 +59,11 @@ pub fn runtime_limit_ms(cols: u64) -> u64 {
 /// briefly fill every column, so the upper bound is a share of ticks while the wilting point is an
 /// every-tick bound.
 pub const MOISTURE_BELOW_CAPACITY: f64 = 0.95;
+
+/// Floor on the share of one snapshot's trees standing on no sealed ground cell (shot G11): the
+/// scale-free form of "the site is mostly lawn and the trees mostly stand on it". The Capitol's
+/// worst snapshot reads 89.26% (DECISIONS.md, shot G11).
+pub const TREE_OPEN_SHARE: f64 = 0.80;
 
 /// Number of fire columns `series.csv` gained in shot 9.
 const FIRE_FIELDS: usize = 2;
@@ -225,6 +231,49 @@ pub struct Series {
     pub timing: Timing,
     /// Whether the run placed grazers and hunters; false makes the animal invariants n/a.
     pub animals: bool,
+    /// Where the run's trees have their feet, over every snapshot; `None` when the run has no
+    /// bundle ground grid, which makes the footing invariant n/a.
+    pub footing: Option<Result<Footing, String>>,
+}
+
+/// How much sealed ground the run's trees stand on (shot G11). A tree occupies one 1 m ecology
+/// column spanning `ratio²` ground cells — four at the Capitol's 0.5 m grid — and one or two sealed
+/// cells is a trunk beside a walk, not a tree on the walk. Summed over every snapshot, so a tree
+/// that germinates on a roof and dies before the end is still seen.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Footing {
+    /// Snapshots examined.
+    pub snapshots: usize,
+    /// Tree sightings: one per living tree per snapshot.
+    pub trees: usize,
+    /// Sightings by how many of the column's cells are sealed ([`Medium::is_sealed`]); index 0 is a
+    /// tree on none, and the length is `ratio² + 1`.
+    pub per_sealed: Vec<usize>,
+    /// Sealed cells under a tree that are [`Medium::Roof`], over every sighting.
+    pub roof_cells: usize,
+    /// The first sighting that broke the rule: tick, position, sealed cells, roof cells.
+    pub first_bad: Option<(u32, f32, f32, usize, usize)>,
+    /// The snapshot with the smallest share of trees on no sealed cell: tick, share, trees. Per
+    /// snapshot rather than over every sighting, because a run ends with most of its trees and an
+    /// aggregate hides a tighter snapshot in the middle (DECISIONS.md, shot G11).
+    pub worst_open: Option<(u32, f64, usize)>,
+}
+
+impl Footing {
+    /// Ground cells under one column, from the histogram's length.
+    fn cells_per_column(&self) -> usize {
+        self.per_sealed.len().saturating_sub(1)
+    }
+
+    /// Sightings with more than half the column's cells sealed: three or four of four.
+    pub fn mostly_sealed(&self) -> usize {
+        self.per_sealed.iter().skip(self.cells_per_column() / 2 + 1).sum()
+    }
+
+    /// Smallest share of one snapshot's trees on no sealed cell; 1.0 when no snapshot held a tree.
+    pub fn open_share(&self) -> f64 {
+        self.worst_open.map_or(1.0, |(_, share, _)| share)
+    }
 }
 
 /// Where the runtime invariant gets its wall time.
@@ -249,7 +298,8 @@ impl Series {
             Some(ms) => Timing::Ms(ms, runtime_limit_ms(meta_cols(run_dir))),
             None => Timing::Missing,
         };
-        Ok(Series { rows, mature_at_10000, timing, animals: run_has_animals(run_dir), year_len })
+        let footing = tree_footing(run_dir);
+        Ok(Series { rows, mature_at_10000, timing, animals: run_has_animals(run_dir), year_len, footing })
     }
 }
 
@@ -341,8 +391,9 @@ impl CheckReport {
 }
 
 /// Every invariant key in report order. `run_length` and `tick_10000` only appear for short runs,
-/// and `runtime` only when timing is evaluated.
-pub const INVARIANT_KEYS: [&str; 12] = [
+/// and `runtime` only when timing is evaluated. New keys are appended, so a sweep CSV's invariant
+/// columns keep their order (shot G11).
+pub const INVARIANT_KEYS: [&str; 13] = [
     "run_length",
     "no_extinction",
     "max_10x",
@@ -355,6 +406,7 @@ pub const INVARIANT_KEYS: [&str; 12] = [
     "tick_10000",
     "mature_trees_10k",
     "animals_10k",
+    "tree_footing",
 ];
 
 /// Margin for "value ≥ threshold".
@@ -393,7 +445,12 @@ impl Builder {
 
     /// An invariant that does not apply because the run has no animals.
     fn push_na(&mut self, key: &'static str, name: &'static str) {
-        let observed = format!("n/a ({NA_REASON})");
+        self.push_na_because(key, name, NA_REASON);
+    }
+
+    /// An invariant that does not apply to this run, for the reason given.
+    fn push_na_because(&mut self, key: &'static str, name: &'static str, reason: &str) {
+        let observed = format!("n/a ({reason})");
         self.0.push(CheckLine {
             key,
             name,
@@ -416,6 +473,115 @@ pub const ANIMAL_ONLY_KEYS: [&str; 2] = ["grazer_cycle", "animals_10k"];
 
 /// The `check --long` invariants that do not apply to an animals-off run.
 pub const ANIMAL_ONLY_LONG_KEYS: [&str; 1] = ["long_band"];
+
+/// Why the footing invariant is reported as not applicable.
+pub const NA_REASON_NO_GROUND: &str = "no bundle ground grid";
+
+/// The invariants that only a run on a world bundle has: a noise world's ground grid is all soil,
+/// so no tree can stand on sealed ground and the question is empty (shot G11).
+pub const BUNDLE_ONLY_KEYS: [&str; 1] = ["tree_footing"];
+
+/// A tree in a snapshot's `entities.json`, reduced to the three fields the footing needs.
+#[derive(serde::Deserialize)]
+struct FootingEntity {
+    kind: String,
+    x: f32,
+    y: f32,
+}
+
+/// The run's bundle ground grid, or `None` when it has none the invariant can use: a format-3 run
+/// has no `world/` at all, and a noise world's grid is the all-soil one its ecology columns mirror,
+/// in which nothing is sealed and the question is empty (`meta.json`'s `world.bundle`).
+fn bundle_ground(run_dir: &Path, meta: &serde_json::Value) -> Option<Result<Ground, String>> {
+    let w = &meta["world"];
+    if w["bundle"].as_bool() != Some(true) {
+        return None;
+    }
+    Some((|| {
+        let path = run_dir.join("world").join("medium.bin");
+        let medium = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let size = |k: &str| w[k].as_u64().ok_or(format!("meta.json: world.{k} missing")).map(|v| v as usize);
+        let (width, depth) = (size("ground_width")?, size("ground_depth")?);
+        let cell_m = w["ground_cell_m"].as_f64().ok_or("meta.json: world.ground_cell_m missing")?;
+        let ratio = (f64::from(ECO_CELL_M) / cell_m).round() as usize;
+        if cell_m <= 0.0 || ratio == 0 {
+            return Err(format!("meta.json: world.ground_cell_m {cell_m} is not a fraction of a 1 m column"));
+        }
+        let names = w["media"].as_array().ok_or("meta.json: world.media missing")?;
+        let media = names
+            .iter()
+            .map(|n| {
+                let name = n.as_str().unwrap_or_default();
+                Medium::from_name(name).ok_or(format!("meta.json: world.media has unknown medium {name:?}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if medium.len() != width * depth {
+            return Err(format!("{}: {} bytes for a {width}x{depth} grid", path.display(), medium.len()));
+        }
+        if medium.iter().any(|&c| c as usize >= media.len()) {
+            return Err(format!("{}: a medium code is past the {} world.media lists", path.display(), media.len()));
+        }
+        Ok(Ground { width, depth, ratio, medium, media })
+    })())
+}
+
+/// Add every tree in one snapshot to `f`. Positions are in ecology-grid metres, so a tree stands in
+/// column `(floor x, floor y)` and its ground cells are that column's ([`Ground::cells_of`], the
+/// simulator's own mapping rather than a second copy of it).
+fn add_footing(f: &mut Footing, ground: &Ground, tick: u32, trees: &[(f32, f32)]) -> Result<(), String> {
+    let per = ground.cells_per_column();
+    let (cols_x, cols_y) = (ground.width / ground.ratio, ground.depth / ground.ratio);
+    if f.per_sealed.is_empty() {
+        f.per_sealed = vec![0; per + 1];
+    }
+    f.snapshots += 1;
+    let mut open = 0usize;
+    for &(x, y) in trees {
+        let (cx, cy) = (x.floor(), y.floor());
+        if cx < 0.0 || cy < 0.0 || cx as usize >= cols_x || cy as usize >= cols_y {
+            return Err(format!("snapshot {tick}: tree at ({x}, {y}) is outside the ground grid"));
+        }
+        let (sealed, roofs) = ground.cells_of(cx as usize, cy as usize).fold((0, 0), |(s, r), i| {
+            let m = ground.medium_at(i);
+            (s + usize::from(m.is_sealed()), r + usize::from(m == Medium::Roof))
+        });
+        f.trees += 1;
+        f.per_sealed[sealed] += 1;
+        f.roof_cells += roofs;
+        open += usize::from(sealed == 0);
+        if (roofs > 0 || sealed > per / 2) && f.first_bad.is_none() {
+            f.first_bad = Some((tick, x, y, sealed, roofs));
+        }
+    }
+    let share = open as f64 / trees.len().max(1) as f64;
+    if !trees.is_empty() && f.worst_open.is_none_or(|(_, worst, _)| share < worst) {
+        f.worst_open = Some((tick, share, trees.len()));
+    }
+    Ok(())
+}
+
+/// Every tree of every snapshot against the run's bundle ground grid; `None` when it has none, which
+/// makes the footing invariant not applicable.
+fn tree_footing(run_dir: &Path) -> Option<Result<Footing, String>> {
+    let meta = meta_json(run_dir);
+    let ground = match bundle_ground(run_dir, &meta)? {
+        Ok(g) => g,
+        Err(e) => return Some(Err(e)),
+    };
+    Some((|| {
+        let ticks = meta["snapshots"].as_array().ok_or("meta.json: snapshots missing")?;
+        let mut f = Footing::default();
+        for tick in ticks.iter().filter_map(|t| t.as_u64()).map(|t| t as u32) {
+            let path = run_dir.join(snapshot_dir_name(tick)).join("entities.json");
+            let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let ents: Vec<FootingEntity> =
+                serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            let trees: Vec<(f32, f32)> = ents.iter().filter(|e| e.kind == "tree").map(|e| (e.x, e.y)).collect();
+            add_footing(&mut f, &ground, tick, &trees)?;
+        }
+        Ok(f)
+    })())
+}
 
 /// Mature-tree count in a snapshot's entities.json.
 fn mature_trees_at(run_dir: &Path, tick: u32) -> Result<usize, String> {
@@ -600,6 +766,43 @@ pub fn evaluate(series: &Series) -> Result<CheckReport, String> {
             format!("run shorter than {sample} ticks"),
             (last as f64, sample as f64, margin_at_least(last as f64, sample as f64)),
         ),
+    }
+
+    // Shot G11: no tree stands on sealed ground. Moved here from a Playwright test in `ecoview`
+    // that drove a browser to read `entities.json` and `world/medium.bin` and examined no pixel; it
+    // is an assertion about this component's output, so it is checked by this component's own
+    // command. A run with no bundle ground grid has no sealed cell to stand on and reports n/a.
+    let footing_name = "no tree on a roof or on more than half its ground cells sealed, >= 80% on none";
+    match &series.footing {
+        None => out.push_na_because("tree_footing", footing_name, NA_REASON_NO_GROUND),
+        Some(Err(e)) => out.push("tree_footing", footing_name, false, e.clone(), (f64::NAN, 0.0, -1.0)),
+        Some(Ok(f)) => {
+            let (roofs, mostly, open) = (f.roof_cells as f64, f.mostly_sealed() as f64, f.open_share());
+            let per = f.cells_per_column();
+            let bad = f.first_bad.map_or(String::new(), |(t, x, y, sealed, roofs)| {
+                format!("; first bad at tick {t}, tree ({x:.1}, {y:.1}) on {sealed} of {per} sealed, {roofs} roof")
+            });
+            let worst = f.worst_open.map_or(String::new(), |(t, _, n)| format!(" at tick {t} of {n} trees"));
+            out.push(
+                "tree_footing",
+                footing_name,
+                f.roof_cells == 0 && f.mostly_sealed() == 0 && open >= TREE_OPEN_SHARE,
+                format!(
+                    "{} sightings over {} snapshots: {} over half sealed, {} roof cells, per-tree sealed {:?}; worst snapshot {:.2}% on none{worst}{bad}",
+                    f.trees,
+                    f.snapshots,
+                    f.mostly_sealed(),
+                    f.roof_cells,
+                    f.per_sealed,
+                    100.0 * open,
+                ),
+                tightest([
+                    (roofs, 0.0, margin_at_most(roofs, 0.0)),
+                    (mostly, 0.0, margin_at_most(mostly, 0.0)),
+                    (open, TREE_OPEN_SHARE, margin_at_least(open, TREE_OPEN_SHARE)),
+                ]),
+            );
+        }
     }
     Ok(CheckReport { lines: out.0 })
 }
@@ -1302,7 +1505,14 @@ mod tests {
         let mut rows = rows_from(|t| 100 + (t % 3000 < 1500) as u32 * 50, 20001);
         rows[5000].fertility_mean = 210.0; // upper side: (220 − 210)/220 ≈ 0.045, tighter than (100 − 40)/40
         rows[6000].grass_mean = 0.04; // below the band: (0.04 − 0.05)/0.05 = −0.2
-        let s = Series { rows, mature_at_10000: Some(Ok(42)), timing: Timing::Excluded, animals: true, year_len: YEAR };
+        let s = Series {
+            rows,
+            mature_at_10000: Some(Ok(42)),
+            timing: Timing::Excluded,
+            animals: true,
+            year_len: YEAR,
+            footing: Some(Ok(healthy_footing())),
+        };
         let r = evaluate(&s).unwrap();
         assert!(r.get("runtime").is_none());
         let f = r.get("fertility_band").unwrap();
@@ -1313,7 +1523,7 @@ mod tests {
         assert!(m.pass && (m.margin - 7.0 / 35.0).abs() < 1e-12);
         let a = r.get("animals_10k").unwrap(); // hunters 5 vs 2 → 1.5; grazers ≥ 100 vs 10 → ≥ 9
         assert_eq!((a.value, a.threshold, a.margin), (5.0, 2.0, 1.5));
-        for l in &r.lines {
+        for l in r.lines.iter().filter(|l| !l.na) {
             assert_eq!(l.pass, l.margin >= 0.0, "{l:?}");
         }
     }
@@ -1386,11 +1596,25 @@ mod tests {
             timing: Timing::Ms(h.ms, RUNTIME_LIMIT_MS),
             animals: true,
             year_len: YEAR,
+            footing: Some(Ok(healthy_footing())),
+        }
+    }
+
+    /// A footing that passes: 1000 trees on four ground cells each, 900 of them on no sealed cell,
+    /// 60 on one and 40 on two, which is the shape the Capitol reference run has.
+    fn healthy_footing() -> Footing {
+        Footing {
+            snapshots: 1,
+            trees: 1000,
+            per_sealed: vec![900, 60, 40, 0, 0],
+            roof_cells: 0,
+            first_bad: None,
+            worst_open: Some((10_000, 0.9, 1000)),
         }
     }
 
     /// The invariants a violation may break: all but `tick_10000`, which needs a run under 10000 ticks.
-    const VIOLABLE: [&str; 11] = [
+    const VIOLABLE: [&str; 12] = [
         "run_length",
         "no_extinction",
         "max_10x",
@@ -1402,6 +1626,7 @@ mod tests {
         "runtime",
         "mature_trees_10k",
         "animals_10k",
+        "tree_footing",
     ];
 
     /// Break exactly one invariant at tick `t` (in [2001, 19999], never 5000 or 10000). `side` picks the band
@@ -1429,6 +1654,19 @@ mod tests {
             "runtime" => s.timing = Timing::Ms(30_000 + t as u64, RUNTIME_LIMIT_MS),
             "mature_trees_10k" => s.mature_at_10000 = Some(Ok(t % 35)),
             "animals_10k" => rows[10_000].hunters = 1,
+            // `side` picks which half of the footing rule breaks: a tree rooted on a roof cell, or
+            // one standing on three of its four cells sealed.
+            "tree_footing" => {
+                let f = s.footing.as_mut().unwrap().as_mut().unwrap();
+                if side {
+                    f.roof_cells = 1;
+                    f.first_bad = Some((t as u32, 1.5, 2.5, 4, 1));
+                } else {
+                    f.per_sealed[0] -= 1;
+                    f.per_sealed[3] += 1;
+                    f.first_bad = Some((t as u32, 1.5, 2.5, 3, 0));
+                }
+            }
             _ => unreachable!("{key}"),
         }
     }
@@ -1487,6 +1725,119 @@ mod tests {
     /// Keys failing in `evaluate_long` on these rows.
     fn failing_long(rows: &[StatsRow]) -> Vec<&'static str> {
         evaluate_long(rows, true, YEAR).unwrap().lines.iter().filter(|l| !l.pass).map(|l| l.key).collect()
+    }
+
+    /// A 4x4 ground grid at 0.5 m cells, so 2x2 ecology columns of four cells each: column (0, 0)
+    /// all lawn, (1, 0) all roof, (0, 1) half lawn and half asphalt, (1, 1) three concrete cells of
+    /// four.
+    fn test_ground() -> Ground {
+        let code = |m: Medium| Medium::ALL.iter().position(|&k| k == m).unwrap() as u8;
+        let (l, r, a, c) = (code(Medium::Lawn), code(Medium::Roof), code(Medium::Asphalt), code(Medium::Concrete));
+        Ground {
+            width: 4,
+            depth: 4,
+            ratio: 2,
+            // Row by row from the south-west corner.
+            medium: vec![l, l, r, r, l, l, r, r, l, a, c, c, l, a, c, l],
+            media: Medium::ALL.to_vec(),
+        }
+    }
+
+    /// The footing counts a tree by how many of its column's four ground cells are sealed, and a
+    /// tree on the roof column breaks the rule outright (shot G11).
+    #[test]
+    fn footing_counts_sealed_cells_under_each_tree() {
+        let g = test_ground();
+        let mut f = Footing::default();
+        // One tree per column, in column order: lawn, roof, half asphalt, three of four concrete.
+        add_footing(&mut f, &g, 100, &[(0.5, 0.5), (1.5, 0.2), (0.1, 1.9), (1.5, 1.5)]).unwrap();
+        assert_eq!(f.per_sealed, vec![1, 0, 1, 1, 1]);
+        assert_eq!((f.trees, f.snapshots, f.roof_cells), (4, 1, 4));
+        assert_eq!(f.mostly_sealed(), 2, "the roof column and the three-of-four concrete one");
+        assert_eq!(f.open_share(), 0.25);
+        assert_eq!(f.first_bad.map(|(t, _, _, sealed, roofs)| (t, sealed, roofs)), Some((100, 4, 4)));
+
+        // Two cells of four is a trunk beside a walk: legitimate, and the rule holds.
+        let mut ok = Footing::default();
+        add_footing(&mut ok, &g, 100, &[(0.5, 0.5), (0.3, 1.2), (0.9, 1.7), (0.0, 1.0)]).unwrap();
+        assert_eq!(ok.per_sealed, vec![1, 0, 3, 0, 0]);
+        assert_eq!((ok.mostly_sealed(), ok.roof_cells), (0, 0));
+        assert_eq!(ok.open_share(), 0.25);
+
+        // A tree outside the grid is an error, not a silent pass.
+        let mut off = Footing::default();
+        let e = add_footing(&mut off, &g, 300, &[(2.5, 0.5)]).unwrap_err();
+        assert!(e.contains("outside the ground grid"), "{e}");
+    }
+
+    /// The share floor is the worst snapshot's, not the whole run's: a run that ends with most of
+    /// its trees would otherwise dilute a tighter snapshot in the middle away.
+    #[test]
+    fn footing_share_floor_is_the_worst_snapshot() {
+        let g = test_ground();
+        let mut f = Footing::default();
+        // Tick 100: one tree of two on lawn. Tick 200: nineteen on lawn, one on asphalt.
+        add_footing(&mut f, &g, 100, &[(0.5, 0.5), (0.3, 1.2)]).unwrap();
+        let many: Vec<(f32, f32)> = (0..19).map(|_| (0.5, 0.5)).chain([(0.3, 1.2)]).collect();
+        add_footing(&mut f, &g, 200, &many).unwrap();
+        assert_eq!(f.worst_open.map(|(t, _, n)| (t, n)), Some((100, 2)));
+        assert_eq!(f.open_share(), 0.5);
+        assert!((f.per_sealed[0] as f64 / f.trees as f64 - 20.0 / 22.0).abs() < 1e-9, "the aggregate is higher");
+    }
+
+    /// Every side of the footing invariant, and the n/a a run without a bundle ground grid gets.
+    #[test]
+    fn footing_invariant_fails_each_way_and_is_na_without_a_ground_grid() {
+        let h = Healthy {
+            period: 3000.0,
+            base: 150.0,
+            amp: 50.0,
+            hunters: 10,
+            t0: 20,
+            grass: 0.5,
+            fertility: 100.0,
+            mature: 40,
+            ms: 9000,
+        };
+        let with = |f: Option<Result<Footing, String>>| {
+            let mut s = build(&h);
+            s.footing = f;
+            evaluate(&s).unwrap()
+        };
+        // A tree on all four cells sealed fails; the same tree on two passes.
+        let mut four = healthy_footing();
+        four.per_sealed = vec![900, 60, 39, 0, 1];
+        assert_eq!(failing(&with_footing(&h, four)), ["tree_footing"]);
+        let mut two = healthy_footing();
+        two.per_sealed = vec![900, 60, 40, 0, 0];
+        assert!(failing(&with_footing(&h, two)).is_empty());
+        // One roof cell under one tree fails on its own, sealed count or not.
+        let mut roof = healthy_footing();
+        roof.roof_cells = 1;
+        assert_eq!(failing(&with_footing(&h, roof)), ["tree_footing"]);
+        // The share floor: 80% passes, a hair under does not.
+        let mut floor = healthy_footing();
+        floor.worst_open = Some((4200, TREE_OPEN_SHARE, 500));
+        assert!(failing(&with_footing(&h, floor.clone())).is_empty());
+        floor.worst_open = Some((4200, TREE_OPEN_SHARE - 1e-6, 500));
+        assert_eq!(failing(&with_footing(&h, floor)), ["tree_footing"]);
+
+        // No bundle ground grid: n/a, counting towards neither pass nor fail.
+        let r = with(None);
+        let l = r.get("tree_footing").unwrap();
+        assert!(l.na && l.pass && l.observed.contains(NA_REASON_NO_GROUND), "{l:?}");
+        assert_eq!(r.not_applicable(), BUNDLE_ONLY_KEYS.to_vec());
+        assert!(r.pass(), "{:?}", r.lines);
+        // An unreadable ground grid or snapshot is a failure, not an n/a.
+        let r = with(Some(Err("world/medium.bin: missing".into())));
+        let l = r.get("tree_footing").unwrap();
+        assert!(!l.na && !l.pass && l.observed.contains("world/medium.bin"), "{l:?}");
+    }
+
+    fn with_footing(h: &Healthy, f: Footing) -> Series {
+        let mut s = build(h);
+        s.footing = Some(Ok(f));
+        s
     }
 
     #[test]

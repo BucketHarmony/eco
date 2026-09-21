@@ -176,6 +176,14 @@ fn a_bundle_run_writes_a_format_4_run_dir_that_check_reads() {
     let report = check_run(&out).expect("check reads a format-4 run directory");
     assert!(report.lines.iter().any(|l| l.key == "grass_band"), "check evaluated the plant invariants");
     assert!(report.lines.iter().find(|l| l.key == "grazer_cycle").is_some_and(|l| l.na), "no animals: n/a");
+    // Shot G11: the footing invariant applies to a bundle run and holds. The roof block is Rock, so
+    // no tree can root in it, and the 1 m asphalt path covers at most two cells of a column beside
+    // it. The check reads the run's own `world/medium.bin`, so it sees the same sealed cells the
+    // bundle declared.
+    let foot = report.lines.iter().find(|l| l.key == "tree_footing").expect("a bundle run has a footing line");
+    assert!(!foot.na && foot.pass, "{foot:?}");
+    assert!(foot.observed.contains("0 over half sealed, 0 roof cells"), "{foot:?}");
+    assert!(foot.observed.contains("over 5 snapshots"), "{foot:?}");
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -244,6 +252,13 @@ fn a_noise_run_writes_format_4_with_a_synthetic_world_directory() {
     assert_eq!(m["format_version"], 3);
     assert_eq!(m["world"], Value::Null);
     assert!(!dry.join("world").exists());
+
+    // Shot G11: both are noise worlds, so the footing invariant is n/a either way — the synthesised
+    // grid is all soil, in which nothing is sealed, and the version-3 run has no grid at all.
+    for d in [&out, &dry] {
+        let l = check_run(d).unwrap().get("tree_footing").cloned().expect("a footing line");
+        assert!(l.na && l.pass && l.observed.contains(ecosim::check::NA_REASON_NO_GROUND), "{l:?}");
+    }
     fs::remove_dir_all(&out).unwrap();
     fs::remove_dir_all(&dry).unwrap();
 }

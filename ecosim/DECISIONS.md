@@ -1471,3 +1471,64 @@ unconverted row in `UNITS.md` is still marked `deferred` and section 6's heading
 of G4c. Per the prompt's limiter this is a normal "shot G4c:" commit with the backlog row set Done —
 "a shot that lands light and hands the rest on has succeeded" — and the handoff is stated in the LOG
 line as well as here.
+
+## Shot G11 — the tree-footing invariant moves into `ecosim check`
+
+**The invariant now lives where it can be violated.** `ecoview/tests/e2e/capitol.spec.ts` asserted
+that no Capitol tree stands on a roof or a road. It stated the right rule, but read `entities.json`
+and `world/medium.bin` over HTTP and examined no pixel: an assertion about *this* component's output,
+executed by Playwright. That cost has been paid twice — shot G4c's seeding fix tripled the Capitol's
+trees, failed the browser test, and blocked an ecosim shot not allowed to touch it. It is now the
+`tree_footing` line of `ecosim check`, fixable by the shot that breaks it.
+
+**One report line, not three.** The rule has three parts — no roof cell under any tree, never more
+than half a column's cells sealed, and a floor on the share of trees on no sealed cell — reported as
+one `CheckLine` whose margin is the tightest of the three, the way `moisture_band` already combines a
+per-tick floor with a share-of-ticks bound. The observed string carries the whole per-tree histogram,
+so a failure names which part gave way without three keys in every sweep CSV.
+
+**`Medium::is_sealed()` is the only definition of sealed ground**, and `Ground::cells_of` the only
+column-to-cells mapping. The browser copy re-derived the sealed set from CSS colours and, until shot
+E6, left `concrete` out of it.
+
+**Every snapshot, because it is cheap.** The prompt allowed falling back to first, last and tick
+10000 if all snapshots cost over about two seconds. Measured on the Capitol reference run — 201
+snapshots, 41 MB of `entities.json`, 460,880 tree sightings — the footing pass adds **0.13 s** (best
+of five, against 0.04 s with the invariant n/a; 0.77 s on the first read after the run is written).
+So all 201 are read, and a tree that germinates on a roof at tick 3000 and dies at 4000 is still
+seen, which the final snapshot alone cannot do.
+
+**Report order is append-only**: `tree_footing` goes last and `INVARIANT_KEYS` gains it at the end,
+so a sweep CSV's invariant columns keep their order and a noise run's not-applicable list is
+`ANIMAL_ONLY_KEYS ++ BUNDLE_ONLY_KEYS` with no interleaving.
+
+**Not applicable, not silently passing, without a bundle ground grid.** A format-3 run has no
+`world/`; a noise world at format 4 has the synthesised all-soil grid its columns mirror, in which
+nothing is sealed. Both report `n/a (no bundle ground grid)` through a new `push_na_because`, so
+`push_na`'s hard-coded "animals off" reason is untouched and the two cannot be confused. Seeds 1, 2
+and 3 report it n/a and still exit 0. A `world/` that exists but cannot be read, or a tree outside
+the grid, is a **failure**, not an n/a.
+
+**`lawn / cells > 0.95` was not carried across; it was restated per tree, per snapshot, at 80%.** The
+old third assertion was a share over all cells under all trees — the same scale-dependent family as
+the asphalt proxy E6 had just replaced, measured at 95.6% against a 95% bar. Its replacement is a
+floor on the share of trees standing on **no** sealed cell. It is taken per snapshot because a run
+ends with most of its trees: the Capitol reads 93.38% over all 460,880 sightings but 89.26% in its
+worst single snapshot, tick 10200 of 996 trees. 80% leaves nine points of margin there, where the
+retired proxy had six-tenths of one. Known fragility: a bundle with a handful of trees, one beside a
+walk, could drop under 80% with nothing wrong. The Capitol is the only bundle in the repo and no
+snapshot of it holds under 79 trees; the shot that meets a small bundle may restate the floor, which
+is the point of moving the check here. A snapshot with no tree is skipped, not counted as 0%.
+
+**One test was deleted from `ecoview/` under the row's narrow override.** The `test(...)` block and
+the `PAVED` and `RUN` constants it alone used went with it; `git diff --stat` over `ecoview/` shows
+that one file and nothing else, in the same commit that adds the check, so the invariant is never
+unguarded for a commit. The Capitol tests that are genuinely about rendering are untouched.
+
+**`tests/data/s42-check.txt` was re-cut and nothing else was.** The golden is the text of `ecosim
+check` on seed 42 and this shot adds a line to it on purpose, so it gains one `n/a` row under
+`ECOSIM_REGEN_MANIFEST=1` (and a fresh wall time, which that test compares by name only). No run
+manifest and no fixture moved: the check only reads, so the run bytes are identical.
+
+**The 250-line budget did not hold, and the shot did not trim tests to fit.** See the LOG line and
+`overnight/shots/G11.BLOCKED.md` for the measurement.

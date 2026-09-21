@@ -760,12 +760,17 @@ fn animals_off_run_has_no_animals_and_marks_the_animal_invariants_na() {
     assert_eq!(ecosim::check::diff_runs(&dir, &again).unwrap(), Vec::<String>::new());
 
     let report = ecosim::check::check_run(&dir).unwrap();
-    assert_eq!(report.not_applicable(), ecosim::check::ANIMAL_ONLY_KEYS.to_vec());
+    // The animal invariants, plus the footing invariant a noise world has no sealed ground for
+    // (shot G11): this is a noise-world run, so it is n/a for a second, unrelated reason.
+    let na: Vec<&str> = ecosim::check::ANIMAL_ONLY_KEYS.into_iter().chain(ecosim::check::BUNDLE_ONLY_KEYS).collect();
+    assert_eq!(report.not_applicable(), na);
     for l in report.lines.iter().filter(|l| l.na) {
-        assert!(l.observed.contains(ecosim::check::NA_REASON), "{l:?}");
+        let reason =
+            if l.key == "tree_footing" { ecosim::check::NA_REASON_NO_GROUND } else { ecosim::check::NA_REASON };
+        assert!(l.observed.contains(reason), "{l:?}");
     }
     let counted = report.lines.iter().filter(|l| !l.na).count();
-    assert_eq!(counted, report.lines.len() - 2);
+    assert_eq!(counted, report.lines.len() - na.len());
     let no_ext = report.get("no_extinction").unwrap();
     assert!(no_ext.observed.starts_with("min trees=") && !no_ext.observed.contains("grazers"), "{no_ext:?}");
     assert!(report.get("max_10x").unwrap().observed.starts_with("trees "));

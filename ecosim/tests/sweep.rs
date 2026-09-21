@@ -26,9 +26,15 @@ fn params_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("params.toml")
 }
 
-/// Every line except runtime (wall time differs between runs and is excluded from sweeps).
-fn comparable(r: &CheckReport) -> Vec<(&'static str, bool, String, f64)> {
-    r.lines.iter().filter(|l| l.key != "runtime").map(|l| (l.key, l.pass, l.observed.clone(), l.margin)).collect()
+/// Every line except runtime (wall time differs between runs and is excluded from sweeps). An
+/// invariant that does not apply to the run has no margin — it is `NaN`, which is not equal to
+/// itself — so its margin is dropped and its key, verdict and observed text compared (shot G11).
+fn comparable(r: &CheckReport) -> Vec<(&'static str, bool, String, Option<f64>)> {
+    r.lines
+        .iter()
+        .filter(|l| l.key != "runtime")
+        .map(|l| (l.key, l.pass, l.observed.clone(), (!l.na).then_some(l.margin)))
+        .collect()
 }
 
 /// One fresh seed-42 run (20000 ticks, a snapshot every 100, as `runs/s42`: the reference strip

@@ -129,9 +129,10 @@ fn snapshot_round_trips_through_reader() {
     assert_eq!(meta["snapshots"].as_array().unwrap().len(), 4);
     assert_eq!(meta["overrides"], serde_json::json!(["hunter.kill_prob=0.2"]));
     assert_eq!(meta["params"]["season"]["amplitude"], sim.params.season.amplitude as f64);
-    // A run with animals writes neither the `animals` key nor the `[animals]` params section.
+    // A run with animals leaves out the top-level `animals` shorthand (shot G0) and states the tier
+    // positively in its params section, which shot S2 stopped skipping at the default.
     assert_eq!(meta.get("animals"), None, "{meta}");
-    assert_eq!(meta["params"].get("animals"), None, "{meta}");
+    assert_eq!(meta["params"]["animals"]["enabled"], true, "{meta}");
 
     let snap = dir.join("snap_000300");
     assert_eq!(fs::read(snap.join("material.bin")).unwrap(), sim.world.material);
@@ -674,7 +675,9 @@ fn rng_stream_0_is_the_default_stream_and_others_differ() {
     assert_eq!(ecosim::check::diff_runs(&a, &b).unwrap(), Vec::<String>::new());
     let (ma, mb, mc) =
         (read_json(&a.join("meta.json")), read_json(&b.join("meta.json")), read_json(&c.join("meta.json")));
-    assert!(ma["params"].get("rng").is_none() && mb["params"].get("rng").is_none());
+    // The default stream is written as 0 rather than left out (shot S2), so a reader sees which
+    // stream the run used without having to know that an absent section means stream 0.
+    assert_eq!((&ma["params"]["rng"]["stream"], &mb["params"]["rng"]["stream"]), (&0.into(), &0.into()));
     assert_eq!(mc["params"]["rng"]["stream"], 5);
     let differs = ecosim::check::diff_runs(&a, &c).unwrap();
     assert!(

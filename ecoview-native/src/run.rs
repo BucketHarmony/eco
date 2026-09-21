@@ -63,6 +63,12 @@ pub struct RunMeta {
     /// says so; `palette` reads the tree's trunk and canopy colours out of it.
     #[serde(default)]
     pub species: Vec<Species>,
+    /// The overlay ramps: the other half of the palette, added to the run format by `ecosim` shot S2
+    /// so that the two hues an overlay runs between come from the run rather than from this viewer's
+    /// copy of the `ecoview` legend. Empty on a run written before that shot, and then
+    /// [`crate::palette::Overlay::ramp`] falls back and says on screen that it did.
+    #[serde(default)]
+    pub overlays: Vec<OverlayColors>,
     /// The subset of `params` an overlay scale is built from. Everything else in the object is
     /// ignored, and every field here is optional: a run written before a parameter existed still
     /// loads, and the viewer says on screen that the number is its own fallback rather than the
@@ -80,6 +86,24 @@ pub struct Species {
     pub color: String,
     #[serde(default)]
     pub canopy_color: Option<String>,
+}
+
+/// One row of `meta.json`'s `overlays`: an overlay, and the colours a renderer draws it in.
+///
+/// `lo` and `hi` are the two ends of the ramp; the *numbers* those ends stand for are still this
+/// viewer's reading of the run ([`crate::overlay::Scale`]), which is the division the format draws:
+/// the simulator says what wet ground looks like, the viewer says how wet the wettest column is.
+/// `mid` (only on `traits`, which this viewer has no overlay for) and `burnt` (only on `fire`) are
+/// off the ramp, and both are optional.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OverlayColors {
+    pub name: String,
+    pub lo: String,
+    pub hi: String,
+    #[serde(default)]
+    pub mid: Option<String>,
+    #[serde(default)]
+    pub burnt: Option<String>,
 }
 
 /// A species' temperature tolerance curve: the four breakpoints in °C.

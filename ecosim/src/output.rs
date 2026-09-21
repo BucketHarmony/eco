@@ -90,6 +90,51 @@ struct Species {
     canopy_color: Option<&'static str>,
 }
 
+/// One row of `meta.json`'s `overlays`: an ecological overlay, and the two colours a renderer ramps
+/// between when it draws it.
+///
+/// The simulator owns the palette. It already named the species colours; before shot S2 the ramps
+/// were the one part of the ecology palette it did not publish, so each renderer carried its own copy
+/// of the legend and two renderers of the same run could disagree about what wet ground looks like.
+/// `lo` is the colour of the bottom of the scale `params` defines and `hi` the colour of the top;
+/// what those two numbers *are* is the renderer's own reading of the fields (SAD 1, "The palette in
+/// `meta.json`").
+///
+/// Surface media and buildings are not here: they are scene geometry, not ecology, and they belong to
+/// the world bundle and its renderer (DECISIONS.md, shot G7).
+#[derive(Serialize)]
+struct OverlayColors {
+    name: &'static str,
+    lo: &'static str,
+    hi: &'static str,
+    /// The middle of a diverging ramp, for the overlays that have one (`traits`); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mid: Option<&'static str>,
+    /// Ground that burnt out since the previous snapshot: a category, not a point on the ramp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    burnt: Option<&'static str>,
+}
+
+/// The ecological overlays and their ramps, in the order a renderer lists them.
+///
+/// These seven are the fields and per-species statistics a run writes; `light`, `moisture`,
+/// `fertility` and `temperature` come straight from the snapshot files, `crowding` and `fire` are
+/// counted per patch, and `traits` is the heritable-trait map (shot 11), which diverges about a
+/// neutral middle rather than running one way.
+fn overlay_colors() -> Vec<OverlayColors> {
+    let o = |name, lo, hi| OverlayColors { name, lo, hi, mid: None, burnt: None };
+    vec![
+        // Light is a grey level, deliberately: a hue here would be read as a species.
+        o("light", "#000000", "#ffffff"),
+        o("moisture", "#ffffff", "#1f4fd1"),
+        o("fertility", "#ffffff", "#4a2c12"),
+        o("temperature", "#2040ff", "#ff3020"),
+        o("crowding", "#ffffff", "#d81b9c"),
+        OverlayColors { burnt: Some("#2b2b2b"), ..o("fire", "#b3300a", "#ffb020") },
+        OverlayColors { mid: Some("#ffffff"), ..o("traits", "#1f5bff", "#ff1f1f") },
+    ]
+}
+
 #[derive(Serialize)]
 struct Meta<'a> {
     format_version: u32,
@@ -108,6 +153,8 @@ struct Meta<'a> {
     world: Option<WorldMeta<'a>>,
     snapshots: Vec<u32>,
     species: Vec<Species>,
+    /// The overlay ramps: the rest of the palette the species table starts (shot S2).
+    overlays: Vec<OverlayColors>,
     params: &'a Params,
     /// The `--set key=value` strings applied on top of the params file, in order. For a fork, the
     /// strings `ecosim fork` applied from the fork tick on.
@@ -304,7 +351,8 @@ pub fn write_snapshot(sim: &Sim, run_dir: &Path, state: bool, water: bool) -> io
 /// fallen. The acceptance of shot G4 asks for 1e-9.
 pub const WATER_BALANCE_EPS: f64 = 1e-9;
 
-/// Write `meta.json`: format version, dimensions, run settings, species colours, params and overrides.
+/// Write `meta.json`: format version, dimensions, run settings, the palette (species colours and
+/// overlay ramps), params and overrides.
 pub fn write_meta(
     sim: &Sim,
     seed: u64,
@@ -354,6 +402,7 @@ fn write_meta_info(sim: &Sim, info: &RunInfo, run_dir: &Path) -> io::Result<()> 
         world: (format_version == BUNDLE_FORMAT_VERSION).then(|| WorldMeta::of(sim, info.bundle)),
         snapshots: info.snapshots.clone(),
         species: species_list(),
+        overlays: overlay_colors(),
         params: &sim.params,
         overrides,
         forked_from,
@@ -640,10 +689,8 @@ fn fork_params(parent: &Path, meta: &serde_json::Value, overrides: &[String]) ->
         return Err(format!("{}: meta.json params don't read back exactly", parent.display()));
     }
     let mut root = toml::Value::try_from(&base).map_err(|e| format!("params: {e}"))?;
-    // `hunter.handling_ticks` is left out of `meta.json` at 0; put it back so a fork can switch it on.
-    if let Some(h) = root.get_mut("hunter").and_then(toml::Value::as_table_mut) {
-        h.entry("handling_ticks").or_insert(toml::Value::Integer(i64::from(base.hunter.handling_ticks)));
-    }
+    // Shot S2 removed the patch that put `hunter.handling_ticks` back here: `meta.json` no longer
+    // leaves a key out at its off value, so every key an override can name is already in `root`.
     for o in overrides {
         crate::params::apply_override(&mut root, o)?;
     }
@@ -877,9 +924,14 @@ mod tests {
         }
     }
 
-    /// Handling time, left out of `meta.json` at 0, can be switched on by a fork: the fork records
-    /// it, its `state.bin` files from the fork tick on (written with the fork's params) are version
-    /// 4, and a fork of that fork continues exactly.
+    /// Handling time can be switched on by a fork: the fork records it, its `state.bin` files from
+    /// the fork tick on (written with the fork's params) are version 4, and a fork of that fork
+    /// continues exactly.
+    ///
+    /// The parent used to carry *no* `handling_ticks` key at all -- it was skipped at 0 -- and
+    /// `fork_params` patched it back in so an override had something to change. Shot S2 publishes the
+    /// 0, so the assertion below is now the plain reading of the file rather than the absence the
+    /// patch worked around.
     #[test]
     fn fork_can_switch_handling_on() {
         let (parent, child, grandchild) = (scratch_dir(), scratch_dir(), scratch_dir());
@@ -888,7 +940,7 @@ mod tests {
         let mut p = Params::load_square();
         p.hydro.enabled = false;
         run(p, 3, 400, 100, &[], &parent).unwrap();
-        assert!(meta(&parent)["params"]["hunter"].get("handling_ticks").is_none());
+        assert_eq!(meta(&parent)["params"]["hunter"]["handling_ticks"], 0, "handling off is written, not omitted");
         let set = ["hunter.handling_ticks=60".to_string()];
         fork(&ForkSpec { parent: &parent, at: 100, overrides: &set, ticks: 300 }, &child).unwrap();
         assert_eq!(meta(&child)["params"]["hunter"]["handling_ticks"], 60);
@@ -948,5 +1000,73 @@ mod tests {
         for d in [parent, stateless] {
             fs::remove_dir_all(d).unwrap();
         }
+    }
+
+    /// Every params section is in `meta.json`, named, on an ordinary run at the defaults.
+    ///
+    /// This is shot S2's second half. Three sections (`bundle`, `animals`, `rng`) and one key
+    /// (`hunter.handling_ticks`) used to be skipped when they held their default, so the file said
+    /// nothing at all about them in the one case that is most common -- a run at the defaults -- and
+    /// a reader could not tell a default from a parameter the run predated. The section list is
+    /// written out here rather than derived from the struct, because deriving it from the same serde
+    /// impl that does the omitting is what let the defect live: a serializer that skips a section
+    /// skips it from the expectation too.
+    #[test]
+    fn meta_json_names_every_params_section() {
+        const SECTIONS: [&str; 19] = [
+            "animals", "bundle", "climate", "cover", "disease", "fire", "grass", "grazer", "heredity", "hunter",
+            "hydro", "medium", "rain", "rng", "schedule", "season", "shrub", "tree", "world",
+        ];
+        let dir = scratch_dir();
+        run(Params::load_square(), 7, 100, 100, &[], &dir).unwrap();
+        let m = meta(&dir);
+        let got: Vec<&String> = m["params"].as_object().unwrap().keys().collect();
+        assert_eq!(got, SECTIONS.iter().collect::<Vec<_>>(), "params sections in meta.json");
+        // The four values that used to be missing, read positively: a viewer can now ask the file
+        // whether animals are on instead of inferring it from an absent key.
+        assert_eq!(m["params"]["animals"]["enabled"], true);
+        assert_eq!(m["params"]["rng"]["stream"], 0);
+        assert_eq!(m["params"]["hunter"]["handling_ticks"], 0);
+        assert_eq!(m["params"]["bundle"]["base_z"], 8);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `meta.json` carries the overlay ramps, and each one is a pair of sRGB hex colours.
+    ///
+    /// Shot S2's first half: the simulator named the species colours from the start, and this is the
+    /// rest of the ecology palette. The categorical extras are checked to be on exactly the overlays
+    /// that have them -- a `mid` on a one-way ramp, or a missing `burnt` on fire, would each be a
+    /// renderer drawing something it invented.
+    #[test]
+    fn meta_json_carries_the_overlay_ramps() {
+        let dir = scratch_dir();
+        run(Params::load_square(), 8, 100, 100, &[], &dir).unwrap();
+        let m = meta(&dir);
+        let rows = m["overlays"].as_array().unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            ["light", "moisture", "fertility", "temperature", "crowding", "fire", "traits"],
+            "the ecological overlays, in order"
+        );
+        let hex = |v: &serde_json::Value| {
+            let h = v.as_str().unwrap_or_else(|| panic!("not a string: {v}"));
+            assert_eq!(h.len(), 7, "{h}");
+            assert!(h.starts_with('#') && h[1..].chars().all(|c| c.is_ascii_hexdigit()), "{h}");
+        };
+        for r in rows {
+            hex(&r["lo"]);
+            hex(&r["hi"]);
+            let name = r["name"].as_str().unwrap();
+            assert_eq!(r.get("mid").is_some(), name == "traits", "mid on {name}");
+            assert_eq!(r.get("burnt").is_some(), name == "fire", "burnt on {name}");
+            if let Some(mid) = r.get("mid") {
+                hex(mid);
+            }
+            if let Some(b) = r.get("burnt") {
+                hex(b);
+            }
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

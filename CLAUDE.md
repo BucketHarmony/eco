@@ -86,6 +86,8 @@ Architecture points that span modules:
 
 The run directory is the only interface between the two projects. Its full format is in SAD 1 under "Run directory format". The key points:
 - `meta.json` must contain `format_version` (currently 4 for every run at the defaults, and 3 for a noise world with the water tier off; each version only adds files: `state.bin` per snapshot in 2, `events.csv` in 3, `world/` and the two water files in 4). `ecosim run --format-version 2` still writes version 2 for readers that know only 1 and 2, water files and all.
+- `meta.json` carries the whole ecology palette: the `species` list with its colours, and since shot S2 an `overlays` array of `{name, lo, hi}` sRGB ramp ends (plus `mid` on `traits` and `burnt` on `fire`). Surface media and buildings are not in it — they are scene geometry and belong to the bundle's renderer. Adding a `meta.json` key does not bump `format_version`.
+- `meta.json`'s `params` carries **every** section on every run. Shot S2 removed the `skip_serializing_if` that left `bundle`, `animals`, `rng` and `hunter.handling_ticks` out at their defaults: a reader of a run at the defaults could not tell a default from a key the run predated.
 - `series.csv` has one row per tick.
 - `events.csv` (version 3) has one row per event: `tick,kind,species,patch_x,patch_y,x,y,cause,detail`. The kinds and field meanings are in SAD 1's run directory format.
 - Each snapshot is a `snap_NNNNNN/` directory (tick zero-padded to 6 digits) with:

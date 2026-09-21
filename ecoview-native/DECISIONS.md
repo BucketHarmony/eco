@@ -719,3 +719,27 @@ the step is not part of the key at all, so `--no-sky` scrubs the timeline at exa
 **Colour only.** The trees keep every leaf in December. Leaf fall is a change of geometry and it is
 the simulator's to make, not the viewer's -- row G10 is that shot. A bare winter tree drawn here
 would be this viewer inventing a plant behaviour, which is the one thing the direction file forbids.
+
+## S2 the ramp hues come from the run, and a fallback says so
+
+`ecosim` shot S2 added `overlays` to `meta.json`, so `Overlay::ramp` takes the run's metadata and
+returns the two hues the file names. This is the follow-up half of that row, and it finishes the
+sentence V2's module doc had to leave hanging: **every part of an overlay now comes from the run** --
+the scale's two numbers (V2), the field itself, and now the two colours.
+
+- **The `ecoview` legend stays in this file, as the fallback.** Every committed run written before S2
+  has no `overlays`, and a viewer that drew a blank overlay for them would be trading a working picture
+  for a point of principle. So `fallback_ramp()` is the old table under a name that says what it is.
+- **A fallback is named on screen, in the same words a fallback scale uses.** `Ramp::source` reads
+  either `meta.json overlays.moisture` or `this viewer's fallback: meta.json has no overlays.moisture`,
+  `Ramp::from_meta()` is the same one-line test `Scale::from_meta()` is, and the HUD prints a `(!)` next
+  to a fallback. One more line under the scale line, and the same pair of fields in `ecoview.stats` and
+  in the `ecoview.overlay` reply, so an agent sees it too.
+- **Fire's `burnt` is read, its quiet band is not.** The run names the colour of ground that burnt out;
+  "nothing to show here" is not an ecological quantity and stays this viewer's, beside the vine hue.
+- **`mid` is parsed and unused.** The only overlay that has one is `traits`, which this viewer has no
+  overlay for; it is read into `OverlayColors` because leaving a field out of a struct that mirrors a
+  file is how a reader silently disagrees with a writer, and `serde` would ignore it either way.
+- **No picture changes.** The seven ramps the simulator publishes are the values this file already held,
+  so this is a provenance change and not a visual one. Measured rather than asserted: MEASUREMENTS.md,
+  "S2".

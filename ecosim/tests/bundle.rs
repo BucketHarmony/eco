@@ -214,7 +214,7 @@ fn the_cli_runs_a_bundle_and_pairs_format_4_with_world() {
     assert_eq!(m["format_version"], BUNDLE_FORMAT_VERSION);
     assert_eq!(m["world"]["name"], "synthetic");
     assert_eq!(m["params"]["world"]["width"], SIZE_M, "the bundle sets the ecology dimensions");
-    assert_eq!(m["params"]["bundle"], Value::Null, "[bundle] is left out of meta.json at its defaults");
+    assert_eq!(m["params"]["bundle"]["base_z"], 8, "[bundle] is in meta.json even at its defaults (shot S2)");
 
     let mismatch = run(&["--world", dir.to_str().unwrap(), "--format-version", "3"], &tmp("bundle_cli_bad"));
     assert!(!mismatch.status.success());
@@ -423,12 +423,12 @@ fn the_animals_fixture_carries_what_an_animals_off_run_cannot() {
     let fixture = root.join("fixtures/capitol-animals-mini");
     let m = meta(&fixture);
 
-    // (1) The tier is on — and `meta.json` says so only by omission. Shot G0 writes the `animals`
-    // key when the tier is *off* and leaves it out otherwise, and `params.animals` is skipped at
-    // its default, so there is no positive statement in the header to assert. This is what a
-    // reader has to go on: an absent key, no params section, and the flat-rainfall override alone.
-    assert!(m["animals"].is_null(), "an absent `animals` key is how meta.json says the tier is on");
-    assert!(m["params"]["animals"].is_null());
+    // (1) The tier is on, and since shot S2 `meta.json` says so in words: `params.animals.enabled`
+    // is written whether or not it is at its default. The top-level `animals` key is still the
+    // shorthand shot G0 defined — present and false when the tier is off, absent when it is on —
+    // and both are asserted, because a reader may be using either.
+    assert!(m["animals"].is_null(), "the G0 shorthand: an absent `animals` key means the tier is on");
+    assert_eq!(m["params"]["animals"]["enabled"], true, "and the params section says so positively");
     assert_eq!(m["overrides"], serde_json::json!(["climate.rain_gradient=0"]));
     assert_eq!(m["snapshots"], serde_json::json!([0, 2000]));
 

@@ -7,11 +7,12 @@
 //! them -- what the bottom of the ramp means, what the top means, and which species colour a trunk or
 //! a canopy takes -- is read from the run's own `meta.json`, so the simulator owns the scale.
 //!
-//! What `meta.json` does **not** carry is the two hues an overlay ramps between. There is no overlay
-//! palette in the run directory format, and adding one is an `ecosim` change that an `ecoview-native`
-//! shot may not make (MASTER.md, "Component isolation"). So the two ends of each ramp are the
-//! `ecoview` legend, named here, and every number between them comes from the run (DECISIONS.md,
-//! "V2: what meta.json owns and what it does not").
+//! V2 left one thing out: `meta.json` had nowhere to put the two hues an overlay ramps between, so
+//! those two were still the `ecoview` legend copied into this file. `ecosim` shot S2 added
+//! `meta.json`'s `overlays` array, and [`Overlay::ramp`] reads it, so **the whole ecology palette now
+//! comes from the run**. The legend below stays as the fallback for a run written before that shot,
+//! and a fallback says so on screen rather than passing itself off as the simulator's
+//! (DECISIONS.md, "V2: what meta.json owns and what it does not", and "S2").
 
 use crate::run::RunMeta;
 use crate::voxel::{BUILDING, CANOPY, GRASS, ID_COUNT, SHRUB, TRUNK, VINE};
@@ -105,9 +106,10 @@ impl Overlay {
         self != Overlay::Surface
     }
 
-    /// The two ends of the ramp, in sRGB hex. **These two hues are the only thing here the viewer
-    /// owns**; they are `ecoview/src/world.ts` `COLORS`, so the two viewers ramp the same way.
-    fn ramp(self) -> (&'static str, &'static str) {
+    /// The ramp this viewer falls back on when the run does not carry one: `ecoview/src/world.ts`
+    /// `COLORS`, so a run too old to state its own palette is drawn the way the browser viewer draws
+    /// it rather than in some third way.
+    fn fallback_ramp(self) -> (&'static str, &'static str) {
         match self {
             // Light is a grey level in both viewers: a hue would be read as a species.
             Overlay::Light => ("#000000", "#ffffff"),
@@ -120,10 +122,72 @@ impl Overlay {
             Overlay::Fire | Overlay::Surface => ("#b3300a", "#ffb020"),
         }
     }
+
+    /// The colours this overlay is drawn in, read from the run's `meta.json` `overlays` array.
+    ///
+    /// This is the reading half of `ecosim` shot S2. A run that carries a row for this overlay decides
+    /// its two hues; one that does not gets [`Self::fallback_ramp`], and [`Ramp::source`] says which
+    /// happened, in the same words [`crate::overlay::Scale`] uses for a number it had to guess.
+    pub fn ramp(self, meta: Option<&RunMeta>) -> Ramp {
+        let (lo, hi) = self.fallback_ramp();
+        let mut r = Ramp {
+            lo: lo.to_string(),
+            hi: hi.to_string(),
+            burnt: FIRE_BURNT_HEX.to_string(),
+            source: format!(
+                "this viewer's fallback: meta.json has no overlays.{}",
+                self.name()
+            ),
+        };
+        // `Surface` is the bundle's own media and has no ramp at all; its bands are never drawn, so
+        // there is nothing for the run to own and nothing to apologise for.
+        if self == Overlay::Surface {
+            r.source = "the scene contract's media, not the run".into();
+            return r;
+        }
+        let Some(row) = meta.and_then(|m| m.overlays.iter().find(|o| o.name == self.name())) else {
+            return r;
+        };
+        r.lo = row.lo.clone();
+        r.hi = row.hi.clone();
+        if let Some(b) = &row.burnt {
+            r.burnt = b.clone();
+        }
+        r.source = format!("meta.json overlays.{}", self.name());
+        r
+    }
+}
+
+/// What one overlay is drawn in, and where those colours came from.
+///
+/// The twin of [`crate::overlay::Scale`], which carries the same question about the *numbers*: a
+/// viewer that knows the answer and does not show it is asking to be trusted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ramp {
+    /// The bottom of the scale, in sRGB hex.
+    pub lo: String,
+    /// The top of the scale.
+    pub hi: String,
+    /// Ground that burnt out since the previous snapshot: the fire overlay's second categorical band,
+    /// off the ramp. The run may name it; nothing else here reads it.
+    pub burnt: String,
+    pub source: String,
+}
+
+impl Ramp {
+    /// Are these the simulator's colours, or this viewer's copy of the `ecoview` legend?
+    pub fn from_meta(&self) -> bool {
+        !self.source.starts_with("this viewer's fallback")
+    }
 }
 
 /// Fire's two categorical bands, which are not on the ramp: quiet ground, and ground that burnt out
-/// since the previous snapshot. `ecoview` draws the second `#2b2b2b` and shot V2 keeps that.
+/// since the previous snapshot.
+///
+/// The burnt colour is the run's since shot S2 (`meta.json` `overlays`, the `fire` row's `burnt`), and
+/// `FIRE_BURNT_HEX` is the fallback for a run that does not carry one. Quiet ground has no entry in
+/// the run, because "nothing to show here" is not an ecological quantity: it stays this viewer's,
+/// like the vine hue above.
 pub const FIRE_QUIET: u8 = 0;
 pub const FIRE_BURNT: u8 = 1;
 const FIRE_QUIET_HEX: &str = "#5a5f52";
@@ -199,8 +263,8 @@ pub fn palette(overlay: Overlay, meta: Option<&RunMeta>) -> Vec<[f32; 4]> {
             }
         }
     }
-    let (lo, hi) = overlay.ramp();
-    let (lo, hi) = (linear_rgba(lo), linear_rgba(hi));
+    let ramp = overlay.ramp(meta);
+    let (lo, hi) = (linear_rgba(&ramp.lo), linear_rgba(&ramp.hi));
     for b in 0..BANDS {
         out[ID_COUNT + b] = lerp(lo, hi, b as f32 / (BANDS - 1) as f32);
     }
@@ -212,7 +276,7 @@ pub fn palette(overlay: Overlay, meta: Option<&RunMeta>) -> Vec<[f32; 4]> {
             out[ID_COUNT + b] = lerp(lo, hi, (b - first) as f32 / (BANDS - first - 1) as f32);
         }
         out[ID_COUNT + FIRE_QUIET as usize] = linear_rgba(FIRE_QUIET_HEX);
-        out[ID_COUNT + FIRE_BURNT as usize] = linear_rgba(FIRE_BURNT_HEX);
+        out[ID_COUNT + FIRE_BURNT as usize] = linear_rgba(&ramp.burnt);
     }
     out
 }

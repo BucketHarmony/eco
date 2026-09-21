@@ -179,13 +179,32 @@ The steps run in this order:
   - `seed`, `ticks`, `snapshot_every`, `year_len`, `water_level`: 10
   - `snapshots`: an array of snapshot ticks
   - `species`
-  - `params`: the full loaded params as JSON
+  - `overlays`: the overlay ramps (sim shot S2; see below)
+  - `params`: the full loaded params as JSON. **Every section is written, at its defaults or not.**
+    Three sections (`bundle`, `animals`, `rng`) and one key (`hunter.handling_ticks`) used to be left
+    out when they held their default value; sim shot S2 ended that, because a file whose job is to say
+    what a run used must not leave the answer out in the commonest case of all.
 - **`species`** entries have fixed ids:
   - `{id:0, name:"grass", kind:"cover", color:"#7cc242"}`
   - `{id:1, name:"shrub", kind:"cover", color:"#2f6b2a"}`
   - `{id:2, name:"tree", kind:"tree", color:"#6b4a2b", canopy_color:"#2e8b3d"}`
   - `{id:3, name:"grazer", kind:"animal", color:"#f2d024"}`
   - `{id:4, name:"hunter", kind:"animal", color:"#d6332a"}`
+- **`overlays`** (sim shot S2) is the rest of the palette the `species` table starts: one entry per
+  ecological overlay, each `{name, lo, hi}` in sRGB hex, in this order. `lo` colours the bottom of the
+  scale a renderer builds from `params` and `hi` the top; the scale's numbers are the renderer's
+  reading of the fields, and the two hues are the simulator's.
+  - `{name:"light", lo:"#000000", hi:"#ffffff"}` — grey on purpose: a hue reads as a species.
+  - `{name:"moisture", lo:"#ffffff", hi:"#1f4fd1"}`
+  - `{name:"fertility", lo:"#ffffff", hi:"#4a2c12"}`
+  - `{name:"temperature", lo:"#2040ff", hi:"#ff3020"}`
+  - `{name:"crowding", lo:"#ffffff", hi:"#d81b9c"}`
+  - `{name:"fire", lo:"#b3300a", hi:"#ffb020", burnt:"#2b2b2b"}` — `burnt` is ground that burnt out
+    since the previous snapshot, a category rather than a point on the ramp.
+  - `{name:"traits", lo:"#1f5bff", mid:"#ffffff", hi:"#ff1f1f"}` — `mid` is the neutral middle of a
+    diverging ramp. Only `traits` has one, and only `fire` has a `burnt`.
+  - Surface media and buildings are **not** here: they are scene geometry, not ecology, and they stay
+    with the world bundle and its renderer (ecosim/DECISIONS.md, shot G7).
 - **`patches.json`**: 64 objects `{grass, shrub, detritus, temperature}` in patch index order.
 - **`entities.json`**: an array with trees first, then grazers, then hunters, each group in ascending id order.
   - Trees: `{id, kind:"tree", x, y, z, age, stage:"sapling"|"young"|"mature"}`. `z` is the trunk voxel.

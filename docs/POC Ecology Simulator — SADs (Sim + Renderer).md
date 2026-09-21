@@ -113,7 +113,7 @@ Fixed tick order: animals → producers (staggered patches) → moisture/fertili
 
 ```
 runs/s42/
-  meta.json           world dims, seed, params snapshot, tick count, snapshot_every, species list with ids and colors
+  meta.json           world dims, seed, params snapshot, tick count, snapshot_every, the palette (species list with ids and colors, overlay ramps)
   series.csv          one row per tick: tick, grazers, hunters, trees, grass_mean, shrub_mean, moisture_mean, fertility_mean, detritus_total, temperature
   events.csv          (format_version 3) one row per event: tick,kind,species,patch_x,patch_y,x,y,cause,detail
   snap_000000/
@@ -158,6 +158,24 @@ Version 4 also adds two water files to each snapshot, written when the water tie
     water.bin         gw·gd × u16 LE, ponded depth in units of 0.1 mm, saturating at 6553.5 mm
     soil_water.bin    x·y × f32 LE, soil water per ecology column, in mm
 ```
+
+#### The palette in `meta.json`
+
+The simulator owns the palette, and says so in `meta.json`. The `species` list has been there since
+version 1: id, name, kind, `color`, and `canopy_color` for the tree. Sim shot S2 added `overlays`, the
+rest of it — one entry per ecological overlay, `{name, lo, hi}` in sRGB hex, `lo` the colour of the
+bottom of the scale and `hi` the colour of the top, with `mid` on the one diverging ramp (`traits`) and
+`burnt` on `fire` for ground that burnt out since the previous snapshot. What the two ends of a scale
+*mean* is the renderer's reading of the run's `params` and of the field's own units; what they look
+like is the simulator's. `docs/SAD-addendum.md` lists the seven entries and their values.
+
+Surface media and buildings are not in `overlays`: they are scene geometry rather than ecology and
+belong to the world bundle and whatever draws it. `format_version` does not change for either
+addition — every version so far has only added files, and an added `meta.json` key is read by a reader
+that wants it and ignored by one that does not.
+
+The same shot stopped `meta.json` omitting params sections that were at their default values, so
+`params` now carries every section of `params.toml` on every run.
 
 `series.csv` ends with six water columns, all world means in millimetres: `rain_mm` (rain this tick), `runoff_mm` (the share of it that ran off the cell it fell on), `ponded_mm` and `soil_water_mm` (standing now), `drainage_mm` (percolated below the roots this tick) and `outflow_mm` (left the world). They are 0 on every tick with the tier off. `events.csv` gains a `storm` kind: one row per raining tick, no species, no column, `detail` `"<depth> <runoff> <outflow>"` in millimetres to four decimal places.
 

@@ -957,3 +957,31 @@ The split is **1,193 non-test and 301 test**. Of the 1,335 code lines added, 309
 which is this component's usual density; `sky.rs` runs higher because every constant in it is a
 number no file in the project could supply, and the reader's first question about each one is whose
 it is.
+
+# S2 -- the ramp hues, read from the run
+
+The reading half of `ecosim` shot S2. One measurement, and it is a negative: **the colours do not
+change, only their provenance does.**
+
+The same frame, twice: the Capitol at tick 10000 under the moisture overlay, once against the
+20,000-tick run on disk from before the shot and once against a fresh one written by the new
+simulator, `ecoview-native --world ../ecosim/worlds/capitol --run <dir> --tick 10000 --overlay
+moisture --headless --frames 120`.
+
+| Run | The viewer's own stdout |
+| --- | --- |
+| before S2 | `overlay moisture: 0.00..1.00 of available water capacity from moisture.bin: 255 x soil water / AWC; field 0.00..1.00 mean 0.22; ramp #ffffff to #1f4fd1 from this viewer's fallback: meta.json has no overlays.moisture` |
+| after S2 | `overlay moisture: 0.00..1.00 of available water capacity from moisture.bin: 255 x soil water / AWC; field 0.00..1.00 mean 0.22; ramp #ffffff to #1f4fd1 from meta.json overlays.moisture` |
+
+Same two hues, so the same 32 band colours, so the same ground. The two PNGs differ in **1.88% of the
+frame (19,206 of 1,024,000 pixels), every one of them inside the HUD's text block** (the difference's
+bounding box is x 19..1139, y 10..375, which is the HUD panel; the source string on the new line is
+longer). Below it the picture is pixel-identical, which is why **no new reference screenshot was
+committed and none was re-accepted**: `shots/v2-moisture.png` still shows what the viewer draws.
+
+On the simulator's side the same claim holds for the run itself: a fresh 20,000-tick Capitol run
+against the one written before the shot gives `ecosim diff` -> `differs: meta.json`, nothing else.
+
+`cargo test --release --no-default-features --test mesh_golden` is **60 pass**, V6's 58 plus the two
+this shot adds; every one of the 50 mesh golden hashes is untouched, because a palette colours a mesh
+and does not shape one.

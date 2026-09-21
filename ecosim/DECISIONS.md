@@ -1671,3 +1671,62 @@ single differing run is a reading of the weather.
 2026-09-19: it stays in the code, and no shot tunes it. An unregulated grazer population is
 therefore reported and left alone. The fixture's value does not depend on the tier being well
 behaved — it depends on there being animals in it at all.
+
+## Shot S2 — the simulator publishes the whole palette, and stops omitting params
+
+Two halves of one complaint: `meta.json` was not saying everything it knew.
+
+**The overlay ramps go in `meta.json`, as `overlays`.** The species table has carried colours since
+version 1, and the renderers took the species colours from it. But an overlay is a *ramp*, and the run
+directory had nowhere to put the two hues one runs between, so both renderers carried their own copy
+of the `ecoview` legend: `ecoview/src/world.ts` `COLORS` and, copied from it, `ecoview-native`'s
+`palette.rs`. Shot V2 read every *number* of every scale out of the run and then had to write in its own
+module doc that the hues were the one thing it could not (component isolation forbids a viewer shot
+changing `meta.json`). This closes that: seven entries, `{name, lo, hi}` in sRGB hex, in the order a
+renderer lists them, with `mid` on the one diverging ramp (`traits`) and `burnt` on `fire`. The values
+are the legend's own, so **no picture changes** — what changes is who owns them.
+
+- **The table lives in `output.rs`, next to `species_list()`, not in `params.toml`.** These are not
+  tunable parameters. CLAUDE.md's "nothing tunable is hard-coded" is about the model; the species
+  colours have been a writer-side constant since shot 1 and nobody tunes a hue per run. Putting them in
+  `params.toml` would also put them in `meta.json`'s `params`, where a renderer would have to read the
+  palette out of the tuning dump, and would let `--set` change a colour mid-fork.
+- **`format_version` does not move.** Every version so far has only added files; an added `meta.json`
+  key is the precedent set by `overrides` (shot 4), `dims.patch` (15), `animals` (G0) and `year_len`.
+  A renderer that wants the ramps reads them, and one that does not is unaffected — which is exactly
+  what `ecoview` does, and why this shot does not touch it.
+- **Surface media, buildings, pipes and the vine hue are not in `overlays`.** A medium is scene
+  geometry, not ecology (shot G7), and a vine is not a species the simulator has (V4). The split the
+  format now draws is: the simulator owns the *ecology* palette; the bundle and its renderer own the
+  *scene* palette. Fire's "quiet ground" band stays the viewer's for the same reason — "nothing to show
+  here" is not an ecological quantity — while fire's `burnt` is the run's.
+
+**Every params section is written, at its defaults or not.** `bundle`, `animals` and `rng` carried
+`skip_serializing_if`, and `hunter.handling_ticks` carried `skip_serializing_if = "is_zero"`. All four
+are gone. The justification each was given was that a default run then writes the `meta.json` it always
+did — and that is precisely the defect: the ordinary case, a run at the defaults, was the case in which
+the file said nothing. `runs/s42` published 16 sections of 19 and `runs/capitol-s42` 17; both now
+publish 19. Shot V3 met this from the reader's side (it needs `bundle.tree_mature_height` and
+`bundle.tree_tall_height`, which are at their defaults on every committed run, so it never received
+them), and shot S1's own DECISIONS entry names it as the reason `meta.json` could not say a run had
+animals.
+
+- **`#[serde(default)]` stays on all four.** Omission on the way *in* is a feature: a `params.toml`
+  or an older `meta.json` that lacks a section still loads. Only the writing side changed.
+- **Two workarounds came out with it.** `fork_params` had a patch that put `handling_ticks` back into
+  the parsed params so a fork could override it; the params round-trip proptest had a branch for a leaf
+  that is absent from the base rather than null. Neither has anything left to do.
+- **The top-level `animals` key is left exactly as shot G0 defined it** — present and `false` when the
+  tier is off, absent when it is on. It is a statement about the run rather than a params section, the
+  renderers' pixel tests read it (`fixtures/capitol-mini` asserts `animals == false`), and the positive
+  statement it could not make is now available next door in `params.animals.enabled`. Changing both at
+  once would have been two format changes wearing one coat.
+
+**What was regenerated, and the proof that nothing else moved.** `fixtures/s42-mini-v2`,
+`fixtures/capitol-mini` and `fixtures/capitol-animals-mini` are compared byte for byte with a fresh
+run, so all three were re-cut with `ECOSIM_REGEN_MANIFEST=1`; only their `meta.json` (and `timing.json`,
+which the comparison ignores) changed. No manifest and no golden `check` output changed, because none of
+them hashes `meta.json`. `fixtures/s42-mini` is version 1 and cannot be re-cut (shot G4b), and the test
+that reads it checks that every version-1 params *key* is still present, which an addition cannot break.
+The anchor for the shot: a fresh 20,000-tick `runs/capitol-s42` against the one on disk from before it,
+`ecosim diff` says `differs: meta.json` and nothing else.

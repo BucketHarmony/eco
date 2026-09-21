@@ -9,6 +9,12 @@ use std::path::Path;
 pub type Curve = [f32; 4];
 
 /// All tunable parameters, one field per `params.toml` section.
+///
+/// **Every section is serialized, at its defaults or not** (shot S2). Three of them used to be left
+/// out of `meta.json` when they were at their defaults, which read as economy and was a defect: a
+/// reader of a run at the defaults -- the ordinary case -- could not tell whether the run had the
+/// default or whether the key predated the run. Each section is still `#[serde(default)]` on the way
+/// *in*, so a `params.toml` or an older `meta.json` that omits one still loads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
@@ -34,11 +40,11 @@ pub struct Params {
     pub shrub: CoverSpecies,
     /// `[tree]`
     pub tree: TreeParams,
-    /// `[bundle]`. Left out of `meta.json` at its defaults, so noise-world runs print as before.
-    #[serde(default, skip_serializing_if = "BundleParams::is_default")]
+    /// `[bundle]`. Always written to `meta.json`, even at its defaults (shot S2).
+    #[serde(default)]
     pub bundle: BundleParams,
-    /// `[animals]`. Left out of `meta.json` when animals are enabled, so default runs print as before.
-    #[serde(default, skip_serializing_if = "AnimalsParams::is_default")]
+    /// `[animals]`. Always written to `meta.json`, even at its defaults (shot S2).
+    #[serde(default)]
     pub animals: AnimalsParams,
     /// `[grazer]`
     pub grazer: GrazerParams,
@@ -50,8 +56,8 @@ pub struct Params {
     pub disease: DiseaseParams,
     /// `[heredity]`
     pub heredity: HeredityParams,
-    /// `[rng]`. Left out of `meta.json` at the default stream, so default runs print as before.
-    #[serde(default, skip_serializing_if = "RngParams::is_default")]
+    /// `[rng]`. Always written to `meta.json`, even at its defaults (shot S2).
+    #[serde(default)]
     pub rng: RngParams,
 }
 
@@ -148,12 +154,6 @@ impl Default for BundleParams {
             tree_tall_age_years: 0.75,
             tree_move_radius: 2.0,
         }
-    }
-}
-
-impl BundleParams {
-    fn is_default(&self) -> bool {
-        *self == BundleParams::default()
     }
 }
 
@@ -440,12 +440,6 @@ impl Default for AnimalsParams {
     }
 }
 
-impl AnimalsParams {
-    fn is_default(&self) -> bool {
-        *self == AnimalsParams::default()
-    }
-}
-
 /// The grazer species.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -534,9 +528,9 @@ pub struct HunterParams {
     /// Energy a failed attack costs on top of `hunt_cost`.
     pub fail_cost: f32,
     /// Ticks a hunter spends handling its prey after a kill: no attack, no move, resting energy
-    /// cost (type II functional response). 0 switches handling off; it is then left out of
-    /// `meta.json`, which reads back as 0, so runs without handling keep their exact `meta.json`.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// cost (type II functional response). 0 switches handling off, and 0 is written to
+    /// `meta.json` like any other value (shot S2).
+    #[serde(default)]
     pub handling_ticks: u32,
     /// Steps a grazer is pushed away by a failed attack.
     pub displace_steps: u32,
@@ -601,12 +595,6 @@ pub struct HeredityParams {
 pub struct RngParams {
     /// ChaCha stream number (0 = the default stream).
     pub stream: u64,
-}
-
-impl RngParams {
-    fn is_default(&self) -> bool {
-        *self == RngParams::default()
-    }
 }
 
 /// Density-dependent ("crowded") mortality. Per animal update, an animal in a patch holding n of
@@ -835,10 +823,6 @@ fn coerce(old: &toml::Value, raw: &str) -> Result<toml::Value, String> {
 }
 
 /// Serde skip test for keys that are left out of `meta.json` at 0.
-fn is_zero(v: &u32) -> bool {
-    *v == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,11 +985,10 @@ mod tests {
             g = &mut g[*p];
             b = &b[*p];
         }
-        // A key left out at its off value (`is_zero`) is absent from the base, not null.
-        match b.get(field) {
-            Some(v) => g[*field] = v.clone(),
-            None => _ = g.as_object_mut().unwrap().remove(*field),
-        }
+        // Since shot S2 no key is ever left out of the serialized params, so every leaf the
+        // override names is in the base too; an absent one is a bug in this test's key list.
+        let was = b.get(field).unwrap_or_else(|| panic!("{key} is not in the serialized params"));
+        g[*field] = was.clone();
         prop_assert_eq!(got, base, "setting {} changed another key", key);
         Ok(())
     }

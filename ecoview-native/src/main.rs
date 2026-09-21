@@ -54,7 +54,7 @@ use serde_json::{json, Value};
 use ecoview_native::cover::{Cover, CoverStats};
 use ecoview_native::mesh::{mesh_chunk, ChunkMesh, Scratch};
 use ecoview_native::overlay::{FieldStats, Fields, Scale};
-use ecoview_native::palette::{palette, Overlay, BANDS};
+use ecoview_native::palette::{palette, Overlay, Ramp, BANDS};
 use ecoview_native::run::Run;
 use ecoview_native::sim::{self, SimJob, SimState};
 use ecoview_native::sky::{self, shaded_palette, Clock, SkyState};
@@ -467,6 +467,9 @@ struct OverlayState {
     /// The ramp's two ends and where they came from, from the run's `meta.json`. `None` until a
     /// field overlay is on with a run behind it.
     scale: Option<Scale>,
+    /// The two colours the ramp runs between, and whether the run named them (`ecosim` shot S2) or
+    /// this viewer fell back on the `ecoview` legend. `None` on the same terms as `scale`.
+    ramp: Option<Ramp>,
     stats: Option<FieldStats>,
     /// Patches alight, and patches burnt out since the previous snapshot.
     fire: (usize, usize),
@@ -480,6 +483,7 @@ impl OverlayState {
             active,
             applied: None,
             scale: None,
+            ramp: None,
             stats: None,
             fire: (0, 0),
             error: None,
@@ -499,6 +503,7 @@ fn apply_overlay_bands(
     fields: Option<&Result<Fields, String>>,
 ) -> Vec<ChunkPos> {
     ov.scale = None;
+    ov.ramp = None;
     ov.stats = None;
     ov.fire = (0, 0);
     ov.error = None;
@@ -526,6 +531,7 @@ fn apply_overlay_bands(
                 }
             };
             ov.scale = Some(scale);
+            ov.ramp = Some(ov.active.ramp(Some(&run.meta)));
             out
         }
         (None, true) => {
@@ -991,9 +997,15 @@ fn setup(
     } else {
         String::new()
     };
+    // The colours as well as the numbers: since `ecosim` shot S2 both halves of an overlay come from
+    // the run, and a scripted run's stdout is what a report quotes, so it says which.
+    let ramp = match &overlays.ramp {
+        Some(r) => format!("; ramp {} to {} from {}", r.lo, r.hi, r.source),
+        None => String::new(),
+    };
     match (&overlays.scale, overlays.stats, &overlays.error) {
         (Some(sc), Some(st), _) => println!(
-            "overlay {}: {:.2}..{:.2} {} from {}; field {:.2}..{:.2} mean {:.2}{fire}",
+            "overlay {}: {:.2}..{:.2} {} from {}; field {:.2}..{:.2} mean {:.2}{ramp}{fire}",
             overlays.active.name(),
             sc.lo,
             sc.hi,
@@ -1972,6 +1984,14 @@ fn hud(
                 st.min, st.max, st.mean, sc.unit
             ));
         }
+        // And where the two colours came from, on the same terms as the numbers above them.
+        if let Some(r) = &overlays.ramp {
+            s.push_str(&format!(
+                "  colours from {}{}\n",
+                r.source,
+                if r.from_meta() { "" } else { "  (!)" }
+            ));
+        }
         if overlays.active == Overlay::Fire {
             s.push_str(&format!(
                 "  {} patches alight, {} burnt since the last snapshot\n",
@@ -2528,6 +2548,13 @@ fn stats_method(
             "source": s.source,
             "from_meta": s.from_meta(),
         })),
+        "ramp": ov.ramp.as_ref().map(|r| json!({
+            "lo": r.lo,
+            "hi": r.hi,
+            "burnt": r.burnt,
+            "source": r.source,
+            "from_meta": r.from_meta(),
+        })),
         "field": ov.stats.map(|s| json!({"min": s.min, "max": s.max, "mean": s.mean})),
         "fire": {"alight": ov.fire.0, "burnt_since_last_snapshot": ov.fire.1},
         "overlay_error": ov.error,
@@ -2556,6 +2583,9 @@ fn overlay_method(In(params): In<Option<Value>>, mut ov: ResMut<OverlayState>) -
         "overlays": Overlay::ALL.map(|o| o.name()),
         "scale": ov.scale.as_ref().map(|s| json!({
             "lo": s.lo, "hi": s.hi, "unit": s.unit, "source": s.source, "from_meta": s.from_meta(),
+        })),
+        "ramp": ov.ramp.as_ref().map(|r| json!({
+            "lo": r.lo, "hi": r.hi, "source": r.source, "from_meta": r.from_meta(),
         })),
     }))
 }

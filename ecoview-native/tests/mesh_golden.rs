@@ -361,8 +361,12 @@ use ecoview_native::voxel::{ColumnBands, CANOPY, ID_COUNT, SOIL, TRUNK};
 /// reader from one that returns the first byte: `moisture[c] = 4c`, fertility its complement, and
 /// light bright everywhere except column 0.
 ///
-/// `with_params` writes the `params` block the scales are read from. Without it the run is one this
-/// viewer has to fall back on its own constants for, which is the other half of what is tested.
+/// `with_params` writes the `params` block the scales are read from **and** the `overlays` array the
+/// ramp hues are read from (`ecosim` shot S2). Without it the run is one this viewer has to fall back
+/// on its own constants for, in both halves, which is the other half of what is tested.
+///
+/// The hues written here are deliberately not the ones in `palette.rs`: `#010203` is nowhere in this
+/// viewer, so a band that comes out that colour can only have come from the file.
 fn write_overlay_run(dir: &std::path::Path, n: usize, patch: usize, with_params: bool) {
     let z = 8usize;
     let cols = n * n;
@@ -378,6 +382,17 @@ fn write_overlay_run(dir: &std::path::Path, n: usize, patch: usize, with_params:
     } else {
         ""
     };
+    let overlays = if with_params {
+        r##","overlays":[{"name":"light","lo":"#010203","hi":"#fdfeff"},
+                        {"name":"moisture","lo":"#ffffff","hi":"#1f4fd1"},
+                        {"name":"fertility","lo":"#ffffff","hi":"#4a2c12"},
+                        {"name":"temperature","lo":"#2040ff","hi":"#ff3020"},
+                        {"name":"crowding","lo":"#ffffff","hi":"#d81b9c"},
+                        {"name":"fire","lo":"#b3300a","hi":"#ffb020","burnt":"#0a0b0c"},
+                        {"name":"traits","lo":"#1f5bff","mid":"#ffffff","hi":"#ff1f1f"}]"##
+    } else {
+        ""
+    };
     std::fs::write(
         dir.join("meta.json"),
         format!(
@@ -387,7 +402,7 @@ fn write_overlay_run(dir: &std::path::Path, n: usize, patch: usize, with_params:
                          "ground_width":{},"ground_depth":{}}},
                "species":[{{"id":0,"name":"grass","kind":"cover","color":"#7cc242"}},
                           {{"id":2,"name":"tree","kind":"tree","color":"#112233",
-                            "canopy_color":"#445566"}}]{params}}}"##,
+                            "canopy_color":"#445566"}}]{overlays}{params}}}"##,
             n * 2,
             n * 2,
         ),
@@ -502,6 +517,80 @@ fn the_scale_and_the_species_colours_come_from_meta_json() {
     assert_ne!(
         bare[CANOPY as usize], p[CANOPY as usize],
         "the hard-coded canopy and meta.json's disagree -- which is why this is read from the file"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The ramp hues come out of `meta.json` too (`ecosim` shot S2), which is the half V2 could not do.
+///
+/// `#010203` and `#fdfeff` are nowhere in this viewer: the light ramp can only come out those colours
+/// by reading the file. The fire row's `burnt` is read the same way, and it is a *band* rather than a
+/// point on the ramp, so it is checked in the palette where it lands.
+#[test]
+fn the_overlay_ramp_hues_come_from_meta_json() {
+    let dir = tmp("ramps");
+    write_overlay_run(&dir, 8, 4, true);
+    let run = Run::load(&dir).unwrap();
+    let m = &run.meta;
+    assert_eq!(
+        m.overlays.len(),
+        7,
+        "every overlay the simulator publishes, traits included"
+    );
+
+    let r = Overlay::Light.ramp(Some(m));
+    assert_eq!((r.lo.as_str(), r.hi.as_str()), ("#010203", "#fdfeff"));
+    assert!(r.from_meta(), "{}", r.source);
+    for o in Overlay::ALL.into_iter().filter(|o| o.is_field()) {
+        assert!(
+            o.ramp(Some(m)).from_meta(),
+            "{}: {}",
+            o.name(),
+            o.ramp(Some(m)).source
+        );
+    }
+    // The bottom and the top band of the drawn palette are those two colours, linearised.
+    let p = palette(Overlay::Light, Some(m));
+    assert_eq!(p[ID_COUNT], linear_rgba("#010203"));
+    assert_eq!(p[ID_COUNT + BANDS - 1], linear_rgba("#fdfeff"));
+    // Fire's burnt band is the run's colour, and the quiet band is still this viewer's: "nothing to
+    // show here" is not an ecological quantity (palette.rs).
+    let f = palette(Overlay::Fire, Some(m));
+    assert_eq!(f[ID_COUNT + FIRE_BURNT as usize], linear_rgba("#0a0b0c"));
+    assert_ne!(f[ID_COUNT + FIRE_QUIET as usize], linear_rgba("#0a0b0c"));
+    // `Surface` is the bundle's media and has no ramp to own, which it says rather than claiming a
+    // fallback it does not use.
+    let surf = Overlay::Surface.ramp(Some(m));
+    assert!(
+        surf.from_meta() && surf.source.contains("media"),
+        "{}",
+        surf.source
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A run written before shot S2 has no `overlays`, and then the hues are this viewer's copy of the
+/// `ecoview` legend -- named as a fallback, the same way a missing scale is.
+#[test]
+fn a_run_without_overlays_says_the_hues_are_the_viewers() {
+    let dir = tmp("noramps");
+    write_overlay_run(&dir, 8, 4, false);
+    let m = &Run::load(&dir).unwrap().meta;
+    assert!(m.overlays.is_empty());
+    let r = Overlay::Light.ramp(Some(m));
+    assert_eq!(
+        (r.lo.as_str(), r.hi.as_str()),
+        ("#000000", "#ffffff"),
+        "the ecoview legend"
+    );
+    assert!(!r.from_meta(), "{}", r.source);
+    assert!(r.source.contains("overlays.light"), "{}", r.source);
+    // The picture is still drawn, with the legend's colours: a missing palette is not a blank screen.
+    let p = palette(Overlay::Light, Some(m));
+    assert_eq!(p[ID_COUNT + BANDS - 1], linear_rgba("#ffffff"));
+    assert_eq!(
+        p[ID_COUNT + BANDS - 1],
+        palette(Overlay::Light, None)[ID_COUNT + BANDS - 1]
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }

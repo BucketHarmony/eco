@@ -1325,3 +1325,149 @@ an age in years, which is the lifespans-and-phenology subsystem — trees have n
 only an age in ticks. The prompt's limiter says the acceptance lines that test converted quantities
 apply only to the subsystems actually converted, so this one is recorded in `UNITS.md` section 7 as the
 shot's largest finding (the tree tier is out by 25–60×) and handed on.
+
+## Shot G4c — units calibration, part two
+
+The judgements of shot G4c, which converted the two subsystems its prompt made non-negotiable —
+light, and the tree tier's ages — and handed the other three on. Filed under the heading the prompt
+asks for, "Units calibration, part two".
+
+**Light is a fraction of full sun, not PAR in mol m⁻² d⁻¹.** The prompt offered both and asked which
+and why. A fraction is what every rule in the model actually needs: the four light curves are
+suitability curves, which are comparisons against a ceiling, and a ceiling expressed as "full sun"
+needs no absolute irradiance behind it. Introducing a mole would mean choosing a site's daily PAR
+total, giving it a season, and writing every curve against a number the model has no other use for —
+a calibration with no reader. `light.bin` also stays a byte, and a byte that holds `255 ×` a fraction
+is exactly the byte it held before, so no renderer and no format version moves. If a later shot needs
+absolute PAR — a photosynthesis rate would — it multiplies the fraction by one site constant, and
+nothing written now has to be unwritten.
+
+**The canopy became a product, and that is the one rule this shot changed.** `255 − absorb × layers`
+is a subtraction that saturates, so from three canopy voxels down a column received *exactly* zero
+light and every suitability curve read 0. Beer–Lambert (`exp(−k·LAI·layers)`) never reaches zero.
+`canopy_k = 0.5` and `canopy_lai = 2.0` put a mature two-voxel crown at LAI 4 transmitting 13.5%,
+inside the published 10–25% at LAI 3–5 (UNITS.md R10), which is the shot's acceptance line. Worth
+recording honestly: the old rule *also* transmitted inside that band at two layers (21.6%). The
+conversion earns its keep at one layer (60.8% → 36.8%) and at three or more (0% → 5.1%), and it is
+the one-layer row that moves the reference runs — a young tree now casts shade a grass species cannot
+grow in, so germination and tree counts rise on every seed and ground cover falls under them
+(`sweeps/shotG4c/FINDINGS.md`).
+
+**The fixed sun is now an angle, and the angle is the approximation.** `bundle.shade_slope = 1.0`
+became `bundle.sun_altitude_deg = 45.0`, because `1/tan(45°) = 1` exactly and so no building's shadow
+moved by a voxel, and because a slope hid what it was a slope of. The value is also defensible on its
+own: Lansing's noon sun near the equinox is 47°. Naming the degree exposes the modelling error the
+slope concealed — a shaded voxel is fully dark, which is only true with no diffuse sky light. That
+belongs to backlog row G9's moving sun, and this shot did not add a sun, as its prompt says twice.
+
+**The tree ages were converted and deliberately not corrected.** This is the shot's largest judgement
+and the prompt allowed it explicitly: "either a tree's age in years matches the published
+height-by-age band at the ages sampled, or DECISIONS.md says which of the three ways out was taken
+and why the line still cannot be claimed." None of the three was taken, because each is closed:
+
+1. **A 200000-tick reference run** fails the runtime invariant, and a standing rule of this series
+   forbids widening an invariant to make a gate pass. The prompt's own override 4 says the same in
+   narrower words: a check may be retired because its units are gone, never widened because the run
+   now fails it.
+2. **Per-tier time scales** is a mechanism. The prompt names it and pre-empts it: "If the choice turns
+   out to need a mechanism (option 2 does), stop and write it up rather than adding one."
+3. **A longer tick** would break every mm/h rate the water tier was calibrated on in shot G4b —
+   undoing the only physically calibrated tier in the model to fix one that is not.
+
+So `initial_age`, `young_age`, `mature_age`, `max_age`, `seed_every` and `bundle.tree_tall_age`
+became `initial_age_years`, `young_age_years`, `mature_age_years`, `max_age_years`, `seeds_per_year`
+and `tree_tall_age_years`, at values that reproduce the old tick counts exactly at `year_len = 4000`.
+The gain is not behavioural, it is legibility: `params.toml` now says a tree matures at 0.25 years and
+dies at 1.5, which a reader can check against a published 5–8 years and 60–150 years in one step,
+where `mature_age = 1000` gave no one anything to check. The error moved from hidden to stated, which
+is what an audit is for.
+
+**A second reason the height-by-age line cannot be claimed, independent of the time scale: the
+model's trees have no height.** A tree has an age and a stage, and a crown of one voxel or two. There
+is no metre to compare with "3 m at 5–8 yr". `bundle.tree_mature_height` maps a *scene* tree's height
+onto an import age and is not a property the sim maintains. Any shot that wants that acceptance line
+has to give trees a height first, which is a mechanism.
+
+**`Params::tree_ages()` converts once, at the point of use.** The seven converted ages are read
+together through one method returning a `TreeAges` of tick counts, rather than each call site dividing
+by `year_len` itself. That is the same discipline `HOURS_PER_YEAR` enforces for the water tier — one
+place that knows how a year becomes ticks — and `tests/units.rs` already fails if a module divides by
+`year_len` on its own.
+
+**Seeding was a schedule and is now a rate, and the schedule was wrong.** A mature tree seeded when
+`age % seed_every == 0`. A tree's age advances by whole `tree.update_every` steps, so that test can
+only fire when `update_every` divides `seed_every`. It does at the shipped 50 and 200, which is why
+nothing had caught it. Turning the parameter into `seeds_per_year` makes the broken values reachable
+by an operator — `seeds_per_year = 30` gives `seed_every = 133` and a tree that seeds once per 6650
+ticks instead of 133 — so the test became "the update whose age crosses a multiple of `seed_every`".
+It picks exactly the same ages at the shipped values **for a tree whose age starts at a multiple of
+`tree.update_every`**, because stepping by 50 preserves the residue. That is every tree on the strip
+— germinated trees start at 0, initial trees at 500 — and not every tree on a bundle world, where
+`plants::import_age` turns a height into an arbitrary age. 63 of the Capitol's 79 imported trees
+have an age that is not a multiple of 50 and so could never satisfy `age % 200 == 0`: they never
+seeded in any run before this shot. The Capitol's germination count goes 7645 → 19408 and its trees
+at tick 20000 1619 → 4082, which makes this the largest behaviour change in the shot on a bundle
+world, larger than the light rule that motivated it. It is a bug fix, not a retune: no default
+moved, and the run still passes every check. This is the second rule the audit found to be
+wrong rather than mis-scaled, after `draw_moisture` in G4b, and it is listed separately as the prompt
+requires (UNITS.md finding 12).
+
+**The byte-identical anchor stayed suspended, and what replaced it.** Per the prompt's override 2,
+the substitute is: the reference worlds still run to full length with plants surviving and pass the
+re-derived checks. They do — seeds 1, 2, 3 and 42 on the strip and the Capitol bundle, all five
+passing every `ecosim check` invariant with the thinnest margin in the set improved rather than
+eroded (seed 1's `mature_trees_10k` went from 38 against a floor of 35 to 701). Recorded here because
+override 2 asks for the substitution to be recorded, not just used.
+
+**One byte comparison was narrowed, and it is a retirement, not a widening.**
+`format_2_and_fire_only_add_to_version_1_files` compared the tick-0 `light.bin` of a fresh run with
+the version-1 fixture byte for byte. The fixture cannot be re-cut — there is no version-1 writer —
+and the quantity has changed rule, so the comparison could not survive as equality. It was replaced
+by a *stronger* assertion, not a weaker one: `light_is_the_v1_file_re_extincted` checks that every
+byte of the fresh file is the Beer–Lambert re-expression of the byte version 1 wrote at the same
+index, so "only the light rule changed, column for column" is now the thing under test. Override 4
+asks which of the two kinds of retirement this is: it is "the old units no longer exist", and the
+replacement is tighter than what it replaces.
+
+**A second byte comparison was narrowed, the same way and for the same reason.**
+`sweep.rs`'s `the_pre_conversion_manifests_are_kept_as_history` asserted that `material.bin`,
+`light.bin` and `height.bin` at tick 0 hash the same in the pre-conversion manifests as in the `-g4b`
+cuts that replaced them — "the world a seed makes has not moved". Light has moved: the twelve young
+trees planted at tick 0 shade their columns to 94 where they shaded them to 155. `light.bin` is now
+asserted to **differ**, and the terrain files still to match, so the claim is narrowed to what it was
+really about and nothing is merely deleted. Same classification as above: the old units no longer
+exist. The `-g4b` file names are left alone; a manifest keeps the name of the shot that cut it, not of
+every shot that regenerates it, and renaming five files would make the history harder to read, not
+easier.
+
+**`libm`, not `std`, for the new exponential.** `clippy.toml` disallows `f32::exp` and `f64::tan`
+because MSVC and glibc do not agree on them, and both are now on the hot path of a deterministic
+simulation: the canopy's `exp(-k * LAI * layers)` runs per voxel and the sun's `1 / tan(altitude)`
+once per load. Both go through the `libm` crate, which is the rule shot 15a's cross-profile
+determinism test exists to protect. Worth naming because it is the kind of thing a units conversion
+introduces by accident: the old rule was integer subtraction and needed no transcendental at all.
+
+**Fixture regeneration became part of the same switch.** `fixtures/capitol-mini` and
+`fixtures/s42-mini-v2` were the last two committed artefacts still needing a throwaway script to
+re-cut, which DECISIONS.md ("Regeneration is a switch, not an edit") already argued against. Both
+tests now rewrite their fixture under `ECOSIM_REGEN_MANIFEST=1`, the switch shot G4b left for the
+manifests and `s42-check.txt`, so one environment variable re-cuts everything a behaviour-changing
+shot has to re-cut. Nothing sets it in CI.
+
+**`docs/SAD-addendum.md`'s Light section was updated; its Trees section was flagged, not fixed.** The
+addendum documents what `light.bin` holds, and this shot changed what the byte means (not its range,
+not the format version), so the repo rule "if you change the format, update the SAD with it" applies
+and the section now states the Beer–Lambert rule and its three transmittances. The addendum's Trees
+section was already stale from G4b — it still describes a 0–255 moisture threshold and a
+`tree_moisture_draw` that no longer exists — and fixing it is not this shot's scope, so a single
+pointer line now says it describes the pre-calibration model and names `params.toml` and `UNITS.md`
+as the current source. A stale doc that says it is stale is not the same failure as one that does not.
+
+**The limiter bound, and the shot stopped at the subsystem boundary.** Light and lifespans landed;
+the fertility and detritus indices (subsystem 3, with `climate.decay_k`'s 10× error), the parked
+animal tier (subsystem 4) and the legacy moisture model (subsystem 5, to be left alone and said so
+again) did not. `overnight/shots/G4e-units-calibration-rest2.md` names exactly what remains; every
+unconverted row in `UNITS.md` is still marked `deferred` and section 6's heading now says G4e instead
+of G4c. Per the prompt's limiter this is a normal "shot G4c:" commit with the backlog row set Done —
+"a shot that lands light and hands the rest on has succeeded" — and the handoff is stated in the LOG
+line as well as here.

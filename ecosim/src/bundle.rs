@@ -605,7 +605,7 @@ pub(crate) mod tests {
         let mut b = flat_bundle(16, 2);
         build(&mut b, 5, 5, 6.0);
         let mut p = bundle_params(&b);
-        p.bundle.shade_slope = 0.0;
+        p.bundle.sun_altitude_deg = 0.0;
         let w = World::from_bundle(&b, &p).unwrap();
         assert!(w.shade_top.iter().all(|&s| s == 0));
         assert_eq!(w.surface_light(w.dims.cidx(5, 6)), 255);

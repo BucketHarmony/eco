@@ -1,14 +1,21 @@
-# Units audit (shot G4b)
+# Units audit (shots G4b, G4c)
 
 Every parameter in `params.toml` and every unit-bearing constant in the code, with the unit it is
 actually in today, the unit it should be in, and where its value comes from. Written before any
 conversion, as the shot prompt asks, so that the audit stands as the finding even if the conversion
 has to be split across shots.
 
-**Status column.** `converted` — re-expressed by shot G4b. `unchanged` — already in the declared
-system, nothing to do. `deferred` — still in old units, handed to shot G4c (see
-`overnight/shots/G4c-units-calibration-rest.md`). `dimensionless` — carries no unit, nothing to
-convert. A row marked `deferred` must not be read as physical.
+**Status column.** `converted` — re-expressed by shot G4b or G4c; the shot is named in the row or
+the section heading. `unchanged` — already in the declared system, nothing to do. `deferred` — still
+in old units, and since shot G4c handed on to `overnight/shots/G4e-units-calibration-rest2.md`.
+`dimensionless` — carries no unit, nothing to convert. A row marked `deferred` must not be read as
+physical.
+
+**What shot G4c converted, and what it did not.** G4c took the two subsystems its prompt made
+non-negotiable: **light** (section 3.6) and **tree demography** (section 3.7). It did **not** reach
+the fertility and detritus indices, `climate.decay_k`'s 10x error, the parked animal tier or the
+legacy moisture model; those four are still in section 6 and are G4e's. This table is not complete
+and does not claim to be.
 
 **Reference column.** `ref` — calibrated against a published value, named in the reference list at
 the bottom. `model` — a declared model constant with no physical counterpart; its value is a
@@ -33,7 +40,7 @@ shot calibrates against, and a public location.
 | area | **m2**; one ecology column is 1 m2 | `Flow::cell_area` |
 | plant cover | **dimensionless fraction** of ground covered, 0–1 | `Patch::grass`, `Patch::shrub` |
 | rates | **per hour** for water, **per year** for everything biological; a staggered update multiplies the rate by its own duration, so changing a cadence does not change an annual total | `schedule.*` |
-| light | **dimensionless 0–255 index** of surface irradiance — not yet physical (`deferred`) | `world.canopy_absorb` |
+| light | **dimensionless fraction of full sun**, 0–1, which every light curve is now in; the `light` voxel field and `light.bin` hold `255 x` that fraction as a display index (`converted`, G4c) | `world.canopy_k`, `world.canopy_lai`, `world::FULL_SUN` |
 | soil water index (`moisture`) | **dimensionless 0–255 index** = 255 x (soil water / available water capacity). A **display** scale: no rule reads it after this shot | `Sim::moisture` |
 | fertility | **dimensionless 0–255 index** — not yet physical (`deferred`; shot G5 replaces the field with N, P and K) | `Sim::fertility` |
 | animal energy | **dimensionless 0–100 index** — not yet physical (`deferred`; the animal tier is parked) | `Animal::energy` |
@@ -60,16 +67,16 @@ the largest single finding of the audit; see section 7.
 
 | section | keys | what it holds | status |
 |---|---|---|---|
-| `[world]` | 13 | world geometry, in metres and columns | 11 unchanged, 2 dimensionless |
+| `[world]` | 14 | world geometry, in metres and columns, plus the canopy optics | 11 unchanged, 2 dimensionless, 2 converted (G4c: `canopy_absorb` became `canopy_k` and `canopy_lai`) |
 | `[climate]` | 14 | season, the legacy moisture model, decay | 1 converted, 4 unchanged, 5 dimensionless, 4 deferred |
 | `[rain]` | 2 | storm frequency and size | 2 converted |
 | `[hydro]` | 6 | the water tier's rates and stores | 3 converted, 1 unchanged, 2 dimensionless |
 | `[medium.*]` | 9 x 4 | infiltration, AWC, percolation, plantability per medium | 27 unchanged, 9 dimensionless |
 | `[season]` | 1 | temperature amplitude, °C | unchanged |
 | `[cover]` | 7 | ground-cover water, litter and fertility | 1 converted, 4 dimensionless, 2 deferred |
-| `[grass]`, `[shrub]` | 6 each | the two ground-cover species | 2 converted each, 1 dimensionless, 3 curves (1 converted, 2 deferred) |
-| `[tree]` | 21 | the tree species | 3 converted, 3 unchanged, 6 dimensionless, 9 deferred |
-| `[bundle]` | 6 | how a scene becomes a world | 3 unchanged, 1 dimensionless, 2 deferred |
+| `[grass]`, `[shrub]` | 6 each | the two ground-cover species | 2 converted each, 1 dimensionless, 3 curves (2 converted — the light curve in G4c — 1 deferred) |
+| `[tree]` | 21 | the tree species | 11 converted (8 in G4c: the light curve, `sapling_light`, the four ages, `seed_every`, `dry_death_ticks`), 2 unchanged, 6 dimensionless, 2 deferred (`death_detritus`, `immigration_interval`) |
+| `[bundle]` | 6 | how a scene becomes a world | 2 converted (G4c), 3 unchanged, 1 dimensionless |
 | `[animals]` | 1 | the animal tier's switch | dimensionless |
 | `[grazer]`, `[hunter]` | 22, 23 | the animal tier | deferred (the tier is parked) |
 | `[fire]` | 11 | fire disturbance | 1 converted, 2 unchanged, 8 dimensionless or deferred |
@@ -207,8 +214,74 @@ can be read from the same value. Each is a tick count; the duration it stands fo
 | `schedule.fire_every` | `fire.rs:15`, `pub const FIRE_EVERY: u32 = 10` | 10 | converted |
 | `tree.update_every` | already a parameter | 50 | unchanged |
 | `world.compact_every` | already a parameter | 100 | unchanged |
-| `tree.seed_every` | already a parameter | 200 | deferred, see section 6 |
+| `tree.seed_every` | already a parameter | 200 ticks | **converted in G4c** to `tree.seeds_per_year` = 20, a rate; see section 3.7 |
 | `grazer/hunter/tree.immigration_interval` | already parameters | 500 | deferred, see section 6 |
+
+### 3.6 Light (shot G4c)
+
+The surface-irradiance index is gone. A voxel's light is the **fraction of full sun** that reaches
+it, and the canopy attenuates it by Beer–Lambert extinction (R10):
+
+    I / I0 = exp(−k x LAI x layers)
+
+with `k` = `world.canopy_k` and the leaf area index of one canopy voxel = `world.canopy_lai`. The
+voxel field and `light.bin` still hold one byte, now defined as `FULL_SUN x` that fraction with
+`FULL_SUN = 255` (`src/world.rs`), so **the run directory format does not move**: the byte's range
+is the same and only its meaning is now stated. Every curve that reads it is a fraction of full sun.
+
+| key | old value (0–255 index) | new value | unit | ref | status |
+|---|---|---|---|---|---|
+| `world.canopy_absorb` | 100 subtracted per canopy voxel | — | — | — | **replaced** |
+| `world.canopy_k` | — | 0.5 | extinction coefficient, dimensionless | ref (R10: 0.4–0.7) | converted |
+| `world.canopy_lai` | — | 2.0 | m2 leaf per m2 ground, per canopy voxel | ref (R10, via the crown's LAI) | converted |
+| `grass.light` | [100, 200, 255, 256] | [0.3922, 0.7843, 1.0, 1.0039] | fraction of full sun | model | converted |
+| `shrub.light` | [40, 100, 200, 254] | [0.1569, 0.3922, 0.7843, 0.9961] | fraction of full sun | model | converted |
+| `tree.light` | [60, 150, 255, 256] | [0.2353, 0.5882, 1.0, 1.0039] | fraction of full sun | model | converted |
+| `tree.sapling_light` | 150 | 0.5882 | fraction of full sun | model | converted |
+| `bundle.shade_slope` | 1.0 (a 45° sun, unstated) | `bundle.sun_altitude_deg` = 45.0 | degrees above the horizon | ref (Lansing's noon sun near the equinox is 47°) | converted |
+
+**The germination threshold, stated as the prompt asks.** A seed's light suitability is 0 below
+**23.5% of full sun**, rises linearly to 1 at **58.8%** (`tree.sapling_light`), and stays 1 above it.
+So a tree germinates freely in the open (100%) and under a young one-voxel canopy at 36.8%, its
+suitability is 0.38; under a mature two-voxel canopy at 13.5% it is 0.
+
+**The one calibration.** `canopy_k x canopy_lai = 1.0` is an optical depth of 1 per canopy voxel. A
+mature sim crown is two voxels, so its LAI is **4.0** — inside R10's 3–5 — and it transmits
+**13.5%**, inside R10's 10–25%. That is the acceptance line, and `world.rs`'s
+`closed_canopy_transmittance_is_inside_the_published_band` asserts it. The old rule transmitted
+21.6% through the same crown, which is also inside the band, so the conversion is not a large change
+at two layers; where it changes the world is at **one** layer (60.8% → 36.8%, a young canopy that
+used to be nearly open) and at **three or more** (0% → 5.0% and thinning, instead of black).
+
+`bundle.sun_altitude_deg` = 45° reproduces the old `shade_slope` of 1.0 to the bit, because
+`1 / tan(45°) = 1`. No building's shadow moved. What the degree does is make the approximation
+visible: a shaded voxel is fully dark, which is only true if there is no diffuse sky light, and the
+diffuse component arrives with the moving sun of backlog row G9.
+
+### 3.7 Tree demography (shot G4c)
+
+Every tree age is now a **year** and the drought clock a **day**; the values are unchanged in
+duration, so the conversion is a pure change of units and the reference runs move only through the
+light change above.
+
+| key | old value | new key and value | unit | ref | status |
+|---|---|---|---|---|---|
+| `tree.initial_age` | 500 ticks | `initial_age_years` = 0.125 | years | model | converted |
+| `tree.young_age` | 500 ticks | `young_age_years` = 0.125 | years | **model, and wrong by ~25x** (R12) | converted |
+| `tree.mature_age` | 1000 ticks | `mature_age_years` = 0.25 | years | **model, and wrong by ~25x** (R12) | converted |
+| `tree.max_age` | 6000 ticks | `max_age_years` = 1.5 | years | **model, and wrong by ~60x** (R12) | converted |
+| `tree.dry_death_ticks` | 500 ticks | `dry_death_days` = 45.66 | days | ref (R9) | converted |
+| `tree.seed_every` | 200 ticks | `seeds_per_year` = 20.0 | attempts per year | model | converted |
+| `bundle.tree_tall_age` | 3000 ticks | `tree_tall_age_years` = 0.75 | years | **model, and wrong by ~60x** (R12) | converted |
+
+`Params::tree_ages()` turns all seven back into tick counts once per use; at the shipped
+`year_len = 4000` they come back as exactly 500, 500, 1000, 6000, 500, 200 and 3000, which is why
+this conversion is byte-neutral on its own.
+
+**The values are deliberately not corrected.** The unit is now right and the number is now visibly
+wrong, which is the whole point: see section 7 for the decision and `DECISIONS.md`, "Units
+calibration, part two". Before this shot a reader had to divide 6000 by `year_len` to discover that
+the model's trees die at eighteen months; now `max_age_years = 1.5` says so in the file.
 
 ## 4. Unchanged: already in the declared system
 
@@ -219,13 +292,13 @@ can be read from the same value. Each is a tick count; the duration it stands fo
 | `climate.temp_base`, `canopy_cool`, `decay_temp_full` | 12.0, 3.0, 30.0 | °C |
 | `season.amplitude` | 15.0 | °C |
 | `tree.seed_radius`, `min_spacing` | 6.0, 2 | columns = metres |
-| `tree.dry_death_ticks` | 500 | ticks = 45.6 days of continuous drought |
+| `tree.dry_death_days` | 45.66 | days of continuous drought (G4c renamed it from `dry_death_ticks` = 500 ticks; the duration is the same) |
 | `bundle.tree_mature_height`, `tree_tall_height`, `tree_move_radius` | 3.0, 20.0, 2.0 | metres |
 | `bundle.base_z` | 8 | metres |
 | `grazer.flee_radius`, `search_patches`, `crowding`, `hunter.attack_radius`, `seek_radius`, `flee_radius`, `displace_steps`, `refugium_k` | — | columns = metres, or patches |
 | `fire.temp_min`, `temp_full` | 15.0, 30.0 | °C |
 
-`tree.dry_death_ticks` is the one tick-denominated tree constant that survives the audit unchanged:
+`tree.dry_death_days` is the one tree constant that survives the audit unchanged:
 45.6 days of continuous water stress before death is the right order for a mature broadleaf, and it
 is the *only* tree age that is. Every other one is out by 50x or more (section 7).
 
@@ -241,17 +314,11 @@ is the *only* tree age that is. Every other one is out by 50x or more (section 7
 `grazer.immigration_floor`, `grazer.eat_min_grass`, `hunter.start_count`, `hunter.kill_prob`,
 `hunter.immigration_floor`.
 
-## 6. Deferred to shot G4c — still in old units
+## 6. Deferred to shot G4e — still in old units
 
-Read no row in this list as physical.
-
-**Light (subsystem 4 of the prompt's order, not started).** `world.canopy_absorb` = 100 on a 0–255
-index, `grass.light`, `shrub.light`, `tree.light` (three 4-element curves on the same index),
-`tree.sapling_light` = 150, `bundle.shade_slope` = 1.0 (a 45° sun), and `world.rs:496`'s
-`255 - absorb x layers`. The physical form is Beer–Lambert extinction through a canopy of a given
-leaf area index (R10), and the fixed sun is backlog row G9's business. Converting light means
-converting all four curves, the sapling threshold and the building shade together, and it changes
-which columns germinate, so it is a subsystem on its own.
+Read no row in this list as physical. Shot G4c cleared light (section 3.6) and tree demography
+(section 3.7) out of this list; what is left below is the whole of what G4e inherits, and nothing
+else is outstanding.
 
 **Nutrients (subsystem 5, mostly deferred).** `cover.fertility_draw` = 20,
 `cover.fertility_full` = 64, `cover.litter_factor` = 20, `climate.initial_fertility` = 128,
@@ -277,13 +344,11 @@ acts on.
   50-year Capitol run's fertility peaks at **238.7** against `check`'s ceiling of 220 and spends the
   run pinned near it (`sweeps/shotG4b/FINDINGS.md` section 5).
 
-**Lifespans and phenology (subsystem 7, not started).** `tree.initial_age` = 500, `young_age` = 500,
-`mature_age` = 1000, `max_age` = 6000, `seed_every` = 200, `bundle.tree_tall_age` = 3000 — all tick
-counts, all out by 50–100x (section 7). A tree is mature in 0.25 years and dead in 1.5. Deciduous
-phenology (a leaf-off season with no transpiration) does not exist at all. `tree.seed_every` is
-also the one cadence the interval-doubling test cannot cover, because it is a schedule and not a
-rate: a mature tree attempts one seed every `seed_every` ticks, so halving it doubles a year's
-attempts. Turning it into a per-year attempt rate belongs with the rest of the tree demography.
+**Deciduous phenology.** Converted units do not create a leaf-off season: the model's trees
+transpire at the same rate in January and July, `hydro.et_mm_h` has a temperature factor and the
+tree draw has none (finding 4). Adding one is a mechanism, so shot G4c recorded it and stopped, as
+its prompt required. Nothing in `params.toml` stands for it — there is no key to mark — which is
+exactly why it is written down here.
 
 **The legacy moisture model.** `climate.rain_base` = 8.0, `rain_amp` = 4.0, `evap_base` = 2.0,
 `evap_div` = 8.0, `pond_moisture` = 255.0, `initial_moisture` = 128.0, `climate.diffusion` = 0.10.
@@ -303,14 +368,19 @@ converts cover fraction to energy; `intake_max`, `intake_k`, `eat_below`, `repro
 `fail_cost` are all on the energy index. The tier is parked by the operator's direction of
 2026-09-19, so converting it buys nothing the garden series needs.
 
-**The `immigration_interval`s.** 500 ticks for each of trees, grazers and hunters. Like `seed_every`
-they are schedules, not rates, and two of the three belong to the parked animal tier.
+**The `immigration_interval`s.** 500 ticks for each of trees, grazers and hunters. They are
+schedules, not rates — `seed_every` was the other one and shot G4c turned it into
+`tree.seeds_per_year`, which is the shape these three should take too. Two of the three belong to
+the parked animal tier, so they wait for it.
 
 **The signature constants of `check.rs`.** `SIG_MAX_LAG` 8000, `SIG_LAG_STEP` 50, `SIG_START` 5000,
 `SIG_END` 60000, `SIG_DETREND` 12000, `SIG_MAX_PERIOD` 20000 — six tick counts that score the
-predator–prey signature. They stay tick-denominated and move with the animal tier in G4c. Stated
-plainly: this is a deferral, not a justification. If `climate.year_len` moves before G4c, the
-signature score changes meaning and nothing will complain.
+predator–prey signature. They stay tick-denominated and move with the animal tier, which shot G4c
+left parked on the operator's direction of 2026-09-19; they are G4e's, or whichever shot un-parks
+the tier. Stated plainly a second time, because a silent deferral is how this kind of thing is lost:
+this is a deferral, not a justification. If `climate.year_len` moves before that shot, the signature
+score changes meaning and nothing will complain. The grazer-cycle windows in `check.rs` stay in
+ticks with them.
 
 ## 7. The finding: two time scales
 
@@ -339,8 +409,29 @@ ways out, none of them this shot's to take:
 3. **A longer tick.** Make a tick a day and the trees come right, but then a storm cannot fall in
    one tick and the mm/h rates lose their meaning.
 
-Recorded, not resolved. The honest statement for anyone reading a `series.csv` after this shot: the
-water columns are in real millimetres over a real year, and the tree ages are not in real years.
+**Shot G4c's decision: none of the three, and say so in the file.** The prompt allowed a fourth
+outcome — "DECISIONS.md says which of the three ways out was taken and why the line still cannot be
+claimed" — and that is what G4c took, having found each of the three closed:
+
+1. A 200000-tick run still fails the runtime invariant, which G4c may not widen (MASTER's standing
+   rules, and the shot's own override 4: a check may be retired because its units are gone, never
+   widened because the run now fails it). The strip takes 32–53 s at 20000 ticks.
+2. Per-tier time scales is a mechanism, and the prompt's constraint is explicit: "If the choice
+   turns out to need a mechanism (option 2 does), stop and write it up rather than adding one."
+3. A longer tick breaks every mm/h rate the water tier was calibrated on in G4b — it would undo the
+   one physically calibrated tier to fix the one that is not.
+
+So G4c converted the **unit** and left the **value**, which moves the error from hidden to stated:
+`max_age_years = 1.5` in `params.toml` is a claim a reader can check against R12 in one step, where
+`max_age = 6000` was not. The published height-by-age acceptance line still cannot be claimed, and
+for a second reason beyond the time scale: **the model's trees have no height**. A tree has an age
+and a stage, and its canopy is one voxel or two; there is no metre to compare with R12's "3 m at
+5–8 yr". `bundle.tree_mature_height` maps a *scene* tree's height onto an age at import and is not
+a property the sim maintains.
+
+Recorded, not resolved. The honest statement for anyone reading a `series.csv` after these shots:
+the water columns are in real millimetres over a real year, the light is a real fraction of full
+sun, and the tree ages are not in real years.
 
 ## 8. Audit findings
 
@@ -372,6 +463,23 @@ water columns are in real millimetres over a real year, and the tree ages are no
    bounded. The new `moisture_band` line is therefore a new check, not a re-expressed one.
 10. **`animals.rs` has a maximum animal energy with no parameter behind it** — `.min(100.0)` at two
     call sites. Deferred with the tier, recorded here so it is not lost.
+11. **A canopy could not be dark, it could only be black** (shot G4c). `255 - absorb x layers`
+    saturated at 0 from three canopy voxels down, so a column under deep canopy received *exactly*
+    no light and every suitability curve returned 0. Beer–Lambert never reaches 0: three layers now
+    pass 5.0% and ten pass 0.005%. Mis-scaled rather than wrong — the rule was a subtraction where
+    the physics is a product — but the saturation was a real artefact, not just a units error.
+12. **Seeding was a schedule that only worked for divisors of `tree.update_every`** (shot G4c). A
+    mature tree seeded when `age % seed_every == 0`, and a tree's age advances by whole
+    `update_every` steps, so the test could only ever fire if `update_every` divided `seed_every`.
+    It does at the shipped 50 and 200. It does not at, say, `seeds_per_year = 30`
+    (`seed_every = 133`), where the old rule seeds once per 6650 ticks instead of 133 — a 50x error
+    with nothing to warn of it. Turning the schedule into a rate made that reachable, so G4c changed
+    the test to "the update whose age crosses a multiple of `seed_every`", which is identical at the
+    shipped values for a tree whose age starts at a multiple of `update_every` and correct at every
+    other. A tree imported from a world bundle does not start at one: 63 of the Capitol's 79 have an
+    age that is not a multiple of 50 and never seeded at all before this shot
+    (`sweeps/shotG4c/FINDINGS.md`). This is the second rule the audit found to be wrong
+    rather than mis-scaled, after `draw_moisture` (finding 1).
 
 ## References
 

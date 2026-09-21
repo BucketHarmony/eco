@@ -60,7 +60,8 @@ pub fn stage_of(age: u32, young_age: u32, mature_age: u32) -> Stage {
 impl Sim {
     /// Stage of a tree under the current params.
     pub fn tree_stage(&self, t: &Tree) -> Stage {
-        stage_of(t.age, self.params.tree.young_age, self.params.tree.mature_age)
+        let a = self.params.tree_ages();
+        stage_of(t.age, a.young, a.mature)
     }
 
     /// True if no live trunk is closer than `min_spacing` (Chebyshev) to (x, y).
@@ -114,7 +115,7 @@ impl Sim {
 
     /// Recompute light and canopy cover for the 3×3 columns around a trunk.
     pub fn refresh_canopy_columns(&mut self, x: u8, y: u8) {
-        let (absorb, d) = (self.params.world.canopy_absorb, self.world.dims);
+        let (extinction, d) = (self.params.canopy_extinction(), self.world.dims);
         for dy in -1..=1 {
             for dx in -1..=1 {
                 let (cx, cy) = (x as i32 + dx, y as i32 + dy);
@@ -123,18 +124,18 @@ impl Sim {
                 }
                 let zs = self.canopy_z(cx, cy);
                 self.canopy_cover[d.cidx(cx as usize, cy as usize)] = !zs.is_empty();
-                self.world.set_column_light(cx as usize, cy as usize, &zs, absorb);
+                self.world.set_column_light(cx as usize, cy as usize, &zs, extinction);
             }
         }
     }
 
     /// Plant a tree on (x, y) and refresh the light of the columns its canopy covers. Its lifespan is
-    /// `max_age · (1 + lifespan_jitter · u)` with u uniform in [−1, 1], one draw from the sim RNG.
+    /// `max_age_years · (1 + lifespan_jitter · u)` with u uniform in [−1, 1], one draw from the sim RNG.
     /// Returns the new tree's id.
     pub fn plant_tree(&mut self, x: usize, y: usize, age: u32) -> u32 {
         let id = self.alloc_id();
         let tp = &self.params.tree;
-        let (mean, jitter) = (tp.max_age as f32, tp.lifespan_jitter);
+        let (mean, jitter) = (self.params.tree_ages().max as f32, tp.lifespan_jitter);
         let u: f32 = self.rng.gen_range(-1.0..=1.0);
         let lifespan = (mean * (1.0 + jitter * u)).round().max(0.0) as u32;
         self.trunk_at[self.world.dims.cidx(x, y)] = self.trees.len() as u32;
@@ -145,7 +146,7 @@ impl Sim {
 
     /// Plant `initial_count` trees on random soil columns, respecting `min_spacing`.
     pub fn place_initial_trees(&mut self) {
-        let (n, age) = (self.params.tree.initial_count, self.params.tree.initial_age);
+        let (n, age) = (self.params.tree.initial_count, self.params.tree_ages().initial);
         let mut placed = 0;
         let mut attempts = 0;
         while placed < n && attempts < 10_000 {
@@ -205,7 +206,7 @@ impl Sim {
     pub fn germination_prob(&self, x: usize, y: usize) -> f32 {
         let c = self.world.dims.cidx(x, y);
         let tp = &self.params.tree;
-        suitability(&self.params.tree_light_curve(), self.world.surface_light(c) as f32)
+        suitability(&self.params.tree_light_curve(), self.world.surface_light_fraction(c))
             * suitability(&tp.moisture, self.water_fraction(c))
             * suitability(&tp.temp, self.patches[self.world.dims.patch_of(x, y)].temperature)
     }
@@ -229,6 +230,7 @@ impl Sim {
     /// Tree update (on ticks where tick % update_every == 0). Trees planted this tick wait.
     pub fn update_trees(&mut self) {
         let tp = self.params.tree.clone();
+        let ages = self.params.tree_ages();
         let n = self.trees.len();
         for i in 0..n {
             if !self.trees[i].alive {
@@ -249,7 +251,7 @@ impl Sim {
                 self.kill_tree(i, "old_age");
                 continue;
             }
-            if self.trees[i].dry_ticks >= tp.dry_death_ticks {
+            if self.trees[i].dry_ticks >= ages.dry_death {
                 self.kill_tree(i, "drought");
                 continue;
             }
@@ -267,7 +269,12 @@ impl Sim {
                 let (x, y) = (self.trees[i].x, self.trees[i].y);
                 self.refresh_canopy_columns(x, y);
             }
-            if after == Stage::Mature && self.trees[i].age.is_multiple_of(tp.seed_every) {
+            // Seeds once per `seed_every` ticks: the update whose age crosses a multiple of it. The
+            // old test was `age.is_multiple_of(seed_every)`, which is the same thing whenever
+            // `update_every` divides `seed_every` — it does at the shipped 50 and 200 — and silently
+            // seeds never when it does not. `seeds_per_year` can now be set to a value that makes it
+            // not (shot G4c; FINDINGS.md). A rate faster than one update seeds once per update.
+            if after == Stage::Mature && self.trees[i].age % ages.seed_every < tp.update_every {
                 self.try_seed(i);
             }
         }
@@ -329,12 +336,12 @@ mod tests {
             }
         }
         let (light, cover) = (sim.world.light.clone(), sim.canopy_cover.clone());
-        let absorb = sim.params.world.canopy_absorb;
+        let extinction = sim.params.canopy_extinction();
         for y in 0..WY {
             for x in 0..WX {
                 let zs = sim.canopy_z(x as i32, y as i32);
                 sim.canopy_cover[cidx(x, y)] = !zs.is_empty();
-                sim.world.set_column_light(x, y, &zs, absorb);
+                sim.world.set_column_light(x, y, &zs, extinction);
             }
         }
         prop_assert!(light == sim.world.light, "incremental light differs from a full recompute");
@@ -362,7 +369,7 @@ mod tests {
                 sim.plant_tree(x, y, age);
             }
         }
-        let mean = sim.params.tree.max_age as f32;
+        let mean = sim.params.tree_ages().max as f32;
         for (i, t) in sim.trees.iter().enumerate() {
             let (lo, hi) = ((mean * (1.0 - jitter)).floor() as u32, (mean * (1.0 + jitter)).ceil() as u32);
             prop_assert!((lo..=hi).contains(&t.lifespan), "lifespan {} outside [{}, {}]", t.lifespan, lo, hi);
@@ -459,7 +466,7 @@ mod tests {
         let mut sim = bare_sim();
         sim.plant_tree(10, 10, 2000);
         for (x, y) in [(9, 9), (10, 10), (11, 11), (9, 11)] {
-            assert_eq!(sim.world.surface_light(cidx(x, y)), 55, "column ({x},{y})");
+            assert_eq!(sim.world.surface_light(cidx(x, y)), 35, "column ({x},{y})");
         }
         assert_eq!(sim.world.surface_light(cidx(12, 10)), 255);
         assert!(!sim.spacing_ok(11, 11));
@@ -469,11 +476,33 @@ mod tests {
         assert_eq!(sim.patches[patch_of(10, 10)].detritus, 40.0);
     }
 
+    /// Seeding fires once per `seed_every` ticks for any `seeds_per_year`, not only for the ones
+    /// `tree.update_every` happens to divide (shot G4c). At the shipped 20 a year the new window
+    /// test picks exactly the ages the old `is_multiple_of` test picked.
+    #[test]
+    fn a_mature_tree_seeds_at_its_rate_whatever_the_rate_is() {
+        let fires = |seeds_per_year: f32| {
+            let mut p = crate::Params::load_square();
+            p.tree.seeds_per_year = seeds_per_year;
+            let (every, step) = (p.tree_ages().seed_every, p.tree.update_every);
+            let ages: Vec<u32> = (1..=p.climate.year_len / step).map(|k| k * step).collect();
+            (every, ages.iter().filter(|a| *a % every < step).count())
+        };
+        let (every, n) = fires(20.0);
+        assert_eq!((every, n), (200, 20), "the shipped rate, unchanged");
+        for rate in [1.0, 3.0, 7.0, 20.0, 33.0, 50.0] {
+            let (_, n) = fires(rate);
+            let want = rate as usize;
+            assert!(n.abs_diff(want) <= 1, "{rate} a year seeded {n} times");
+        }
+        assert_eq!(fires(200.0).1, 80, "a rate faster than the cadence seeds once per update");
+    }
+
     #[test]
     fn young_canopy_is_one_voxel() {
         let mut sim = bare_sim();
         sim.plant_tree(20, 20, 500);
-        assert_eq!(sim.world.surface_light(cidx(20, 20)), 155);
+        assert_eq!(sim.world.surface_light(cidx(20, 20)), 94);
         assert_eq!(sim.world.surface_light(cidx(21, 20)), 255);
         sim.plant_tree(30, 30, 0);
         assert_eq!(sim.world.surface_light(cidx(30, 30)), 255, "saplings cast no shade");

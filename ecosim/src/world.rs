@@ -262,6 +262,10 @@ pub fn generate_heights(params: &Params, rng: &mut ChaCha8Rng) -> Vec<u8> {
         .collect()
 }
 
+/// Light of a voxel in full sun. The field holds `FULL_SUN x` the fraction of full sun that
+/// reaches a voxel (shot G4c), so it is still the 0-255 byte `light.bin` has always held.
+pub const FULL_SUN: u8 = 255;
+
 /// Shade cast by roofs, as `World::shade_top`.
 ///
 /// The sun sits due south at a fixed altitude, so a roof whose top is at absolute z `t` darkens the
@@ -390,7 +394,7 @@ impl World {
         w.ground_h = w.ground.iter().map(|&h| h as f32).collect();
         for y in 0..d.wy {
             for x in 0..d.wx {
-                w.set_column_light(x, y, &[], params.world.canopy_absorb);
+                w.set_column_light(x, y, &[], params.canopy_extinction());
             }
         }
         w
@@ -449,7 +453,7 @@ impl World {
                 building[c] = roof;
             }
         }
-        let shade = building_shade(d, &heights, &building, params.bundle.shade_slope);
+        let shade = building_shade(d, &heights, &building, params.shade_slope());
         let mut w = World::build(&heights, params, Some(&tops), shade);
         w.ground_grid = b.ground.clone();
         w.ground_h = b.ground_h.clone();
@@ -480,11 +484,20 @@ impl World {
         self.light[self.dims.vidx(x, y, z)]
     }
 
+    /// Surface light as a fraction of full sun, which is what every light curve is in since shot
+    /// G4c.
+    #[inline]
+    pub fn surface_light_fraction(&self, c: usize) -> f32 {
+        self.surface_light(c) as f32 / FULL_SUN as f32
+    }
+
     /// Recompute one column's light: solids are 0, and so is anything a building shades
     /// (`shade_top`, always 0 in a noise world); the rest of the air and water gets
-    /// 255 − absorb × (canopy voxels strictly above), saturating at 0.
-    /// `canopy_z` lists the distinct canopy voxel z values in this column.
-    pub fn set_column_light(&mut self, x: usize, y: usize, canopy_z: &[u8], absorb: u8) {
+    /// [`FULL_SUN`] × exp(−`extinction` × canopy voxels strictly above), the Beer–Lambert
+    /// transmittance of that many layers of canopy (shot G4c; `extinction` is
+    /// [`Params::canopy_extinction`](crate::params::Params::canopy_extinction), the optical depth
+    /// of one layer). `canopy_z` lists the distinct canopy voxel z values in this column.
+    pub fn set_column_light(&mut self, x: usize, y: usize, canopy_z: &[u8], extinction: f32) {
         let shade = self.shade_top[self.dims.cidx(x, y)] as usize;
         for z in 0..self.dims.wz {
             let i = self.dims.vidx(x, y, z);
@@ -492,8 +505,8 @@ impl World {
             self.light[i] = if m == SOIL || m == ROCK || z < shade {
                 0
             } else {
-                let above = canopy_z.iter().filter(|&&cz| cz as usize > z).count() as u32;
-                255 - (above * absorb as u32).min(255) as u8
+                let above = canopy_z.iter().filter(|&&cz| cz as usize > z).count() as f32;
+                (FULL_SUN as f32 * libm::expf(-extinction * above)).round() as u8
             };
         }
     }
@@ -542,21 +555,43 @@ pub(crate) mod tests {
         World::from_heights(&vec![h; COLS], &Params::load_square())
     }
 
+    /// One canopy voxel at the shipped optical depth (k 0.5 x LAI 2 = 1.0 per layer) passes
+    /// exp(-1) = 36.8% of full sun, two pass 13.5% and three 5.0%: Beer-Lambert, so light thins
+    /// towards zero instead of reaching it (shot G4c).
     #[test]
     fn light_column_with_one_canopy_voxel() {
         let mut w = flat(12);
-        w.set_column_light(5, 5, &[15], 100);
+        let k = Params::load_square().canopy_extinction();
+        assert_eq!(k, 1.0, "the shipped canopy_k x canopy_lai");
+        w.set_column_light(5, 5, &[15], k);
         assert_eq!(w.light[vidx(5, 5, 20)], 255);
         assert_eq!(w.light[vidx(5, 5, 15)], 255, "canopy voxel itself is not below itself");
-        assert_eq!(w.light[vidx(5, 5, 14)], 155);
-        assert_eq!(w.light[vidx(5, 5, 13)], 155);
+        assert_eq!(w.light[vidx(5, 5, 14)], 94);
+        assert_eq!(w.light[vidx(5, 5, 13)], 94);
         assert_eq!(w.light[vidx(5, 5, 12)], 0, "solid ground is 0");
-        assert_eq!(w.surface_light(cidx(5, 5)), 155);
+        assert_eq!(w.surface_light(cidx(5, 5)), 94);
+        assert!((w.surface_light_fraction(cidx(5, 5)) - 0.3686).abs() < 1e-3);
         // A neighbouring column is untouched.
         assert_eq!(w.surface_light(cidx(6, 5)), 255);
-        // Three canopy voxels saturate at 0.
-        w.set_column_light(5, 5, &[15, 16, 17], 100);
-        assert_eq!(w.surface_light(cidx(5, 5)), 0);
+        // Three canopy voxels are dark but not black.
+        w.set_column_light(5, 5, &[15, 16, 17], k);
+        assert_eq!(w.surface_light(cidx(5, 5)), 13);
+    }
+
+    /// The acceptance line of shot G4c: a column under a closed canopy is inside the published
+    /// transmittance band for its leaf area index (10-25% at LAI 3-5, UNITS.md R10). A mature sim
+    /// crown is two canopy voxels, so its LAI is 2 x `canopy_lai` and its transmittance
+    /// exp(-canopy_k x LAI).
+    #[test]
+    fn closed_canopy_transmittance_is_inside_the_published_band() {
+        let p = Params::load_square();
+        let lai = 2.0 * p.world.canopy_lai;
+        assert!((3.0..=5.0).contains(&lai), "a mature crown's LAI is {lai}");
+        assert!((0.4..=0.7).contains(&p.world.canopy_k), "k is {}", p.world.canopy_k);
+        let mut w = flat(12);
+        w.set_column_light(5, 5, &[15, 16], p.canopy_extinction());
+        let t = w.surface_light_fraction(cidx(5, 5));
+        assert!((0.10..=0.25).contains(&t), "a closed canopy passes {t} of full sun");
     }
 
     #[test]
@@ -651,23 +686,28 @@ pub(crate) mod tests {
         patch_dist_matches_brute_force_in(&World::from_heights(heights, &Params::load_square()), 1)
     }
 
-    /// Solids are 0; air and water are 255 − absorb × (canopy voxels strictly above), clamped at 0.
+    /// Solids are 0; air and water are `FULL_SUN × exp(−extinction × canopy voxels strictly
+    /// above)`, rounded (shot G4c).
     fn column_light_formula(
         heights: &[u8],
         x: usize,
         y: usize,
         canopy: &[u8],
-        absorb: u8,
+        extinction: f32,
     ) -> Result<(), TestCaseError> {
         let mut w = World::from_heights(heights, &Params::load_square());
         let mut zs = canopy.to_vec();
         zs.sort_unstable();
         zs.dedup();
-        w.set_column_light(x, y, &zs, absorb);
+        w.set_column_light(x, y, &zs, extinction);
         for z in 0..WZ {
             let m = w.material[vidx(x, y, z)];
-            let above = zs.iter().filter(|&&cz| cz as usize > z).count() as i32;
-            let want = if m == SOIL || m == ROCK { 0 } else { (255 - absorb as i32 * above).max(0) as u8 };
+            let above = zs.iter().filter(|&&cz| cz as usize > z).count() as f32;
+            let want = if m == SOIL || m == ROCK {
+                0
+            } else {
+                (FULL_SUN as f32 * libm::expf(-extinction * above)).round() as u8
+            };
             prop_assert_eq!(w.light[vidx(x, y, z)], want, "z {}", z);
         }
         Ok(())
@@ -695,9 +735,9 @@ pub(crate) mod tests {
             heights in terrain(),
             (x, y) in (0..WX, 0..WY),
             canopy in prop::collection::vec(0u8..WZ as u8, 0..6),
-            absorb in prop_oneof![Just(Params::load_square().world.canopy_absorb), any::<u8>()],
+            extinction in prop_oneof![Just(Params::load_square().canopy_extinction()), 0.0f32..8.0],
         ) {
-            column_light_formula(&heights, x, y, &canopy, absorb)?;
+            column_light_formula(&heights, x, y, &canopy, extinction)?;
         }
     }
 
@@ -727,8 +767,22 @@ pub(crate) mod tests {
     fn column_light_regression_default_absorb_over_water() {
         let mut h = vec![14u8; COLS];
         h[cidx(3, 4)] = 7;
-        column_light_formula(&h, 3, 4, &[12, 13, 13], 100).unwrap();
-        column_light_formula(&h, 3, 4, &[20, 21, 22], 96).unwrap();
+        let k = Params::load_square().canopy_extinction();
+        column_light_formula(&h, 3, 4, &[12, 13, 13], k).unwrap();
+        column_light_formula(&h, 3, 4, &[20, 21, 22], 0.35).unwrap();
+    }
+
+    /// The fixed sun is a parameter in degrees since shot G4c, and 45° is the old `shade_slope`
+    /// of 1.0 to the bit, so no building's shadow moved when the unit changed.
+    #[test]
+    fn sun_altitude_45_is_the_old_shade_slope_of_one() {
+        let mut p = Params::load_square();
+        assert_eq!(p.bundle.sun_altitude_deg, 45.0);
+        assert_eq!(p.shade_slope(), 1.0);
+        for (deg, want) in [(0.0, 0.0), (90.0, 0.0), (180.0, 0.0), (-10.0, 0.0), (60.0, 0.57735026)] {
+            p.bundle.sun_altitude_deg = deg;
+            assert_eq!(p.shade_slope(), want, "{deg} degrees");
+        }
     }
 
     /// Row-major index helpers on a strip: every column and voxel index is hit once, and each

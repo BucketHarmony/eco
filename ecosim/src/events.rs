@@ -359,8 +359,8 @@ mod tests {
             *floor = b.floor;
             *every = 20;
         }
-        p.tree.initial_age = p.tree.mature_age;
-        p.tree.seed_every = p.tree.update_every;
+        p.tree.initial_age_years = p.tree.mature_age_years;
+        p.tree.seeds_per_year = p.climate.year_len as f32 / p.tree.update_every as f32;
         p
     }
 

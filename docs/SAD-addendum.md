@@ -68,12 +68,15 @@
 - Initial moisture and fertility are 128 on soil columns.
 
 ### Light
-- `light.bin`: solid voxels are 0. Air and water voxels get `255 − canopy_absorb × (number of canopy voxels strictly above them in the column)`, saturating at 0.
-  - `canopy_absorb` *(param)* = **100**, not the SAD's 96. With 96, a 2-layer mature canopy leaves the ground at 63, which fails the renderer test that needs pixels darker than 60. With 100 it leaves 55.
+- `light.bin`: solid voxels are 0. Air and water voxels hold `255 ×` the fraction of full sun that reaches them, which since shot G4c is the Beer–Lambert transmittance of the canopy above: `255 × exp(−canopy_k × canopy_lai × (number of canopy voxels strictly above them in the column))`. The byte and its range are unchanged, so `format_version` does not move; only what the byte means is now stated.
+  - `canopy_k` *(param)* = **0.5** and `canopy_lai` *(param)* = **2.0**, giving an optical depth of 1.0 per canopy voxel. A 2-layer mature canopy is then LAI 4 and leaves the ground at **35** (13.5% of full sun, inside the published 10–25% for a broadleaf canopy at LAI 3–5), so it still clears the renderer test that needs pixels darker than 60; a 1-layer young canopy leaves 94. Light now thins towards zero instead of saturating at it: three layers leave 13.
+  - Before shot G4c this was `255 − canopy_absorb × layers` with `canopy_absorb` *(param)* = 100, which left 155, 55 and 0 for one, two and three layers.
 - Surface light for growth is the light of voxel `(x, y, height + 1)`.
 - Light is recomputed per column, only for the columns a tree's canopy covers, when that tree changes stage, is planted, or dies. This replaces the SAD's "once".
 
 ### Trees
+> This section still describes the tree tier as it was before the units calibration (shots G4b and G4c): the ages, the drought clock and the seeding interval below are tick counts and a 0–255 moisture threshold, and the shipped parameters are now years, days, a fraction of available water capacity and a fraction of full sun. The rule shapes are unchanged; for the current names and values read `ecosim/params.toml` and `ecosim/UNITS.md`.
+
 - **Stages by age** *(params)*:
   - sapling, `age < 500`: trunk only.
   - young, `age < 2000`: trunk plus a 1×1×1 canopy.

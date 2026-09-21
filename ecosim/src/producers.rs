@@ -21,7 +21,7 @@ pub fn suitability(c: &Curve, v: f32) -> f32 {
 /// Patch means over soil columns used as producer inputs.
 #[derive(Debug, Clone, Copy)]
 pub struct PatchEnv {
-    /// Mean surface light, 0–255.
+    /// Mean surface light, as a fraction of full sun (shot G4c: it was the 0–255 index).
     pub light: f32,
     /// Mean soil water, as a fraction of available water capacity: 0 at the wilting point, 1 at
     /// field capacity (shot G4b; it was the 0–255 moisture index).
@@ -39,7 +39,7 @@ impl Sim {
         let n = cols.len().max(1) as f32;
         let (mut m, mut l, mut f) = (0.0f32, 0.0f32, 0.0f32);
         for &c in cols {
-            l += self.world.surface_light(c) as f32;
+            l += self.world.surface_light_fraction(c);
             m += self.water_fraction(c);
             f += self.fertility[c];
         }

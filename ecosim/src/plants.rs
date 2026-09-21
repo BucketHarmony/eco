@@ -5,7 +5,7 @@
 //! random soil columns, and draws exactly what it always drew.
 
 use crate::bundle::{Bundle, BundleShrub, BundleTree};
-use crate::params::{BundleParams, TreeParams};
+use crate::params::Params;
 use crate::sim::{offsets_within, Sim};
 use crate::world::World;
 
@@ -49,15 +49,18 @@ impl PlantImport {
 
 /// Age in ticks a scene tree of `height` metres starts at.
 ///
-/// Piecewise linear and monotone through (0 m, age 0), (`tree_mature_height`, `tree.mature_age`)
-/// and (`tree_tall_height`, `tree_tall_age`), flat above the last: a tree at least as tall as the
-/// sim's mature canopy always starts at `tree.mature_age` or more, and the tallest tree in a scene
-/// still starts well short of `tree.max_age`, so an imported wood does not die all at once.
-/// `tree_tall_age` is read as at least `tree.mature_age`, so no parameter setting can make the map
-/// fall with height.
-pub fn import_age(height: f32, tp: &TreeParams, bp: &BundleParams) -> u32 {
+/// Piecewise linear and monotone through (0 m, age 0), (`tree_mature_height`,
+/// `tree.mature_age_years`) and (`tree_tall_height`, `tree_tall_age_years`), flat above the last: a
+/// tree at least as tall as the sim's mature canopy always starts at `tree.mature_age_years` or
+/// more, and the tallest tree in a scene still starts well short of `tree.max_age_years`, so an
+/// imported wood does not die all at once. The tall age is read as at least the mature age, so no
+/// parameter setting can make the map fall with height. Both come from
+/// [`Params::tree_ages`](crate::params::Params::tree_ages), in ticks (shot G4c).
+pub fn import_age(height: f32, p: &Params) -> u32 {
+    let bp = &p.bundle;
     let (hm, ht) = (bp.tree_mature_height, bp.tree_tall_height);
-    let (mature, tall) = (tp.mature_age as f32, bp.tree_tall_age.max(tp.mature_age) as f32);
+    let ages = p.tree_ages();
+    let (mature, tall) = (ages.mature as f32, ages.tall_import.max(ages.mature) as f32);
     let age = if height.is_nan() || height <= 0.0 {
         0.0
     } else if hm > 0.0 && height < hm {
@@ -131,7 +134,7 @@ impl Sim {
         for (c, w) in winner.iter().enumerate() {
             let Some((height, _, moved)) = *w else { continue };
             let (x, y) = d.xy(c);
-            let age = import_age(height, &self.params.tree, &self.params.bundle);
+            let age = import_age(height, &self.params);
             self.plant_tree(x, y, age);
             imp.trees_planted += 1;
             imp.trees_moved += moved as usize;
@@ -209,8 +212,9 @@ mod tests {
         assert_eq!(imp, PlantImport { trees_in_scene: 1, trees_planted: 1, ..PlantImport::default() });
         // 15 m is between the mature height (3 m) and a tall tree (20 m), so the age is between too.
         let p = &s.params;
-        assert_eq!(s.trees[0].age, import_age(15.0, &p.tree, &p.bundle));
-        assert!((p.tree.mature_age..p.bundle.tree_tall_age).contains(&s.trees[0].age));
+        let ages = p.tree_ages();
+        assert_eq!(s.trees[0].age, import_age(15.0, p));
+        assert!((ages.mature..ages.tall_import).contains(&s.trees[0].age));
     }
 
     #[test]
@@ -247,8 +251,7 @@ mod tests {
             let (s, imp) = sim_of(&b);
             assert_eq!(planted(&s), vec![(7, 7, Stage::Mature)], "one trunk on the column");
             assert_eq!((imp.trees_planted, imp.trees_merged), (1, 1));
-            let p = &s.params;
-            assert_eq!(s.trees[0].age, import_age(a.max(c), &p.tree, &p.bundle), "the taller tree's age");
+            assert_eq!(s.trees[0].age, import_age(a.max(c), &s.params), "the taller tree's age");
         }
     }
 
@@ -311,39 +314,41 @@ mod tests {
     #[test]
     fn import_age_hits_the_growth_curve_at_its_corners() {
         let p = crate::Params::load_default();
-        let (tp, bp) = (&p.tree, &p.bundle);
-        assert_eq!(import_age(0.0, tp, bp), 0);
-        assert_eq!(import_age(-1.0, tp, bp), 0, "a tree of no height is a seed, not a negative age");
-        assert_eq!(import_age(1.5, tp, bp), tp.young_age, "half the mature height is exactly young");
-        assert_eq!(import_age(3.0, tp, bp), tp.mature_age);
-        assert_eq!(import_age(20.0, tp, bp), bp.tree_tall_age);
-        assert_eq!(import_age(80.0, tp, bp), bp.tree_tall_age, "taller than tall is still tall");
-        assert!(bp.tree_tall_age < tp.max_age, "even the tallest scene tree starts short of its lifespan");
+        let a = p.tree_ages();
+        assert_eq!(import_age(0.0, &p), 0);
+        assert_eq!(import_age(-1.0, &p), 0, "a tree of no height is a seed, not a negative age");
+        assert_eq!(import_age(1.5, &p), a.young, "half the mature height is exactly young");
+        assert_eq!(import_age(3.0, &p), a.mature);
+        assert_eq!(import_age(20.0, &p), a.tall_import);
+        assert_eq!(import_age(80.0, &p), a.tall_import, "taller than tall is still tall");
+        assert!(a.tall_import < a.max, "even the tallest scene tree starts short of its lifespan");
     }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(crate::cases(64)))]
 
         /// The height-to-age map never falls with height, and never starts a tree below
-        /// `tree.mature_age` once it is as tall as a mature canopy — whatever the parameters are.
+        /// `tree.mature_age_years` once it is as tall as a mature canopy — whatever the parameters
+        /// are.
         #[test]
         fn prop_import_age_is_monotone(
             heights in prop::collection::vec(-1.0f32..60.0, 2),
             mature_h in -1.0f32..30.0,
             tall_h in -1.0f32..60.0,
-            tall_age in 0u32..9000,
-            mature_age in 0u32..4000,
+            tall_age in 0.0f32..2.25,
+            mature_age in 0.0f32..1.0,
         ) {
             let mut p = crate::Params::load_default();
-            p.tree.mature_age = mature_age;
+            p.tree.mature_age_years = mature_age;
             p.bundle.tree_mature_height = mature_h;
             p.bundle.tree_tall_height = tall_h;
-            p.bundle.tree_tall_age = tall_age;
+            p.bundle.tree_tall_age_years = tall_age;
+            let mature_ticks = p.tree_ages().mature;
             let (lo, hi) = (heights[0].min(heights[1]), heights[0].max(heights[1]));
-            let (a, b) = (import_age(lo, &p.tree, &p.bundle), import_age(hi, &p.tree, &p.bundle));
+            let (a, b) = (import_age(lo, &p), import_age(hi, &p));
             prop_assert!(a <= b, "age({lo}) = {a} > age({hi}) = {b}");
             if hi >= mature_h && hi > 0.0 {
-                prop_assert!(b >= mature_age, "a mature-height tree starts at {b}, under {mature_age}");
+                prop_assert!(b >= mature_ticks, "a mature-height tree starts at {b}, under {mature_ticks}");
             }
         }
     }

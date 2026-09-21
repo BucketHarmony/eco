@@ -601,3 +601,56 @@ The six forced-extinction tests also moved world, from `common::SQUARE` to the n
 (the same 64-world at the default rain gradient instead of flat). That is not a tuning change — no
 parameter's default moved — but it is the reason four of them went red mid-shot, and
 `DECISIONS.md` has why a flat, evenly watered world cannot keep a tree at 800 mm of rain a year.
+
+## Shot G4c — units calibration, part two: light and tree demography
+
+Everything in this section is a **unit only** change. Not one default moved in value; the seven
+tree-tier keys are exactly the tick counts they replace at the shipped `year_len = 4000`, and the
+five light keys are the old 0–255 index values divided by 255. Two **rules** changed with them, and
+they are the only reason any reference run moved: `canopy_absorb`'s subtraction became an
+exponential, which moves every world, and seeding stopped being a schedule that could only fire at
+ages divisible by `tree.update_every`, which moves bundle worlds only.
+
+The acceptance lines referred to below, from `overnight/shots/G4c-units-calibration-rest.md`:
+
+- **(L)** "a column under a closed canopy receives a transmittance inside the published band for its
+  leaf area index, and the germination threshold is stated as a fraction of full sun"
+- **(R)** "the reference site worlds and the test strip still run to their full length with plants
+  surviving at the converted defaults" and "reference worlds pass the re-derived health checks"
+- **(U)** "every row this shot converts is marked `converted` in `UNITS.md`, with its old and new
+  unit and its reference or `model` status"
+
+| Parameter | Before | After | Kind | Why, and the acceptance line that forced it |
+|---|---|---|---|---|
+| `world.canopy_absorb` → `world.canopy_k` + `world.canopy_lai` | 100, subtracted per canopy voxel from 255 | 0.5 and 2.0, an optical depth of 1.0 per voxel in `exp(−k·LAI·layers)` | rule | The old rule was a subtraction where the physics is a product, so a canopy could only be black, never dark: three voxels saturated at 0. At k·LAI = 1.0 a mature two-voxel crown is LAI 4 and transmits 13.5%, inside R10's 10–25% at LAI 3–5. **(L)**, R10. This is the only key in the shot that changes a reference run. |
+| `grass.light` | [100.0, 200.0, 255.0, 256.0] | [0.3922, 0.7843, 1.0, 1.0039] | unit only | The same curve as a fraction of full sun: each value ÷ 255. **(L)**. |
+| `shrub.light` | [40.0, 100.0, 200.0, 254.0] | [0.1569, 0.3922, 0.7843, 0.9961] | unit only | Same. |
+| `tree.light` | [60.0, 150.0, 255.0, 256.0] | [0.2353, 0.5882, 1.0, 1.0039] | unit only | Same. |
+| `tree.sapling_light` | 150.0 | 0.5882 | unit only | 150/255. The germination threshold **(L)** asks to be stated: light suitability is 0 below 23.5% of full sun and 1 at or above 58.8%. |
+| `bundle.shade_slope` → `bundle.sun_altitude_deg` | 1.0 | 45.0 | unit only | `1/tan(45°) = 1` exactly, so no building's shadow moved by a single voxel. The old name hid a sun angle inside a slope; Lansing's noon sun near the equinox is 47°. **(U)**. |
+| `tree.initial_age` → `initial_age_years` | 500 ticks | 0.125 yr | unit only | 0.125 × 4000 = 500. **(U)**. |
+| `tree.young_age` → `young_age_years` | 500 ticks | 0.125 yr | unit only | Same. |
+| `tree.mature_age` → `mature_age_years` | 1000 ticks | 0.25 yr | unit only | Same. **Deliberately not retuned**: 0.25 years to a 3 m canopy is ~25× the published 5–8 (R12), and the decision to convert the unit and leave the value is in `DECISIONS.md` and `UNITS.md` section 7. |
+| `tree.max_age` → `max_age_years` | 6000 ticks | 1.5 yr | unit only | Same, against a published 60–150 yr lifespan (R12). |
+| `tree.dry_death_ticks` → `dry_death_days` | 500 ticks | 45.66 d | unit only | 45.66 × 24 / 2.1915 = 500.0. The one tree constant the audit found already right (R9), and therefore the calibration point the other six are measured against. |
+| `tree.seed_every` → `tree.seeds_per_year` | 200 ticks | 20.0 /yr | unit only, rule fixed | 4000/20 = 200. The **rule** changed with it: seeding fired on `age % seed_every == 0`, and a tree's age advances in whole `update_every` steps, so a rate whose interval `update_every` does not divide seeded essentially never. Now the test is "the update whose age crosses a multiple", identical at 50 and 200 **for a tree whose age starts at a multiple of `update_every`** and correct everywhere else. That is every tree on the strip but not one imported from a bundle: 63 of the Capitol's 79 imported trees have an age that is not a multiple of 50 and so never seeded at all before this shot. Capitol germination 7645 → 19408, trees at 20000 1619 → 4082; the strip is untouched by it. `UNITS.md` finding 12. |
+| `bundle.tree_tall_age` → `tree_tall_age_years` | 3000 ticks | 0.75 yr | unit only | 0.75 × 4000 = 3000. |
+
+**What moved in the reference runs.** `sweeps/shotG4c/FINDINGS.md` has it in full, including the
+per-species event-cause breakdown the reporting rule asks for. The short version, on the 256 × 64
+strip at seeds 1, 2, 3 and 42 and on the Capitol: every seed still passes every `ecosim check`
+invariant **(R)**, and the world gets woodier. Germination rises on all four strip seeds (seed 1
+2107 → 5097, seed 42 3027 → 3953), trees at tick 20000 rise with it (seed 1 570 → 1198, seed 42
+793 → 1123), and the thinnest margin in the whole G4b set — seed 1's `mature_trees_10k` at 38
+against a floor of 35 — becomes 701. The Capitol moves much further (germination 7645 → 19408,
+trees at 20000 1619 → 4082, fire roughly doubled), and that is the seeding fix rather than the
+light; its tree count now oscillates, and `mature_trees_10k` is read in a trough, so it falls
+944 → 325 while every other Capitol tree number rises. 325 is still 9× the floor. The cost is paid by the ground cover
+and by the grazers that eat it: minimum `grass_mean` falls on every seed (seed 42 0.3027 → 0.2441)
+and grazer starvation deaths rise sharply (seed 42 253 → 1644). Both follow from the same change:
+a young one-voxel canopy used to pass 61% of full sun and now passes 37%, so the shade under a
+young tree is real for the first time, grass under it thins, and the tree seedlings that used to
+lose to that grass now win.
+
+No parameter was retuned in response. **(R)** held at the converted defaults on all five reference
+runs, which is what the shot's override 2 substitutes for the byte-identical anchor.

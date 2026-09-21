@@ -181,8 +181,11 @@ const DOUBLING_TOLERANCE: f64 = 0.05;
 /// probability the cadence divides — `fire::ignition_prob` is linear in the update's length in
 /// years, which `fire::ignition_regression_ramp_ends_and_clamp` asserts directly — and a realised
 /// ignition count over one simulated year has a Poisson spread far wider than any tolerance worth
-/// stating. `tree.update_every` is deferred with the rest of the tree's demography: a tree's age
-/// still advances in ticks (UNITS.md, "Deferred to shot G4c").
+/// stating. `tree.update_every` is not driven either, and shot G4c did not make it reachable: a tree
+/// ages by one whole cadence per update, so the tier's totals are already invariant under doubling
+/// by construction rather than by calibration, and there is nothing for this test to catch. What the
+/// tier is not invariant to is its own time scale against the water tier's, which is a finding
+/// (UNITS.md section 7) and not a cadence.
 #[test]
 fn doubling_an_update_interval_leaves_a_years_totals_within_5_percent() {
     let base = second_year(doubling_params(&[]));

@@ -460,6 +460,52 @@ fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name)
 }
 
+/// Copy `fresh` over the committed fixture at `fixture` when `ECOSIM_REGEN_MANIFEST=1` is set, and
+/// report whether it did. The same switch `tests/sweep.rs` uses for the manifests and the golden
+/// `check` output, so that one environment variable re-cuts every committed artefact a shot that
+/// changes behaviour on purpose has to re-cut (shot G4c; before it these two fixtures were the only
+/// ones left needing a throwaway script).
+fn regen_fixture(fixture: &Path, fresh: &Path) -> bool {
+    if std::env::var_os("ECOSIM_REGEN_MANIFEST").is_none() {
+        return false;
+    }
+    fn copy_dir(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for e in fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let (src, dst) = (e.path(), to.join(e.file_name()));
+            if e.file_type().unwrap().is_dir() {
+                copy_dir(&src, &dst);
+            } else {
+                fs::copy(&src, &dst).unwrap();
+            }
+        }
+    }
+    fs::remove_dir_all(fixture).unwrap();
+    copy_dir(fresh, fixture);
+    true
+}
+
+/// Every byte of a `light.bin` written today is the Beer-Lambert re-expression of the byte version 1
+/// wrote at the same index (shot G4c): version 1 held `255 - 100 x layers` saturating at 0, and today
+/// the same column holds `255 x exp(-canopy_k x canopy_lai x layers)` with `canopy_k x canopy_lai`
+/// = 1.0. The layer count is recoverable from the old byte for every value the old rule could write
+/// except 0, which is a solid voxel or three-and-more layers of canopy; a solid voxel is still 0
+/// today, and both fixture snapshots predate any mature crown, so 0 means solid here and the mapping
+/// is exhaustive. That last part is asserted, not assumed: an unexpected 0 fails.
+fn light_is_the_v1_file_re_extincted(got: &[u8], want: &[u8], rel: &str) {
+    assert_eq!(got.len(), want.len(), "{rel} length");
+    for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
+        let expect = if w == 0 {
+            0
+        } else {
+            let layers = f32::from((255 - w) / 100);
+            (255.0 * libm::expf(-layers)).round() as u8
+        };
+        assert_eq!(g, expect, "{rel} byte {i}: version 1 wrote {w}");
+    }
+}
+
 /// Format version 2, fire and traits only add files, fields and columns. A fresh seed-42 mini run
 /// with fire, crowding and mutation off, the hunter refractory at the old cooldown and the water tier
 /// off, on the square world (`common::SQUARE`) the fixtures were made on, is compared with the v1
@@ -477,6 +523,13 @@ fn fixture(name: &str) -> PathBuf {
 /// `state.bin`, the terrain files at tick 100, the series header and length, and the shape of
 /// `meta.json`, whose every version-1 params key is still written under its own name or the name the
 /// conversion gave it.
+///
+/// Shot G4c took `light.bin` out of that byte comparison, because the quantity it holds no longer
+/// exists: version 1 wrote `255 - 100 x canopy layers` and every run since G4c writes
+/// `255 x exp(-1.0 x layers)`. It is not widened in its place — the file is still checked, and more
+/// tightly than equality would: [`light_is_the_v1_file_re_extincted`] asserts that every byte of the
+/// fresh file is the Beer-Lambert re-expression of the byte version 1 wrote at the same index, so the
+/// claim "only the light rule changed, column for column" is the thing being tested.
 #[test]
 fn format_2_and_fire_only_add_to_version_1_files() {
     let v1 = fixture("s42-mini");
@@ -504,7 +557,9 @@ fn format_2_and_fire_only_add_to_version_1_files() {
             let name = f.to_str().unwrap();
             let rel = format!("{snap}/{name}");
             let terrain = matches!(name, "material.bin" | "light.bin" | "height.bin");
-            if snap == "snap_000000" || terrain {
+            if name == "light.bin" {
+                light_is_the_v1_file_re_extincted(&cut(&rel), &fs::read(v1.join(&rel)).unwrap(), &rel);
+            } else if snap == "snap_000000" || terrain {
                 assert!(cut(&rel) == fs::read(v1.join(&rel)).unwrap(), "{rel}");
             }
         }
@@ -524,12 +579,20 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     for k in ["x", "y", "z"] {
         assert_eq!(a["dims"][k], b["dims"][k], "dims.{k}");
     }
-    // The four params keys the units conversion renamed (shot G4b), as (section, version 1, now).
-    const RENAMED: [(&str, &str, &str); 4] = [
+    // The params keys the units conversion renamed (shots G4b and G4c), as (section, version 1,
+    // now). A rename changes the key, not the modelled quantity: the value may be in a new unit.
+    const RENAMED: [(&str, &str, &str); 11] = [
         ("hunter", "cooldown", "refractory"),
         ("cover", "moisture_draw", "water_per_growth_mm"),
         ("tree", "moisture_draw", "transpiration_mm_h"),
         ("tree", "dry_moisture", "dry_fraction"),
+        ("world", "canopy_absorb", "canopy_k"),
+        ("tree", "initial_age", "initial_age_years"),
+        ("tree", "young_age", "young_age_years"),
+        ("tree", "mature_age", "mature_age_years"),
+        ("tree", "max_age", "max_age_years"),
+        ("tree", "dry_death_ticks", "dry_death_days"),
+        ("tree", "seed_every", "seeds_per_year"),
     ];
     for (section, keys) in a["params"].as_object().unwrap() {
         let now = b["params"][section].as_object().unwrap_or_else(|| panic!("params.{section} is gone"));
@@ -546,7 +609,9 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     let set = common::square_set(&[]);
     run_opts(common::square(), 42, 100, 100, &set, &v2, RunOptions { format_version: 2, ..Default::default() })
         .unwrap();
-    assert_eq!(ecosim::check::diff_runs(&fixture("s42-mini-v2"), &v2).unwrap(), Vec::<String>::new());
+    if !regen_fixture(&fixture("s42-mini-v2"), &v2) {
+        assert_eq!(ecosim::check::diff_runs(&fixture("s42-mini-v2"), &v2).unwrap(), Vec::<String>::new());
+    }
     let defaults = tmp("mini_defaults");
     run(common::square(), 42, 100, 100, &set, &defaults).unwrap();
     let diff = ecosim::check::diff_runs(&v2, &defaults).unwrap();

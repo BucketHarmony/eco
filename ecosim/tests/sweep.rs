@@ -198,7 +198,10 @@ fn manifest_regeneration_for_the_event_log_changed_no_existing_line() {
 /// millimetres of soil water rather than steps of an index. So the chain is retired rather than
 /// regenerated in place, and this test is what the retirement leaves: each `-g4b` cut covers the same
 /// files as the manifest it replaces, the world the seed makes at tick 0 is unchanged, and the run has
-/// moved by tick 20000.
+/// moved by tick 20000. Since shot G4c the tick-0 claim is about the **terrain** only: `material.bin`
+/// and `height.bin` are still the world a seed makes, and `light.bin` has moved with the canopy's
+/// optics (see the comment in the body). The `-g4b` file names are historical and keep the name of
+/// the shot that cut them, not of every shot that has regenerated them since.
 #[test]
 fn the_pre_conversion_manifests_are_kept_as_history() {
     for (before, g4b) in [
@@ -213,10 +216,19 @@ fn the_pre_conversion_manifests_are_kept_as_history() {
         // The three manifests from before the event log have no `events.csv` line; the cuts do.
         let extra: Vec<&String> = b.keys().filter(|k| !a.contains_key(*k)).collect();
         assert!(extra.iter().all(|k| *k == EVENTS_FILE), "{g4b} adds {extra:?} to {before}");
-        for f in ["material.bin", "light.bin", "height.bin"] {
+        for f in ["material.bin", "height.bin"] {
             let k = format!("snap_000000/{f}");
             assert_eq!(a[&k], b[&k], "{k}: the world at tick 0 moved between {before} and {g4b}");
         }
+        // `snap_000000/light.bin` used to be in that list. Shot G4c took it out, because the
+        // quantity changed rule: the historical manifests hash `255 - 100 x canopy layers` and the
+        // cuts now hash `255 x exp(-1.0 x layers)`, so the twelve young trees a seed plants at tick
+        // 0 shade their columns to 94 where they used to shade them to 155. The terrain a seed makes
+        // is still unchanged, which is what this assertion was for; that light moved is asserted
+        // rather than dropped, and `integration.rs`'s `light_is_the_v1_file_re_extincted` is where
+        // the shape of the move is pinned byte for byte.
+        let k = "snap_000000/light.bin".to_string();
+        assert_ne!(a[&k], b[&k], "{k}: shot G4c re-extincted the canopy, so this must differ");
         assert_ne!(a["series.csv"], b["series.csv"], "{before} and {g4b} are the same series");
         let k = "snap_020000/patches.json".to_string();
         assert_ne!(a[&k], b[&k], "{k}: {before} and {g4b} end the same");
@@ -465,7 +477,9 @@ fn baseline_margins_equal_check_margins() {
 #[test]
 fn run_rejects_bad_overrides_before_running() {
     let exe = env!("CARGO_BIN_EXE_ecosim");
-    for (set, needle) in [("grazer.no_such_key=1", "grazer.no_such_key"), ("tree.mature_age=soon", "tree.mature_age")] {
+    for (set, needle) in
+        [("grazer.no_such_key=1", "grazer.no_such_key"), ("tree.mature_age_years=soon", "tree.mature_age_years")]
+    {
         let out = tmp("bad_set");
         let o = Command::new(exe)
             .args(["run", "--seed", "1", "--ticks", "10", "--set", set, "--out"])

@@ -8,7 +8,12 @@ water_level = 10
 rock_top_height = 21
 soil_depth = 3
 water_fraction = 0.04
-canopy_absorb = 100
+# Canopy light (shot G4c): Beer-Lambert extinction, I/I0 = exp(-k x LAI) per canopy voxel. A mature
+# crown is two voxels deep, so its LAI is 2 x canopy_lai = 4 and it passes exp(-2) = 13.5% of full
+# sun, inside the published 10-25% for a broadleaf canopy at LAI 3-5 (UNITS.md R10). The light field
+# holds 255 x that fraction, so every light curve below is a fraction of full sun.
+canopy_k = 0.5
+canopy_lai = 2.0
 compact_every = 100
 # World size (shot 15): the reference world is a 256×64×32 west–east strip of 32×8 patches.
 # A file without these keys means 64×64×32, patch 8. Width and depth are multiples of patch, ≤ 256.
@@ -39,8 +44,9 @@ rain_gradient = 0.6
 
 # Update cadences, in ticks (shot G4b). Every rate is per hour or per year and is charged over
 # cadence × tick_hours, so doubling a cadence leaves an annual total alone (DECISIONS.md, "Units
-# calibration"). tree.update_every, tree.seed_every, world.compact_every and the three
-# immigration_interval keys were already parameters and stay in their own sections.
+# calibration"). tree.update_every, world.compact_every and the three immigration_interval keys were
+# already parameters and stay in their own sections; tree.seed_every became a rate per year in shot
+# G4c, so it is no longer a cadence.
 [schedule]
 cover_every = 10
 soil_every = 10
@@ -168,7 +174,9 @@ shrub_spread_seed = 0.02
 r = 20.0
 g = 2.0
 initial = 0.10
-light = [100.0, 200.0, 255.0, 256.0]
+# Fractions of full sun (shot G4c: the old [100, 200, 255, 256] on the 0-255 light index, divided
+# by 255). Grass takes no light below 39% of full sun and is unlimited above 78%.
+light = [0.3922, 0.7843, 1.0, 1.0039]
 moisture = [0.0784, 0.3137, 1.0, 1.004]
 temp = [0.0, 5.0, 30.0, 35.0]
 
@@ -176,17 +184,26 @@ temp = [0.0, 5.0, 30.0, 35.0]
 r = 4.0
 g = 1.6
 initial = 0.02
-light = [40.0, 100.0, 200.0, 254.0]
+# Fractions of full sun (shot G4c): the shade-tolerant species, growing from 16% of full sun.
+light = [0.1569, 0.3922, 0.7843, 0.9961]
 moisture = [0.0588, 0.2353, 1.0, 1.004]
 temp = [-5.0, 0.0, 28.0, 33.0]
 
 [tree]
 initial_count = 12
-initial_age = 500
+# The tree tier's ages are in years and its drought clock in days (shot G4c); update_every stays a
+# cadence in ticks, like the [schedule] keys. At year_len = 4000 these are exactly the tick counts
+# they replace: 500, 500, 1000 and 6000 ticks. They are also the model's largest known error --
+# a tree that matures in three months and dies at 18 is 25-60x too fast against a published 5-8
+# years to 3 m and a 60-150 year lifespan (UNITS.md section 7 and R12). The unit is converted here
+# and the value deliberately is not: real ages need a 200000-tick reference run, which the runtime
+# invariant forbids, so the error now shows in the file instead of hiding in a tick count
+# (DECISIONS.md, "Units calibration, part two").
+initial_age_years = 0.125
 update_every = 50
-young_age = 500
-mature_age = 1000
-max_age = 6000
+young_age_years = 0.125
+mature_age_years = 0.25
+max_age_years = 1.5
 lifespan_jitter = 0.2
 crowding_mortality = 0.02
 # Transpiration per hour over the trunk column (shot G4b: was 50 units of the 0–255 index every 50
@@ -196,13 +213,17 @@ crowding_mortality = 0.02
 transpiration_mm_h = 0.0342
 # Fraction of the column's available water capacity below which a tree is in drought (was 30 of 255).
 dry_fraction = 0.12
-dry_death_ticks = 500
-seed_every = 200
+# 45.66 days of continuous drought kills a tree: the same 500 ticks, and the one tree constant the
+# units audit found already right (UNITS.md section 4).
+dry_death_days = 45.66
+# Seeding attempts a mature tree makes a year (shot G4c: was one every 200 ticks, and 4000/200 = 20).
+seeds_per_year = 20.0
 seed_radius = 6.0
-sapling_light = 150.0
+# Germination light need, as a fraction of full sun (shot G4c: was 150 of 255).
+sapling_light = 0.5882
 min_spacing = 2
 death_detritus = 40.0
-light = [60.0, 150.0, 255.0, 256.0]
+light = [0.2353, 0.5882, 1.0, 1.0039]
 moisture = [0.1176, 0.3922, 1.0, 1.004]
 temp = [-3.0, 2.0, 26.0, 31.0]
 immigration_floor = 0
@@ -214,15 +235,19 @@ immigration_interval = 500
 # Ecology layers under the bundle's lowest ground: a column's surface layer is base_z + round(its
 # mean ground height in metres), so base_z sets how much soil sits below the lowest ground.
 base_z = 8
-# Building shade: a roof of height h metres darkens the h × shade_slope columns north of it, to a
-# level falling by 1 m per 1/shade_slope columns. 1.0 is a 45° sun due south; 0 turns shade off.
-shade_slope = 1.0
+# Building shade: the sun is fixed at this altitude above the horizon, due south, so a roof of
+# height h metres darkens the h/tan(altitude) columns north of it, to a level falling by tan per
+# column. 45 degrees is the old shade_slope of 1.0 exactly, and is Lansing's noon sun near the
+# equinox (47 degrees); 0, or 90 and up, turns shade off. A shaded voxel is fully dark, which is
+# the fixed sun's own approximation: the diffuse sky light that really falls into a building's
+# shadow arrives with the moving sun, backlog row G9 (shot G4c).
+sun_altitude_deg = 45.0
 # Planting the bundle's trees (shot G3). A scene tree's age is piecewise linear in its height,
-# through (0 m, age 0), (tree_mature_height, tree.mature_age) and (tree_tall_height, tree_tall_age),
-# and flat above: 3 m is a mature sim canopy, 20 m a full-grown street tree.
+# through (0 m, age 0), (tree_mature_height, tree.mature_age_years) and (tree_tall_height,
+# tree_tall_age_years), and flat above: 3 m is a mature sim canopy, 20 m a full-grown street tree.
 tree_mature_height = 3.0
 tree_tall_height = 20.0
-tree_tall_age = 3000
+tree_tall_age_years = 0.75
 # A scene tree standing on an unplantable column moves to the nearest plantable column within this
 # many columns (metres); past it, it is dropped.
 tree_move_radius = 2.0

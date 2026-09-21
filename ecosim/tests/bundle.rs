@@ -16,6 +16,32 @@ fn tmp(name: &str) -> PathBuf {
     d
 }
 
+/// Copy `fresh` over the committed fixture at `fixture` when `ECOSIM_REGEN_MANIFEST=1` is set, and
+/// report whether it did. The same switch `tests/sweep.rs` uses for the manifests and the golden
+/// `check` output, so that one environment variable re-cuts every committed artefact a shot that
+/// changes behaviour on purpose has to re-cut (shot G4c; before it these two fixtures were the only
+/// ones left needing a throwaway script).
+fn regen_fixture(fixture: &Path, fresh: &Path) -> bool {
+    if std::env::var_os("ECOSIM_REGEN_MANIFEST").is_none() {
+        return false;
+    }
+    fn copy_dir(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for e in fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let (src, dst) = (e.path(), to.join(e.file_name()));
+            if e.file_type().unwrap().is_dir() {
+                copy_dir(&src, &dst);
+            } else {
+                fs::copy(&src, &dst).unwrap();
+            }
+        }
+    }
+    fs::remove_dir_all(fixture).unwrap();
+    copy_dir(fresh, fixture);
+    true
+}
+
 /// Ground cells per column edge and the crop's edge in metres: a 16 m square at 0.5 m cells.
 const RATIO: usize = 2;
 const SIZE_M: usize = 16;
@@ -313,7 +339,9 @@ fn the_committed_capitol_mini_fixture_matches_a_fresh_run() {
     let out = tmp("capitol_mini");
     let opts = RunOptions { format_version: BUNDLE_FORMAT_VERSION, bundle: Some(&b), ..Default::default() };
     run_with(p, 42, 100, 100, &set, &out, opts).unwrap();
-    let diff = ecosim::check::diff_runs(&root.join("fixtures/capitol-mini"), &out).unwrap();
-    assert_eq!(diff, Vec::<String>::new());
+    let fixture = root.join("fixtures/capitol-mini");
+    if !regen_fixture(&fixture, &out) {
+        assert_eq!(ecosim::check::diff_runs(&fixture, &out).unwrap(), Vec::<String>::new());
+    }
     fs::remove_dir_all(&out).unwrap();
 }

@@ -71,8 +71,13 @@ pub struct WorldParams {
     pub soil_depth: u8,
     /// Fraction of columns whose terrain is normalized to below the water line.
     pub water_fraction: f32,
-    /// Light removed by each canopy voxel above a voxel.
-    pub canopy_absorb: u8,
+    /// Beer-Lambert extinction coefficient of the canopy (shot G4c): one canopy voxel transmits
+    /// `exp(-canopy_k x canopy_lai)` of the light that reaches it. 0.4-0.7 for a broadleaf canopy
+    /// (UNITS.md R10).
+    pub canopy_k: f32,
+    /// Leaf area index of one canopy voxel, m2 of leaf per m2 of ground. A mature sim crown is two
+    /// voxels deep, so its whole-canopy LAI is twice this.
+    pub canopy_lai: f32,
     /// Entity compaction interval in ticks.
     pub compact_every: u32,
     /// Columns along x (west to east). A multiple of `patch`, at most 256.
@@ -113,18 +118,21 @@ pub struct BundleParams {
     /// Ecology layers under the bundle's lowest ground: a column's surface layer is
     /// `base_z + round(mean ground height)`, in 1 m layers.
     pub base_z: u8,
-    /// Shadow length in columns per metre of building height, cast due north (the sun sits due
-    /// south; 1.0 is a 45° altitude). 0 turns building shade off.
-    pub shade_slope: f32,
+    /// Altitude of the fixed sun above the horizon, in degrees; it sits due south, so a roof of
+    /// height h shades `h / tan(altitude)` columns north of it (shot G4c: this was `shade_slope`,
+    /// that cotangent itself). 0, or 90 and above, turns building shade off. The sun that moves
+    /// across the day and the year is backlog row G9.
+    pub sun_altitude_deg: f32,
     /// Scene height in metres that maps onto `tree.mature_age` when the bundle's trees are planted
     /// (shot G3): the height of a mature sim canopy above the ground it stands on.
     pub tree_mature_height: f32,
     /// Scene height in metres that maps onto `tree_tall_age`: a full-grown street tree. Heights
     /// above it all import at `tree_tall_age`.
     pub tree_tall_height: f32,
-    /// Age in ticks an imported tree of `tree_tall_height` or more starts at. Held at
-    /// `tree.mature_age` or more, so the height-to-age map stays monotone whatever it is set to.
-    pub tree_tall_age: u32,
+    /// Age in **years** an imported tree of `tree_tall_height` or more starts at (shot G4c: was
+    /// `tree_tall_age`, in ticks). Held at `tree.mature_age_years` or more, so the height-to-age
+    /// map stays monotone whatever it is set to.
+    pub tree_tall_age_years: f32,
     /// How far in columns an imported tree may be moved off an unplantable column to the nearest
     /// plantable one; past it the tree is dropped.
     pub tree_move_radius: f32,
@@ -134,10 +142,10 @@ impl Default for BundleParams {
     fn default() -> Self {
         BundleParams {
             base_z: 8,
-            shade_slope: 1.0,
+            sun_altitude_deg: 45.0,
             tree_mature_height: 3.0,
             tree_tall_height: 20.0,
-            tree_tall_age: 3000,
+            tree_tall_age_years: 0.75,
             tree_move_radius: 2.0,
         }
     }
@@ -343,7 +351,7 @@ pub struct CoverSpecies {
     pub g: f32,
     /// Density on every soil patch at tick 0.
     pub initial: f32,
-    /// Suitability over patch light.
+    /// Suitability over patch light, as a fraction of full sun (shot G4c: was the 0-255 index).
     pub light: Curve,
     /// Suitability over patch soil water, as a fraction of the available water capacity.
     pub moisture: Curve,
@@ -357,16 +365,17 @@ pub struct CoverSpecies {
 pub struct TreeParams {
     /// Trees planted at tick 0.
     pub initial_count: u32,
-    /// Age of the initial trees.
-    pub initial_age: u32,
-    /// Ticks between tree updates.
+    /// Age of the initial trees, in years (shot G4c: was `initial_age`, in ticks).
+    pub initial_age_years: f32,
+    /// Ticks between tree updates: a cadence, like the `[schedule]` keys, and not a rate.
     pub update_every: u32,
-    /// Age at which a sapling becomes young.
-    pub young_age: u32,
-    /// Age at which a tree becomes mature and seeds.
-    pub mature_age: u32,
-    /// Mean lifespan: each tree dies at its own `max_age · (1 + lifespan_jitter · u)`, u uniform in [−1, 1].
-    pub max_age: u32,
+    /// Age in years at which a sapling becomes young (was `young_age`).
+    pub young_age_years: f32,
+    /// Age in years at which a tree becomes mature and seeds (was `mature_age`).
+    pub mature_age_years: f32,
+    /// Mean lifespan in years: each tree dies at its own `max_age_years · (1 + lifespan_jitter · u)`,
+    /// u uniform in [−1, 1] (was `max_age`, in ticks).
+    pub max_age_years: f32,
     /// Relative spread of per-tree lifespans around `max_age`.
     pub lifespan_jitter: f32,
     /// Per-update death chance of a mature tree whose crown is overlapped by the canopy of ≥ 2 other trees.
@@ -379,19 +388,24 @@ pub struct TreeParams {
     /// Soil water below which a tree counts as dry, as a fraction of the column's available water
     /// capacity. 0 is the permanent wilting point.
     pub dry_fraction: f32,
-    /// Consecutive dry ticks after which a tree dies.
-    pub dry_death_ticks: u32,
-    /// A mature tree tries to seed when its age is a multiple of this.
-    pub seed_every: u32,
+    /// Consecutive days of drought after which a tree dies (shot G4c: was `dry_death_ticks` = 500
+    /// ticks, which is the same 45.7 days; the one tree constant the units audit found already
+    /// right, and so the calibration point for the rest — UNITS.md section 7).
+    pub dry_death_days: f32,
+    /// Seeding attempts a mature tree makes per year (was `seed_every`, one attempt every 200
+    /// ticks). One attempt every `round(year_len / seeds_per_year)` ticks of its age.
+    pub seeds_per_year: f32,
     /// Maximum seed distance in columns.
     pub seed_radius: f32,
-    /// Light low-opt of the germination curve; replaces `light[1]`.
+    /// Light low-opt of the germination curve, as a fraction of full sun; replaces `light[1]`
+    /// (shot G4c: was a level on the 0-255 light index).
     pub sapling_light: f32,
     /// Minimum Chebyshev distance between trunks.
     pub min_spacing: i32,
     /// Detritus a dead tree adds to its patch.
     pub death_detritus: f32,
-    /// Germination suitability over surface light (low-opt replaced by `sapling_light`).
+    /// Germination suitability over surface light, as a fraction of full sun (low-opt replaced by
+    /// `sapling_light`).
     pub light: Curve,
     /// Germination suitability over the column's soil water, as a fraction of its available water
     /// capacity.
@@ -682,12 +696,77 @@ impl Params {
         Traits { energy_cost_mult, flee_distance, repro_threshold }
     }
 
-    /// Germination light curve with the sapling light need applied as its low-opt.
+    /// Germination light curve with the sapling light need applied as its low-opt. Both are
+    /// fractions of full sun since shot G4c, so a need at or below the curve's minimum leaves the
+    /// curve a step at that minimum rather than a ramp (`suitability` resolves the tie to 0).
     pub fn tree_light_curve(&self) -> Curve {
         let mut c = self.tree.light;
-        c[1] = self.tree.sapling_light.max(c[0] + 1.0);
+        c[1] = self.tree.sapling_light.max(c[0]);
         c
     }
+
+    /// Optical depth of one canopy voxel, `canopy_k x canopy_lai`: the exponent of the
+    /// Beer-Lambert transmittance `exp(-k·LAI)` each layer of canopy applies (shot G4c).
+    pub fn canopy_extinction(&self) -> f32 {
+        (self.world.canopy_k * self.world.canopy_lai).max(0.0)
+    }
+
+    /// Shadow length in columns per metre of building height, `1 / tan(sun_altitude_deg)`; 0 (no
+    /// shade) at an altitude of 0, or of 90° and up (shot G4c; it was the parameter itself).
+    pub fn shade_slope(&self) -> f32 {
+        let a = self.bundle.sun_altitude_deg as f64;
+        if !(0.0..90.0).contains(&a) || a == 0.0 {
+            return 0.0;
+        }
+        (1.0 / libm::tan(a.to_radians())) as f32
+    }
+
+    /// Ticks in `years` years of this run, from `climate.year_len`.
+    pub fn ticks_in_years(&self, years: f32) -> u32 {
+        (years as f64 * self.climate.year_len as f64).round().clamp(0.0, u32::MAX as f64) as u32
+    }
+
+    /// The tree tier's ages and schedules in ticks (shot G4c). Every one of them is a number of
+    /// years or days in `params.toml`, turned into ticks here and nowhere else, so that the tree
+    /// tier means the same amount of simulated time whatever `climate.year_len` is.
+    pub fn tree_ages(&self) -> TreeAges {
+        let t = &self.tree;
+        let dry = t.dry_death_days as f64 * 24.0 / crate::hydro::tick_hours(self);
+        TreeAges {
+            initial: self.ticks_in_years(t.initial_age_years),
+            young: self.ticks_in_years(t.young_age_years),
+            mature: self.ticks_in_years(t.mature_age_years),
+            max: self.ticks_in_years(t.max_age_years),
+            tall_import: self.ticks_in_years(self.bundle.tree_tall_age_years),
+            dry_death: dry.round().clamp(0.0, u32::MAX as f64) as u32,
+            seed_every: if t.seeds_per_year > 0.0 {
+                (self.climate.year_len as f64 / t.seeds_per_year as f64).round().clamp(1.0, u32::MAX as f64) as u32
+            } else {
+                u32::MAX
+            },
+        }
+    }
+}
+
+/// The tree tier's ages and schedules in ticks, from [`Params::tree_ages`]. Nothing else converts a
+/// tree age: the parameters are years and days, and these are what the tier runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeAges {
+    /// Age the initial trees are planted at.
+    pub initial: u32,
+    /// Age a sapling becomes young at.
+    pub young: u32,
+    /// Age a tree becomes mature and starts seeding at.
+    pub mature: u32,
+    /// Mean lifespan, before `lifespan_jitter`.
+    pub max: u32,
+    /// Age an imported scene tree of `bundle.tree_tall_height` or more starts at.
+    pub tall_import: u32,
+    /// Consecutive dry ticks that kill a tree.
+    pub dry_death: u32,
+    /// Ticks between a mature tree's seeding attempts; `u32::MAX` when `seeds_per_year` is 0, which
+    /// leaves seeding out, no tree age being a multiple of it.
+    pub seed_every: u32,
 }
 
 /// Apply one `dotted.key=value` override to a parsed params document. The key must already exist,
@@ -751,13 +830,14 @@ mod tests {
     #[test]
     fn set_nested_keys_round_trip() {
         let sets: Vec<String> =
-            ["hunter.kill_prob=0.25", "tree.mature_age=1500.0", "grass.initial=1", "shrub.light=[1, 2.5, 3, 4]"]
+            ["hunter.kill_prob=0.25", "tree.mature_age_years=1.5", "grass.initial=1", "shrub.light=[1, 2.5, 3, 4]"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
         let p = Params::from_toml_str_with(&defaults(), &sets).unwrap();
         assert_eq!(p.hunter.kill_prob, 0.25);
-        assert_eq!(p.tree.mature_age, 1500);
+        assert_eq!(p.tree.mature_age_years, 1.5);
+        assert_eq!(p.tree_ages().mature, 6000, "1.5 years is 6000 ticks at year_len 4000");
         assert_eq!(p.grass.initial, 1.0);
         assert_eq!(p.shrub.light, [1.0, 2.5, 3.0, 4.0]);
         // Setting a key to its current value changes nothing.
@@ -777,7 +857,7 @@ mod tests {
 
     #[test]
     fn set_wrong_type_errors_naming_it() {
-        for bad in ["tree.mature_age=1.5", "hunter.kill_prob=high", "shrub.light=[1, 2]", "grazer.cooldown=abc"] {
+        for bad in ["tree.initial_count=1.5", "hunter.kill_prob=high", "shrub.light=[1, 2]", "grazer.cooldown=abc"] {
             let e = Params::from_toml_str_with(&defaults(), &[bad.into()]).unwrap_err();
             let key = bad.split('=').next().unwrap();
             assert!(e.contains(key), "{bad}: {e}");

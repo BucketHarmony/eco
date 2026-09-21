@@ -542,3 +542,120 @@ it, so a change to the scatter, the climb or the three colours fails a test rath
 changing every screenshot. No transcendental function appears in the cover model — the draw is
 `tree.rs`'s integer `mix` and the climb is one multiply and a `round` — so that hash is the same on
 Windows and on Linux, the same argument V3 made.
+
+## V5 the simulator is started as a command, and the run directory is still the whole interface
+
+The row asks for E4's round trip natively, and E4 ran the browser's helper as a child process. This
+does the same thing: `SimJob::start` writes the edited site out as a world bundle, spawns
+`ecosim run` on it, and loads the run directory it writes. No code is shared with `ecosim` and no
+IPC is used — CLAUDE.md forbids both — so the only thing crossing between the two processes is the
+directory on disk and the child's exit status.
+
+Two consequences of that choice are worth naming. **Both of the child's streams go to a file**, not
+to a pipe: a pipe nobody drains fills its buffer and stops the child, and the viewer only reads it
+once per frame, so the failure would have looked like a hung simulation. And **progress is counted
+from the snapshot directories on disk** rather than parsed from stdout, because the number of
+`snap_NNNNNN/` directories is part of the format contract and a progress line is not.
+
+## V5 the edited site is written to a scratch bundle, never back over the source
+
+`Bundle::save` refuses to write into the directory its bundle was read from, by comparing the two
+paths. `ecosim/worlds/capitol/` is a committed reference world whose `medium.u8` is ODbL data with a
+credit attached; a viewer that could overwrite it in place while someone was dragging a key down is
+a viewer that will eventually do it. Each round trip gets `sim-<millis>/world` and `sim-<millis>/run`
+under `--sim-root`, and nothing else is ever written.
+
+The saved bundle recounts its own `trees`, `shrubs` and `pipes` rather than copying the source's
+counts, and records `"edited_by"` with the number of edits behind it. A bundle that says where it
+came from is the difference between a run somebody can explain later and one they cannot.
+
+## V5 every path handed to the child is absolute
+
+The child's working directory is the scratch directory, so a relative `--world worlds/capitol` means
+something different to it than it does to the viewer — the first round trip failed with os error 3
+for exactly that reason. `std::path::absolute` rather than `canonicalize`: the run directory does not
+exist yet when the command line is built, and on Windows canonicalising would hand the simulator a
+`\?\` path it has no reason to have to understand.
+
+## V5 the command line is the one a person would type
+
+`--seed`, `--ticks`, `--snapshot-every`, `--snapshot-state false`, `--set animals.enabled=false`,
+`--set climate.rain_gradient=0`, `--params ../ecosim/params.toml`. The two `--set` flags are the
+garden-series direction, not this shot's invention. The whole line is printed to stdout when the run
+starts and returned by the `ecoview.sim` BRP method, so anyone who doubts a picture can run the same
+command in a terminal and compare directories. That is the honesty the file-on-disk interface buys,
+and it is worth two lines of code to keep it.
+
+`ECOSIM_BIN` and `ECOSIM_PARAMS` override the binary and the parameters, which is how the tests
+drive the whole post-spawn path with a stand-in child, and how CI would drive it if a later row ever
+puts the round trip in a job.
+
+## V5 ten snapshots, whatever the run is worth
+
+`snapshot_every(ticks)` is `ticks / 10` clamped to at least 1, so a 1,000-tick run and a 20,000-tick
+run both come back with eleven stops on the timeline. The alternative — a fixed interval — makes a
+short run a single frame and a long one a thousand, and the timeline's play rate is per snapshot, so
+the same keypress would mean four seconds in one case and eight minutes in the other. The cost is
+that the snapshot tick is not a round number for an arbitrary run length, which nothing depends on.
+
+## V5 undo stores the column that was there, not the inverse action
+
+`RaiseGround` and `LowerGround` clamp at the site's floor and ceiling, and `SetSurface` throws the
+old medium away, so an inverse action does not restore a state — undoing six lowers at the floor
+would raise the ground above where it started. Each edit therefore pushes the three numbers that
+made up that column (`ground_h`, `medium`, `building_h`) onto a 512-deep stack, and undo writes them
+back. It is more memory per edit and it is the only version that is correct.
+
+512 because a `--edit` rectangle is thousands of cells and an undo stack that swallows them all is a
+memory leak with a nicer name; the HUD prints how many steps are actually undoable, so the limit is
+visible rather than surprising.
+
+## V5 the whole edit queue is drained before anything is remeshed
+
+The first version remeshed after each cell, which made `--edit 80,150,119,189,LowerGround` — 1,600
+cells over four chunks — 1,600 remeshes of the same four chunks and took it out of interactive time
+entirely. The queue is now drained in one go, the touched chunks are deduplicated, and one remesh
+loop runs afterwards. A held key and a scripted rectangle go down the same path, which is why the
+scripted one is fast: the 11,200-edit basin in this shot's screenshots remeshes once.
+
+## V5 the crosshair picks a column, and plants are not pickable
+
+`VoxelWorld::pick_cell` marches the camera ray at a quarter of a cell and stops where it is at or
+below `ground_h + building_h`. Trees, cover and vines are all above that test, so the crosshair
+passes through a canopy and lands on the ground under it. You edit terrain with this tool, and a
+picker that let you dig a tree would be answering a question nobody asked.
+
+## V5 twenty metres of headroom, reserved at load
+
+`RaiseGround` and `RaiseBuilding` need somewhere to put a voxel, and the voxel world was exactly as
+tall as the site it was built from. The world now reserves the tallest thing the tree model can grow
+(`Life::default().tall_height_m`, 20 m) above the terrain. On the stress world that is 486 chunks
+where V4 had 405, all of the new ones empty: **247 chunks drawn and 335,544 quads, both unchanged**.
+Empty chunks cost a mesh call that returns nothing, which is the cheap half of the trade.
+
+## V5 `--tick` overrides the round trip's auto-play
+
+When a run finishes, the timeline rewinds to zero and plays: the point of the round trip is watching
+the site grow out of the edit, not arriving at the end of it. A scripted screenshot wants the
+opposite, so `--tick N` seeks and stays put. Both screenshot commands in MEASUREMENTS.md rely on it,
+and it is the reason those pictures are reproducible rather than a race against the play rate.
+
+For the same reason the headless frame counter restarts while a round trip is in flight, so
+`--sim --screenshot` photographs the site that grew and never the site before it.
+
+## V5 the HUD says whose numbers are on the screen
+
+`the edit is the viewer's; the water, light, fertility and growth are ecosim's` sits under the round
+trip's status whenever a run has been grown, and the `ecoview.sim` method carries the same sentence
+as `note_on_authorship`. This shot is the first time the viewer causes a simulation rather than
+reading one, which is exactly when a screenshot starts to be able to lie about who computed what.
+V4 put the same discipline on the cover lines; this is the sentence for the round trip.
+
+## V5 the new tests live in `mesh_golden.rs`, for the fifth time
+
+Thirteen more, 50 in all, every one compiling with `--no-default-features`: the CI gate runs exactly
+one target. The interesting half is that `SimJob` grew `attach`, which wraps a child this module did
+not spawn — so the tests drive the whole poll-progress-finish-fail-cancel path with the test binary
+itself standing in for the simulator, and `SimJob::start` goes through the same constructor, so the
+tested path is the flown path. Nothing in the gate runs `ecosim`; the round trip's own timings are
+measured by hand and written down in MEASUREMENTS.md instead.

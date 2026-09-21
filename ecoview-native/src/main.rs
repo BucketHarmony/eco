@@ -1,11 +1,14 @@
 //! The viewer: a world bundle as voxels, a run directory over the top of it, a fly camera, seven
-//! overlays, one edit action set, and a remote-control surface an agent can drive.
+//! overlays, an editor under the crosshair, the `ecosim` round trip, and a remote-control surface an
+//! agent can drive.
 //!
 //! Usage:
 //! ```text
 //! ecoview-native [--world DIR | --stress] [--run DIR] [--tick N] [--overlay NAME] [--no-cover]
 //!                [--eye X,Y,Z] [--look X,Y,Z] [--headless] [--frames N] [--screenshot PATH]
 //!                [--bench SECS] [--port N]
+//!                [--edit X0,Y0,X1,Y1,ACTION[,MEDIUM]]... [--sim] [--sim-ticks N] [--sim-seed N]
+//!                [--sim-root DIR]
 //! ```
 //!
 //! Keys: WASD, Space and Shift to fly; right mouse to look; wheel for speed; **R** to reset the view;
@@ -13,11 +16,22 @@
 //! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**7** for
 //! the overlay; **V** for the ground cover and vines.
 //!
+//! Editing, under the crosshair: **Q** and **Z** raise and lower the ground, **T** and **G** raise
+//! and lower a building, **M** cycles the surface, **U** undoes. **Enter** grows what you have made
+//! -- it writes the edited site out as a world bundle, runs `ecosim` on it as a command, reads the
+//! run back and plays it from tick 0. **Backspace** stops a run in flight.
+//!
+//! **The simulator decides and the viewer expresses** (`overnight/DIRECTION-native-viewer.md`). The
+//! round trip changes nothing about that: the edit changes the ground, and every consequence of it
+//! -- water, light, fertility, what grows and what dies -- is `ecosim`'s. The two projects still
+//! share no code and have no IPC (CLAUDE.md); a run directory on disk is the whole interface, and
+//! the simulator is started as a command the way shot E4's browser helper starts it.
+//!
 //! The ground cover and the vines are **expression, not simulation** (`src/cover.rs`): the run says
 //! how much grass and shrub a patch holds and how wet and shaded its columns are, and the viewer
 //! decides only where the blades stand and how far a climber gets. No vine is an entity in any run.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use bevy::app::ScheduleRunnerPlugin;
@@ -40,6 +54,8 @@ use ecoview_native::mesh::{mesh_chunk, ChunkMesh, Scratch};
 use ecoview_native::overlay::{FieldStats, Fields, Scale};
 use ecoview_native::palette::{palette, Overlay, BANDS};
 use ecoview_native::run::Run;
+use ecoview_native::sim::{self, SimJob, SimState};
+use ecoview_native::tree::Life;
 use ecoview_native::voxel::{ChunkPos, ColumnBands, EditAction, VoxelWorld};
 use ecoview_native::{brp, stress_world, Bundle, CAPITOL};
 
@@ -69,6 +85,14 @@ const LEGEND_BOTTOM: f32 = BAR_BOTTOM + BAR_HEIGHT + 14.0;
 const LEGEND_HEIGHT: f32 = 12.0;
 const LEGEND_WIDTH: f32 = 320.0;
 
+/// How far the crosshair reaches, in metres. Past this it points at nothing rather than at the
+/// horizon: an edit 300 m away is never the edit anyone meant.
+const PICK_RANGE_M: f32 = 120.0;
+
+/// How many edits can be undone. One entry is a column's three numbers, so this is cheap; it is
+/// finite because an editor left running all afternoon should not grow without bound.
+const UNDO_DEPTH: usize = 512;
+
 #[derive(Resource, Clone)]
 struct Args {
     world: String,
@@ -91,6 +115,39 @@ struct Args {
     /// (DECISIONS.md, V4).
     eye: Option<Vec3>,
     look: Option<Vec3>,
+    /// `--edit X0,Y0,X1,Y1,ACTION[,MEDIUM]`, repeatable: a rectangle of ground cells, applied before
+    /// the first frame. A rectangle rather than a cell because the edits worth photographing are
+    /// areas -- a paved yard, a dug basin -- and three hundred `--edit` flags is not a command line.
+    edits: Vec<(usize, usize, usize, usize, EditAction)>,
+    /// `--sim`: do the round trip once, at startup, after those edits. The whole of this shot in one
+    /// command, which is what makes a picture of it re-runnable.
+    sim: bool,
+    sim_ticks: u32,
+    sim_seed: u64,
+    /// Where the round trip writes. Under `target/` by default, which git ignores: an edited copy of
+    /// a site is scratch, and the run beside it is regenerable by definition.
+    sim_root: String,
+}
+
+/// `X0,Y0,X1,Y1,ACTION[,MEDIUM]` in ground cells, inclusive. Fatal when it does not parse, for the
+/// same reason a mistyped overlay is: a scripted shot must not quietly photograph an unedited site.
+fn edit_rect(s: &str) -> (usize, usize, usize, usize, EditAction) {
+    let f: Vec<&str> = s.split(',').map(str::trim).collect();
+    assert!(
+        f.len() == 5 || f.len() == 6,
+        "expected --edit X0,Y0,X1,Y1,ACTION[,MEDIUM], got {s:?}"
+    );
+    let n = |i: usize| {
+        f[i].parse::<usize>()
+            .unwrap_or_else(|_| panic!("{:?} is not a ground cell index, in {s:?}", f[i]))
+    };
+    let medium = f.get(5).map(|m| {
+        m.parse::<u8>()
+            .unwrap_or_else(|_| panic!("{m:?} is not a medium code, in {s:?}"))
+    });
+    let action = EditAction::parse(f[4], medium)
+        .unwrap_or_else(|| panic!("unknown action {:?}, in {s:?}", f[4]));
+    (n(0), n(1), n(2), n(3), action)
 }
 
 /// `x,y,z` in metres. A pose that does not parse is fatal for the same reason a mistyped overlay is:
@@ -116,6 +173,11 @@ fn args() -> Args {
         cover: true,
         eye: None,
         look: None,
+        edits: Vec::new(),
+        sim: false,
+        sim_ticks: sim::DEFAULT_TICKS,
+        sim_seed: sim::DEFAULT_SEED,
+        sim_root: "target/sim".to_string(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -173,6 +235,23 @@ fn args() -> Args {
                 a.look = Some(vec3(&next()));
                 i += 1;
             }
+            "--edit" => {
+                a.edits.push(edit_rect(&next()));
+                i += 1;
+            }
+            "--sim" => a.sim = true,
+            "--sim-ticks" => {
+                a.sim_ticks = next().parse().unwrap_or(sim::DEFAULT_TICKS);
+                i += 1;
+            }
+            "--sim-seed" => {
+                a.sim_seed = next().parse().unwrap_or(sim::DEFAULT_SEED);
+                i += 1;
+            }
+            "--sim-root" => {
+                a.sim_root = next();
+                i += 1;
+            }
             other => eprintln!("ignoring unknown argument {other}"),
         }
         i += 1;
@@ -194,10 +273,62 @@ struct Site {
     edits: u64,
 }
 
-/// The queue a BRP `ecoview.edit` call appends to. One explicit method, so an agent never has to
-/// discover a component schema (V0-spike.md, build item 5).
+/// One thing to do to the world's columns. `Undo` is not an [`EditAction`]: the opposite of an
+/// action is not its inverse, because `LowerGround` clamps at zero and `SetSurface` forgets what was
+/// there, so an undo restores the three numbers it saw rather than acting again.
+#[derive(Debug, Clone, Copy)]
+enum EditOp {
+    Cell(usize, usize, EditAction),
+    Undo,
+}
+
+/// The queue a BRP `ecoview.edit` call, a key press or a `--edit` flag appends to. One explicit
+/// method, so an agent never has to discover a component schema (V0-spike.md, build item 5).
 #[derive(Resource, Default)]
-struct EditQueue(Vec<(usize, usize, EditAction)>);
+struct EditQueue(Vec<EditOp>);
+
+/// The bundle the viewer opened, kept whole because the round trip has to write it back out.
+///
+/// [`VoxelWorld`] holds the three grids and is what the editing changes; everything else about the
+/// site -- its name, its size, its media table, its surveyed trees, its provenance -- is only here.
+#[derive(Resource)]
+struct Scene {
+    bundle: Bundle,
+}
+
+/// What the crosshair is on, what has been done to the site, and what can be taken back.
+#[derive(Resource, Default)]
+struct Editor {
+    target: Option<(usize, usize)>,
+    undo: Vec<(usize, usize, (f32, u8, f32))>,
+    /// The last thing worth saying about an edit, for the HUD.
+    note: String,
+}
+
+/// A BRP `ecoview.sim` call asking for a round trip: `(seed, ticks)`.
+#[derive(Resource, Default)]
+struct SimRequest(Option<(u64, u32)>);
+
+/// Something is in flight that a headless screenshot must wait for. A `--sim` run takes seconds and
+/// `headless_frames` counts frames, so without this the picture is taken of the site before it grew.
+#[derive(Resource, Default)]
+struct Busy(bool);
+
+/// The round trip: one `ecosim` process at a time, and what to say about it.
+#[derive(Resource)]
+struct Sim {
+    job: Option<SimJob>,
+    root: PathBuf,
+    ticks: u32,
+    seed: u64,
+    /// `idle`, `running`, `grown` or `failed`, for the HUD and for `ecoview.stats`.
+    phase: &'static str,
+    note: String,
+    /// The last finished round trip: ticks, wall seconds, snapshots, and the run directory.
+    last: Option<(u32, f64, usize, String)>,
+    /// `--sim` starts exactly one run, however many frames the app takes to get going.
+    auto_started: bool,
+}
 
 /// The camera pose a BRP `ecoview.camera` call asks for.
 #[derive(Resource, Default)]
@@ -406,7 +537,15 @@ fn main() {
     let voxelise = Instant::now();
     // The chunk grid is sized once, and a run tree taller than the bundle's own tallest survey
     // would be cut off at the top of it. The run says how tall its species ever gets, so ask.
-    let headroom = timeline.run.as_ref().map_or(0.0, |r| r.life.tall_height_m);
+    //
+    // With no run there is still the round trip, which can put a full-grown tree on a site whose
+    // survey has none, so the fallback curve's ceiling is reserved as well: the grid cannot be
+    // resized once the world is built, and an empty chunk layer costs nothing to keep (V5).
+    let headroom = timeline
+        .run
+        .as_ref()
+        .map_or(0.0, |r| r.life.tall_height_m)
+        .max(Life::default().tall_height_m);
     let world = VoxelWorld::from_bundle_with_headroom(&bundle, headroom);
     println!(
         "world {} {}x{} cells at {} m, {} chunks, {} levels; read {:.0} ms, voxelise {:.0} ms",
@@ -420,6 +559,7 @@ fn main() {
         voxelise.elapsed().as_secs_f64() * 1000.0
     );
 
+    let world_name = bundle.name.clone();
     let mut app = App::new();
     if a.headless {
         app.add_plugins(
@@ -437,7 +577,7 @@ fn main() {
     } else {
         app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: format!("ecoview-native: {}", bundle.name),
+                title: format!("ecoview-native: {}", world_name),
                 resolution: (1280u32, 800u32).into(),
                 // Uncapped, so `--bench` measures the renderer and not the 60 Hz display.
                 present_mode: bevy::window::PresentMode::AutoNoVsync,
@@ -452,7 +592,8 @@ fn main() {
             .with_method_main("ecoview.camera", camera_method)
             .with_method_main("ecoview.stats", stats_method)
             .with_method_main("ecoview.timeline", timeline_method)
-            .with_method_main("ecoview.overlay", overlay_method),
+            .with_method_main("ecoview.overlay", overlay_method)
+            .with_method_main("ecoview.sim", sim_method),
     )
     .add_plugins(BrpExtrasPlugin::with_port(a.port))
     .insert_resource(Site {
@@ -465,6 +606,20 @@ fn main() {
     })
     .init_resource::<EditQueue>()
     .init_resource::<CameraQueue>()
+    .init_resource::<Editor>()
+    .init_resource::<SimRequest>()
+    .init_resource::<Busy>()
+    .insert_resource(Sim {
+        job: None,
+        root: PathBuf::from(&a.sim_root),
+        ticks: a.sim_ticks,
+        seed: a.sim_seed,
+        phase: "idle",
+        note: String::new(),
+        last: None,
+        auto_started: false,
+    })
+    .insert_resource(Scene { bundle })
     .insert_resource(OverlayState::new(a.overlay))
     .insert_resource(timeline)
     .insert_resource(Bench {
@@ -481,7 +636,9 @@ fn main() {
             timeline_play,
             overlay_keys,
             apply_world_state,
+            edit_keys,
             apply_edits,
+            sim_tick,
             move_camera,
             fly_camera,
             hud,
@@ -620,8 +777,18 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut timeline: ResMut<Timeline>,
     mut overlays: ResMut<OverlayState>,
+    mut queue: ResMut<EditQueue>,
     args: Res<Args>,
 ) {
+    // The scripted edits go in before anything is meshed, so the first frame is already of the
+    // edited site and `--sim` runs on what the picture shows.
+    for &(x0, y0, x1, y1, action) in &args.edits {
+        for y in y0.min(y1)..=y0.max(y1) {
+            for x in x0.min(x1)..=x0.max(x1) {
+                queue.0.push(EditOp::Cell(x, y, action));
+            }
+        }
+    }
     // The run's trees and the overlay both go in before the first mesh, so the site is never drawn
     // with the bundle's vegetation under the wrong palette and then corrected a frame later.
     let fields = read_fields(&timeline);
@@ -800,7 +967,7 @@ fn setup(
         Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.8, -0.8, 0.0)),
     ));
     // `AmbientLight` is a camera component in 0.19, not a resource, so it goes on the camera above.
-    spawn_hud(&mut commands, timeline.count() > 0);
+    spawn_hud(&mut commands);
 }
 
 #[derive(Component)]
@@ -810,6 +977,10 @@ struct HudText;
 #[derive(Component)]
 struct TimelineFill;
 
+/// The bar itself, hidden until a run exists to scrub.
+#[derive(Component)]
+struct TimelineBar;
+
 /// The legend strip and its two parts: one swatch per band, and the range written beside them.
 #[derive(Component)]
 struct LegendRoot;
@@ -818,10 +989,12 @@ struct LegendBand(usize);
 #[derive(Component)]
 struct LegendLabel;
 
-/// One text block top-left and one bar along the bottom. Both exist whether or not a run is loaded:
-/// the text still has the fly speed in it, which is one of the three things V1 was asked to make
-/// visible, and an empty bar says plainly that there is no run rather than leaving the screen silent.
-fn spawn_hud(commands: &mut Commands, has_run: bool) {
+/// One text block top-left, a crosshair in the middle, and one bar along the bottom.
+///
+/// V1 skipped the bar when the viewer opened with no run, which was right while a run could only
+/// arrive on the command line. A round trip can now grow one while the viewer is running, so the bar
+/// is always built and `hud` hides it until there is something to scrub (V5).
+fn spawn_hud(commands: &mut Commands) {
     commands.spawn((
         Text::new(""),
         TextFont {
@@ -885,11 +1058,30 @@ fn spawn_hud(commands: &mut Commands, has_run: bool) {
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
         LegendLabel,
     ));
-    // No run, no bar. An empty track along the bottom of the screen offers a scrub that would do
-    // nothing; the HUD says so in words instead.
-    if !has_run {
-        return;
-    }
+    // The crosshair. It is what the editor points with, so it is drawn even with no run loaded and
+    // it sits exactly at the screen's centre -- which is where the camera's forward vector goes, and
+    // therefore where `pick_cell` looks. The margin centres the glyph on that point rather than
+    // hanging its top-left corner from it.
+    commands.spawn((
+        Text::new("+"),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(20.0),
+            ..default()
+        },
+        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+        TextShadow::default(),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(50.0),
+            top: Val::Percent(50.0),
+            margin: UiRect {
+                left: Val::Px(-6.0),
+                top: Val::Px(-12.0),
+                ..default()
+            },
+            ..default()
+        },
+    ));
     commands
         .spawn((
             Node {
@@ -898,9 +1090,11 @@ fn spawn_hud(commands: &mut Commands, has_run: bool) {
                 right: Val::Px(BAR_MARGIN),
                 bottom: Val::Px(BAR_BOTTOM),
                 height: Val::Px(BAR_HEIGHT),
+                display: Display::None,
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+            TimelineBar,
         ))
         .with_children(|bar| {
             bar.spawn((
@@ -939,10 +1133,15 @@ fn to_bevy_mesh(m: &ChunkMesh) -> Mesh {
 }
 
 /// Drains the edit queue: mutate the columns, remesh only the chunks the edit touched.
+///
+/// Every edit records the column's three numbers before it changes them, which is what **U** puts
+/// back. The record is taken here rather than where the edit is queued so a BRP call, a key press
+/// and a `--edit` flag are all undoable by the same code.
 fn apply_edits(
     mut commands: Commands,
     mut queue: ResMut<EditQueue>,
     mut site: ResMut<Site>,
+    mut editor: ResMut<Editor>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     if queue.0.is_empty() {
@@ -950,17 +1149,215 @@ fn apply_edits(
     }
     let palette = site.palette.clone();
     let mut scratch = Scratch::new();
-    for (x, y, action) in std::mem::take(&mut queue.0) {
-        let t = Instant::now();
-        let stale = site.world.apply(x, y, action);
-        let material = site.material.clone();
-        for c in stale {
-            let i = site.world.chunk_index(c);
-            let m = mesh_chunk(&site.world, c, &palette, &mut scratch);
-            sync_chunk(&mut commands, &mut site, &mut meshes, i, &m, &material);
+    let t = Instant::now();
+    // The whole queue is drained before anything is remeshed. One key press is one cell and the
+    // difference is nothing, but a `--edit` rectangle is thousands of them over the same handful of
+    // chunks, and remeshing per cell would mesh each of those chunks thousands of times.
+    let mut stale: Vec<ChunkPos> = Vec::new();
+    for op in std::mem::take(&mut queue.0) {
+        let changed = match op {
+            EditOp::Cell(x, y, action) => match site.world.column(x, y) {
+                Some(was) => {
+                    editor.undo.push((x, y, was));
+                    if editor.undo.len() > UNDO_DEPTH {
+                        editor.undo.remove(0);
+                    }
+                    site.edits += 1;
+                    site.world.apply(x, y, action)
+                }
+                None => {
+                    editor.note = format!("({x}, {y}) is outside the site");
+                    Vec::new()
+                }
+            },
+            EditOp::Undo => match editor.undo.pop() {
+                Some((x, y, was)) => {
+                    site.edits = site.edits.saturating_sub(1);
+                    editor.note = format!("undid the edit at ({x}, {y})");
+                    site.world.restore_column(x, y, was)
+                }
+                None => {
+                    editor.note = "nothing left to undo".into();
+                    Vec::new()
+                }
+            },
+        };
+        for c in changed {
+            if !stale.contains(&c) {
+                stale.push(c);
+            }
         }
-        site.last_remesh_ms = t.elapsed().as_secs_f64() * 1000.0;
-        site.edits += 1;
+    }
+    let material = site.material.clone();
+    for c in stale {
+        let i = site.world.chunk_index(c);
+        let m = mesh_chunk(&site.world, c, &palette, &mut scratch);
+        sync_chunk(&mut commands, &mut site, &mut meshes, i, &m, &material);
+    }
+    site.last_remesh_ms = t.elapsed().as_secs_f64() * 1000.0;
+}
+
+/// The editor under the crosshair: what it is pointing at, and the six keys that change it.
+///
+/// The target is recomputed every frame rather than on a key press, because the HUD prints what is
+/// under the crosshair and a stale reading would be worse than none -- you would edit the column the
+/// line named a second ago.
+fn edit_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    site: Res<Site>,
+    scene: Res<Scene>,
+    mut editor: ResMut<Editor>,
+    mut queue: ResMut<EditQueue>,
+    cam: Query<&Transform, With<Fly>>,
+) {
+    let Some(t) = cam.iter().next() else {
+        return;
+    };
+    let (o, f) = (t.translation, *t.forward());
+    editor.target = site
+        .world
+        .pick_cell([o.x, o.y, o.z], [f.x, f.y, f.z], PICK_RANGE_M);
+    if keys.just_pressed(KeyCode::KeyU) {
+        queue.0.push(EditOp::Undo);
+    }
+    let Some((x, y)) = editor.target else {
+        return;
+    };
+    for (key, action) in [
+        (KeyCode::KeyQ, EditAction::RaiseGround),
+        (KeyCode::KeyZ, EditAction::LowerGround),
+        (KeyCode::KeyT, EditAction::RaiseBuilding),
+        (KeyCode::KeyG, EditAction::LowerBuilding),
+    ] {
+        if keys.just_pressed(key) {
+            queue.0.push(EditOp::Cell(x, y, action));
+        }
+    }
+    // **M** walks the bundle's own media list, in the order the bundle publishes it, so the viewer
+    // never invents a surface the site does not have.
+    if keys.just_pressed(KeyCode::KeyM) {
+        let n = scene.bundle.media.len().max(1);
+        if let Some((_, m, _)) = site.world.column(x, y) {
+            let next = ((m as usize + 1) % n) as u8;
+            queue
+                .0
+                .push(EditOp::Cell(x, y, EditAction::SetSurface(next)));
+        }
+    }
+}
+
+/// The round trip, one frame at a time: start it, watch it, load what it wrote, play it.
+///
+/// It is polled rather than waited on, so the viewer keeps drawing and stays flyable while the
+/// simulator works. Nothing here models anything: the edit changed the ground, and every
+/// consequence of that is computed by `ecosim` in its own process, at its own 1 m grid.
+#[allow(clippy::too_many_arguments)]
+fn sim_tick(
+    keys: Res<ButtonInput<KeyCode>>,
+    args: Res<Args>,
+    site: Res<Site>,
+    scene: Res<Scene>,
+    mut sim: ResMut<Sim>,
+    mut request: ResMut<SimRequest>,
+    mut timeline: ResMut<Timeline>,
+    mut overlays: ResMut<OverlayState>,
+    mut busy: ResMut<Busy>,
+) {
+    if keys.just_pressed(KeyCode::Backspace) {
+        if let Some(job) = sim.job.as_mut() {
+            job.cancel();
+            sim.job = None;
+            sim.phase = "idle";
+            sim.note = "the run was stopped".into();
+            busy.0 = false;
+        }
+    }
+    let asked = request.0.take();
+    let auto = args.sim && !sim.auto_started;
+    if sim.job.is_none() && (asked.is_some() || auto || keys.just_pressed(KeyCode::Enter)) {
+        sim.auto_started = true;
+        let (seed, ticks) = asked.unwrap_or((sim.seed, sim.ticks));
+        sim.seed = seed;
+        sim.ticks = ticks;
+        let root = sim.root.clone();
+        let w = &site.world;
+        match SimJob::start(
+            &scene.bundle,
+            (&w.ground_h, &w.medium, &w.building_h),
+            &root,
+            seed,
+            ticks,
+        ) {
+            Ok(job) => {
+                println!("sim: {}", job.command);
+                sim.phase = "running";
+                sim.note = format!("ecosim is running: {ticks} ticks, seed {seed}");
+                sim.job = Some(job);
+                busy.0 = true;
+            }
+            Err(e) => {
+                sim.phase = "failed";
+                sim.note = format!("could not start ecosim: {e}");
+                eprintln!("sim: {}", sim.note);
+            }
+        }
+    }
+    let Some(mut job) = sim.job.take() else {
+        return;
+    };
+    match job.poll() {
+        SimState::Running => {
+            let (tick, frac) = job.progress();
+            sim.note = format!(
+                "ecosim: tick {tick} of {} ({:.0}%), {:.1} s",
+                job.ticks,
+                frac * 100.0,
+                job.elapsed().as_secs_f64()
+            );
+            sim.job = Some(job);
+            busy.0 = true;
+        }
+        SimState::Done => {
+            busy.0 = false;
+            let secs = job.elapsed().as_secs_f64();
+            let loaded = Run::load(&job.out)
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.check_against(&scene.bundle).map(|_| r));
+            match loaded {
+                Ok(run) => {
+                    let snaps = run.snapshot_count();
+                    // Back to the beginning and play: the point of the round trip is watching the
+                    // site grow from the edit, not arriving at the end of it. `--tick` overrides,
+                    // because a scripted screenshot asks for one moment and should not be moving.
+                    timeline.index = args.tick.map_or(0, |t| run.index_of_tick(t));
+                    timeline.playing = args.tick.is_none();
+                    timeline.applied = None;
+                    timeline.cover_applied = None;
+                    timeline.run = Some(run);
+                    overlays.applied = None;
+                    sim.phase = "grown";
+                    sim.last = Some((job.ticks, secs, snaps, job.out.display().to_string()));
+                    sim.note = format!(
+                        "grown: {} ticks in {:.1} s, {snaps} snapshots in {}",
+                        job.ticks,
+                        secs,
+                        job.out.display()
+                    );
+                    println!("sim: {}", sim.note);
+                }
+                Err(e) => {
+                    sim.phase = "failed";
+                    sim.note = format!("ecosim finished but its run cannot be drawn: {e}");
+                    eprintln!("sim: {}", sim.note);
+                }
+            }
+        }
+        SimState::Failed(e) => {
+            busy.0 = false;
+            sim.phase = "failed";
+            sim.note = e;
+            eprintln!("sim: {} -- see {}", sim.note, job.log.display());
+        }
     }
 }
 
@@ -1175,27 +1572,49 @@ fn sync_chunk(
     }
 }
 
+/// The two `&mut Node` queries below have to be statically disjoint from each other and from every
+/// other one in [`hud`], which means each spells out the markers the others carry. Named here
+/// rather than inline: a five-deep filter tuple in an argument list is unreadable.
+type TimelineBarFilter = (
+    With<TimelineBar>,
+    Without<TimelineFill>,
+    Without<LegendRoot>,
+    Without<LegendLabel>,
+    Without<HudText>,
+);
+type LegendLabelFilter = (
+    With<LegendLabel>,
+    Without<HudText>,
+    Without<LegendRoot>,
+    Without<TimelineFill>,
+);
+
 /// Everything on the screen: the text block, the bar's fill, and the overlay legend.
 #[allow(clippy::too_many_arguments)]
 fn hud(
     timeline: Res<Timeline>,
     overlays: Res<OverlayState>,
     site: Res<Site>,
+    scene: Res<Scene>,
+    editor: Res<Editor>,
+    sim: Res<Sim>,
     fly: Query<&Fly>,
+    mut bar: Query<&mut Node, TimelineBarFilter>,
     mut text: Query<&mut Text, With<HudText>>,
     mut fill: Query<&mut Node, (With<TimelineFill>, Without<LegendRoot>)>,
     mut legend: Query<&mut Node, With<LegendRoot>>,
     mut swatches: Query<(&LegendBand, &mut BackgroundColor)>,
-    mut label: Query<
-        (&mut Text, &mut Node),
-        (
-            With<LegendLabel>,
-            Without<HudText>,
-            Without<LegendRoot>,
-            Without<TimelineFill>,
-        ),
-    >,
+    mut label: Query<(&mut Text, &mut Node), LegendLabelFilter>,
 ) {
+    // The bar appears when there is a run to scrub, which a round trip can create while the viewer
+    // is running. An empty track offers a scrub that would do nothing.
+    for mut node in &mut bar {
+        node.display = if timeline.count() > 0 {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
     let scale = overlays.scale.as_ref();
     for mut node in &mut legend {
         node.display = if scale.is_some() {
@@ -1295,6 +1714,8 @@ fn hud(
             ),
         });
     }
+    s.push_str(&editor_line(&editor, &site, &scene));
+    s.push_str(&sim_line(&sim));
     match &timeline.run {
         Some(run) => {
             s.push_str(&format!(
@@ -1340,13 +1761,76 @@ fn hud(
                 ));
             }
         }
-        None => s.push_str("no run loaded -- pass --run DIR to put a simulation over this site"),
+        None => s.push_str(
+            "no run loaded -- pass --run DIR, or edit the ground and press [Enter] to grow one",
+        ),
     }
     for mut t in &mut text {
         if t.0 != s {
             t.0 = s.clone();
         }
     }
+}
+
+/// What the crosshair is on and what has been done to the site.
+///
+/// The medium is named from the **bundle's own media list**, in the order the bundle publishes it,
+/// rather than from a table in the viewer: the site says what its surfaces are.
+fn editor_line(editor: &Editor, site: &Site, scene: &Scene) -> String {
+    let mut s = match editor
+        .target
+        .and_then(|(x, y)| site.world.column(x, y).map(|c| (x, y, c)))
+    {
+        Some((x, y, (g, m, b))) => format!(
+            "crosshair ({x}, {y})  {}  ground {g:.2} m{}\n",
+            scene
+                .bundle
+                .media
+                .get(m as usize)
+                .map_or("an unlisted medium", String::as_str),
+            if b > 0.0 {
+                format!("  building {b:.2} m")
+            } else {
+                String::new()
+            }
+        ),
+        None => format!("crosshair on nothing within {PICK_RANGE_M:.0} m\n"),
+    };
+    s.push_str(&format!(
+        "{} edits, {} undoable   [Q] [Z] ground  [T] [G] building  [M] surface  [U] undo{}\n",
+        site.edits,
+        editor.undo.len(),
+        if editor.note.is_empty() {
+            String::new()
+        } else {
+            format!("   -- {}", editor.note)
+        }
+    ));
+    s
+}
+
+/// Where the round trip stands, and whose numbers the result is.
+fn sim_line(sim: &Sim) -> String {
+    let keys = if sim.job.is_some() {
+        "[Backspace] stop"
+    } else {
+        "[Enter] grow"
+    };
+    let mut s = format!(
+        "ecosim round trip: {}   {keys}   {} ticks, seed {}\n",
+        sim.phase, sim.ticks, sim.seed
+    );
+    if !sim.note.is_empty() {
+        s.push_str(&format!("  {}\n", sim.note));
+    }
+    if sim.phase == "grown" {
+        // The one sentence that keeps the picture honest. The viewer changed the ground; everything
+        // that happened because of it was computed by the simulator, in its own process.
+        s.push_str(
+            "  the edit is the viewer's; the water, light, fertility and growth are ecosim's\n",
+        );
+    }
+    s
 }
 
 fn move_camera(mut queue: ResMut<CameraQueue>, mut cam: Query<(&mut Transform, &mut Fly)>) {
@@ -1481,9 +1965,16 @@ fn bench_frames(
 fn headless_frames(
     mut commands: Commands,
     mut hl: ResMut<Headless>,
+    busy: Res<Busy>,
     mut frame: Local<u32>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    // A round trip takes seconds and this counts frames, so the count restarts while one is in
+    // flight: `--sim --screenshot` photographs the site that grew, never the site before it.
+    if busy.0 {
+        *frame = 0;
+        return;
+    }
     *frame += 1;
     if *frame < hl.frames {
         return;
@@ -1536,8 +2027,57 @@ fn edit_method(In(params): In<Option<Value>>, mut queue: ResMut<EditQueue>) -> B
             "unknown action {name}; expected RaiseGround, LowerGround, SetSurface, RaiseBuilding or LowerBuilding"
         ))
     })?;
-    queue.0.push((x, y, action));
+    queue.0.push(EditOp::Cell(x, y, action));
     Ok(json!({"queued": {"x": x, "y": y, "action": name}}))
+}
+
+/// `ecoview.sim {"ticks": n, "seed": n}` to start a round trip, or no parameters to read where the
+/// last one got to.
+///
+/// The same round trip the **Enter** key starts: write the edited site out as a world bundle, run
+/// `ecosim` on it as a command, and load the run it writes. An explicit method for the reason every
+/// other one here is explicit -- an agent handed a named method does not retry.
+fn sim_method(
+    In(params): In<Option<Value>>,
+    sim: Res<Sim>,
+    mut request: ResMut<SimRequest>,
+) -> BrpResult {
+    let p = params.unwrap_or(Value::Null);
+    let start = p.get("ticks").is_some() || p.get("seed").is_some() || p.get("start").is_some();
+    if start {
+        if sim.job.is_some() {
+            return Err(brp_err("a run is already in flight; stop it first"));
+        }
+        let ticks = p
+            .get("ticks")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(sim.ticks as u64)
+            .clamp(1, sim::MAX_TICKS as u64) as u32;
+        let seed = p.get("seed").and_then(|v| v.as_u64()).unwrap_or(sim.seed);
+        request.0 = Some((seed, ticks));
+        return Ok(json!({"started": true, "ticks": ticks, "seed": seed}));
+    }
+    Ok(sim_json(&sim))
+}
+
+/// The round trip's state, for `ecoview.sim` and `ecoview.stats` both.
+fn sim_json(sim: &Sim) -> Value {
+    json!({
+        "phase": sim.phase,
+        "note": sim.note,
+        "ticks": sim.ticks,
+        "seed": sim.seed,
+        "running": sim.job.is_some(),
+        "progress": sim.job.as_ref().map(|j| {
+            let (tick, frac) = j.progress();
+            json!({"tick": tick, "fraction": frac, "seconds": j.elapsed().as_secs_f64()})
+        }),
+        "world": sim.job.as_ref().map(|j| j.world.display().to_string()),
+        "last": sim.last.as_ref().map(|(ticks, secs, snaps, dir)| json!({
+            "ticks": ticks, "seconds": secs, "snapshots": snaps, "run": dir,
+        })),
+        "note_on_authorship": "the viewer edits the ground and starts ecosim as a command; every consequence -- water, runoff, light, fertility, growth -- is computed by ecosim in its own process. No code is shared and no IPC is used: the run directory on disk is the whole interface.",
+    })
 }
 
 /// `ecoview.camera {"pos": [x, y, z], "look_at": [x, y, z]}`
@@ -1565,6 +2105,8 @@ fn stats_method(
     site: Res<Site>,
     t: Res<Timeline>,
     ov: Res<OverlayState>,
+    editor: Res<Editor>,
+    sim: Res<Sim>,
 ) -> BrpResult {
     Ok(json!({
         "cell_m": site.world.cell_m,
@@ -1574,6 +2116,15 @@ fn stats_method(
         "chunks": site.world.chunk_count(),
         "drawn_chunks": site.entities.iter().filter(|e| e.is_some()).count(),
         "edits": site.edits,
+        "undoable": editor.undo.len(),
+        "crosshair": editor.target.map(|(x, y)| json!({
+            "x": x,
+            "y": y,
+            "column": site.world.column(x, y).map(|(g, m, b)| json!({
+                "ground_h": g, "medium": m, "building_h": b,
+            })),
+        })),
+        "sim": sim_json(&sim),
         "last_remesh_ms": site.last_remesh_ms,
         "run": t.run.as_ref().map(|r| json!({
             "dir": r.dir.display().to_string(),

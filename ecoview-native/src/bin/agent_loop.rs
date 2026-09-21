@@ -140,6 +140,46 @@ fn main() {
     let after = l.call("ecoview.stats", json!({}));
     println!("  after three edits: {}", after.clone().unwrap_or_default());
 
+    // Shot V5: the round trip, driven the same way -- one named method, nothing to discover. The
+    // agent has just changed the ground; now it asks for the consequences. `ecosim` runs as a
+    // command in its own process and the run directory it writes is the only thing that comes
+    // back, so this gate needs a built simulator beside it (`cargo build --release` in ecosim/).
+    let ticks: u64 = arg("--sim-ticks", "1000").parse().unwrap_or(1000);
+    println!(
+        "  sim requested: {}",
+        l.call("ecoview.sim", json!({"ticks": ticks, "seed": 42}))
+            .unwrap_or_default()
+    );
+    let mut polls = 0;
+    let grown = loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        polls += 1;
+        let s = l.call("ecoview.sim", json!({}));
+        let phase = s
+            .as_ref()
+            .and_then(|v| v["phase"].as_str())
+            .unwrap_or("unanswered")
+            .to_string();
+        if phase == "grown" {
+            println!("  grown after {polls} polls: {}", s.unwrap_or_default());
+            break true;
+        }
+        // 120 polls is a minute, and the longest run this method will start is about 20 s.
+        if phase != "running" || polls > 120 {
+            println!("  the round trip did not finish: {}", s.unwrap_or_default());
+            l.failures
+                .push(format!("ecoview.sim ended in phase {phase}"));
+            break false;
+        }
+    };
+    let after = if grown {
+        let s = l.call("ecoview.stats", json!({}));
+        println!("  after the round trip: {}", s.clone().unwrap_or_default());
+        s
+    } else {
+        after
+    };
+
     // Shot V1: the timeline gets the same treatment as the three V0 methods -- one documented method
     // an agent can drive without discovering a component schema. Only exercised when a run is loaded;
     // `ecoview.timeline` answers with an error when there is none, which would count as a failure.
@@ -185,7 +225,10 @@ fn main() {
     let _ = child.wait();
 
     println!("---");
-    println!("calls: {}, retries: {}", l.calls, l.retries);
+    println!(
+        "calls: {}, retries: {} ({polls} of the calls were polls waiting on the round trip)",
+        l.calls, l.retries
+    );
     println!(
         "time to first screenshot: {:.1} s total, {shot_ms:.0} ms for the call",
         started.elapsed().as_secs_f64()
@@ -201,7 +244,7 @@ fn main() {
     for f in &l.failures {
         println!("failure: {f}");
     }
-    let ok = png_size(&png).is_some() && l.retries <= 3 && after.is_some();
+    let ok = png_size(&png).is_some() && l.retries <= 3 && after.is_some() && grown;
     println!("agent gate: {}", if ok { "PASS" } else { "FAIL" });
     std::process::exit(i32::from(!ok));
 }

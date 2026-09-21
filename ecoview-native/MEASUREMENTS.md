@@ -709,3 +709,146 @@ fractions match the run's and that the drivers move the picture in the right dir
 What the picture can be trusted for is the direction and the magnitude of change: grass giving way
 to shrub between tick 1000 and tick 20000, vines twice as long on a wetter shadier site, and bare
 pavement where the simulator's ground is sealed. Those are the run's. The rest is drawing.
+
+# Shot V5 — edit, run, grow, in place
+
+Everything below was measured on this machine (i9-12900KF, RTX 4090, Windows 11) against the
+committed Capitol bundle, with `ecosim` built `--release` beside the viewer. **The ground cover and
+the vines in every picture here are expression, not simulation** — V4's note still applies. What is
+new in this shot is the other direction: the *terrain* in these pictures is the viewer's, and every
+ecological number on top of it was computed by `ecosim` in its own process, from a world bundle the
+viewer wrote to disk.
+
+## What a round trip costs
+
+| ticks | snapshot every | ecosim | snapshots | where |
+|---|---|---|---|---|
+| 1,000 | 100 | 0.9 s | 11 | the agent gate |
+| 4,000 | 400 | 3.3–3.8 s | 11 | the five close screenshots |
+| 20,000 | 2,000 | 25.6 s | 11 | `v5-site.png`, the SAD's full run length |
+
+The viewer adds a bundle write (six files, about 1.5 MB), a run load and one full re-voxelisation:
+324 chunks remesh in 220–400 ms at 4,000 ticks and 2.2 s at 20,000, where the site is closed
+woodland. So a 4,000-tick round trip is about four seconds end to end and a full-length one about
+half a minute — both inside what a person will sit through, which is why this runs on the main
+thread with a polled child rather than on a worker.
+
+An 11,200-edit rectangle (1,600 cells lowered six times and then paved) applies and remeshes in one
+batch; the HUD's `remesh 324 chunks` line is the load after the run, not the edit.
+
+## The experiment: dig a basin, then pave it
+
+Three runs, same seed (42), same 4,000 ticks, same bundle, differing only in what the viewer did to
+the ground first. The basin is ground cells 80–119 by 150–189 — a 20 m square of unbroken lawn —
+lowered six times by 0.5 m, so 3 m deep.
+
+| at tick 4,000 | control | dug, left as lawn | dug and paved |
+|---|---|---|---|
+| trees | 1,444 | **1,444** | 829 |
+| basin moisture (0–255) | 244.0 | 244.0 | **0.0** |
+| basin fertility | 80.8 | 76.5 | **0.0** |
+| basin soil water | 143.62 mm | 143.62 mm | **0.00 mm** |
+| basin ponded water | none | none | **214.85 mm mean, 2,786 mm deepest, 1,600 of 1,600 cells wet** |
+| the 5 m ring around it, moisture | 244.0 | 244.0 | 252.0 |
+| the ring, soil water | 143.58 mm | 143.58 mm | 148.41 mm |
+
+**Digging a hole in a lawn changes the simulator's water not at all.** `moisture.bin` and
+`water.bin` are byte-identical to the control at every snapshot out to tick 4,000, and
+`soil_water.bin` and `fertility.bin` first differ at tick 1,250 in the fifth significant figure. The
+tree count is identical at every one of the 4,000 ticks. What does change is `height.bin`,
+`material.bin` (the cut faces) and `light.bin` — the hole shades itself — and that light difference
+is what eventually moves fertility. Rain infiltrates lawn whatever shape the lawn is in.
+
+**Paving the same hole is a different site.** Those 400 ecology columns hold no soil water from tick
+0, the basin is ponded by tick 78, and by tick 400 it holds **10.1 mm of standing water on all 1,600
+ground cells while the control holds none** — and tick 400 is before anything else about the two runs
+has parted, so that one is cause and effect with nothing else in it.
+
+## The honest limit on that comparison
+
+The paved run's **rain schedule leaves the control's at tick 1,011** (19.4253 mm against 0.0000) and
+the tree counts part at tick 1,033. One changed column reorders the draws the simulator takes, and
+after that the two runs are two different weather histories, not two treatments.
+
+So **829 trees against 1,444 is not what the basin did.** A 20 m square is 0.6% of this site and
+cannot halve its forest; what it did was move a storm. Every causal claim above is therefore taken
+either from the pre-divergence window (the tick-400 ponding, the byte-identical fields at tick 800)
+or from the basin's own columns, where the mechanism is local and mechanical. The site-wide rows of
+the table are reported because they are what the screenshots show, and they are labelled here so
+nobody reads them as an effect.
+
+This is worth a standing note for the track: **on this simulator an edit is not a controlled
+experiment past about a thousand ticks.** A row that wants one will need either a fixed weather
+sequence or many seeds.
+
+## The one thing the viewer cannot draw
+
+At tick 4,000 the paved basin holds an average of 214.85 mm of standing water, and the viewer paints
+it as **the driest ground on the site** — `v5-water.png` shows it bone white under the moisture
+overlay while everything around it is saturated blue. Both are honest readings of different files:
+the overlay reads `moisture.bin`, which is soil water in the ecology columns, and a paved column has
+none. `water.bin`, the ponded depth on the ground grid, has no overlay and no geometry in this
+viewer at all.
+
+The round trip is what makes this visible — before this shot there was no way to put water somewhere
+the reference run does not have it. **A water overlay, and ponded water as drawn voxels, is the
+largest single thing this viewer now measurably lacks.** Handed up to BACKLOG; it is not among this
+row's four pieces and this shot does not invent it.
+
+## The screenshots
+
+Six, all 1280 by 800, all on the committed Capitol, all reproducible from the commands below. The
+five close ones share `--eye 50,45,135 --look 50,4,85`; `$DIG` is
+`--edit 80,150,119,189,LowerGround` six times and `$PAVE` is `--edit 80,150,119,189,SetSurface,6`.
+
+| File | Command, after `ecoview-native --headless --frames 200` | Verdict |
+|---|---|---|
+| `v5-dig.png` | `$DIG $PAVE --eye … --look …` | The edit before anything has been run on it: a clean 20 m pit with brown cut soil at its lip and an asphalt floor, sitting in unbroken Capitol lawn with the bundle's own trees around it; the HUD reads `11200 edits, 512 undoable`, the crosshair names the column under it (`asphalt ground 3.10 m`), and the round-trip line says `idle [Enter] grow`. |
+| `v5-grown.png` | `$DIG $PAVE --sim --sim-ticks 4000 --sim-root … --tick 4000` | The same pit after the 4,000 ticks the viewer asked for: grass and shrub have grown to the lip and stopped dead at the asphalt, saplings are scattered over the lawn outside it, and the HUD carries the whole provenance — the run directory, `4000 ticks in 3.5 s, 11 snapshots`, and the line saying the edit is the viewer's and the growth is ecosim's. |
+| `v5-water.png` | the same, plus `--overlay moisture` | The finding in one frame: the basin reads white — 0.00 of available water capacity — inside a site painted saturated blue, which is both correct and incomplete, because the simulator has 215 mm of water standing in it that this viewer has no way to draw. |
+| `v5-lawn.png` | `$DIG --sim --sim-ticks 4000 --sim-root … --tick 4000 --overlay moisture` | The control for the water claim: the same 3 m basin left as lawn disappears into the moisture map — only its two cut walls give it away — and the run behind it has the same 1,444 trees as the untouched site. |
+| `v5-untouched.png` | `--sim --sim-ticks 4000 --sim-root … --tick 4000 --overlay moisture` | No edit at all, same camera, same tick: uniform blue where the basin would be, `0 edits, 0 undoable`, 1,444 trees. The picture that makes the other two mean something. |
+| `v5-site.png` | `$DIG $PAVE --sim --sim-ticks 20000 --sim-root … --tick 20000`, default camera | The full-length round trip: 20,000 ticks in 25.6 s, 4,785 trees, the Capitol under closed canopy with the dome standing out of it. Honest caveat — at this zoom the basin is under the woodland and cannot be seen, so this picture is evidence that a 20,000-tick round trip works and draws, not evidence about the edit. |
+
+## The agent gate, and two committed PNGs regenerated
+
+`agent_loop` with **no `--run` argument at all**: **PASS**, 18 calls, 0 retries (2 of them polls
+waiting on the round trip), 4.0 s to the first screenshot. The agent edits three cells, calls
+`ecoview.sim {"ticks": 1000, "seed": 42}`, polls until the phase reads `grown`, and then scrubs the
+timeline of a run **it caused**, where every previous shot's loop could only read a run somebody else
+had made. `ecoview.stats` answers with the round trip's state, the crosshair's column, the undo depth
+and the authorship sentence.
+
+`shots/agent-loop.png` is **1,531,622 bytes** against V4's roughly 1,319,000, and its run is now a
+1,000-tick round trip of the agent's own rather than `capitol-s42` — a different picture of a
+different run, not drift. (V4's note stands: this file is not byte-reproducible, because the HUD
+prints a wall-clock remesh time.)
+
+`shots/stress-headless.png` is **873,792 bytes** against V4's 839,136. The scene is untouched —
+**335,544 quads, 247 chunks drawn, both identical to V3 and V4** — and the 35 kB is HUD text: the
+crosshair line, the editor line and the round-trip line, plus the crosshair in the middle of the
+frame. Regenerated because this shot changed what that picture shows, which is the rule V3 and V4
+used.
+
+`shots/capitol-headless.png` is **still stale, now across four shots** — V0 wrote it, and V1, V2 and
+V5 have each changed the HUD over it since. V4 left it and handed it up; this shot does the same
+rather than fold four shots' worth of drift into a row that did not ask for it. The BACKLOG note
+stands.
+
+## Line budget
+
+`git diff --stat 4d18d76 -- ecoview-native/` is **1,223 insertions and 48 deletions**, plus the new
+untracked `src/sim.rs` at **347 lines**, which `--stat` cannot see: 1,522 net before the write-ups,
+and **1,782 net with them, against the row's 1,500** — 282 over, 18.8%. The two write-ups are 257 of
+those lines (140 here, 117 in DECISIONS.md), more than V1's 200, because this shot has a three-run
+experiment and six pictures to account for.
+
+The split is **1,134 non-test and 388 test**. Comments are 222 of the 1,223 added tracked lines, 18%,
+and 79 of 347 in `sim.rs`, 23%, which is this component's usual density; `sim.rs` runs higher because
+it documents a child process and a file another program reads, where the why is the whole value.
+
+**The trim that would fit does not exist without cutting tests.** Dropping every test this shot adds
+would land it at 1,394, under the limit and at the cost of the 388 lines the rule exists to protect;
+nothing else in the shot is large enough to cut instead. MASTER's budget rule says to block
+rather than trim tests to fit, so this shot blocks on the number and hands the operator the
+arithmetic, exactly as V2 did. `overnight/shots/V5.BLOCKED.md` has the options.

@@ -1,9 +1,13 @@
 //! The world bundle on disk, read exactly as `ecoview` reads it: from the committed files, with no
 //! code shared with `ecosim` (CLAUDE.md, "share no code and have no IPC"). Format: docs/SCENE-CONTRACT.md.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::Path;
+
+/// The two strings `bundle.json` must carry, and which a save writes back unchanged.
+pub const BUNDLE_FORMAT: &str = "ecosim-world-bundle";
+pub const BUNDLE_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
 struct BundleJson {
@@ -15,10 +19,15 @@ struct BundleJson {
     ground_width: usize,
     ground_depth: usize,
     media: Vec<String>,
+    /// Provenance: the data source, its licence and the crop centre. Nothing in the viewer reads
+    /// it, and a save writes it back **verbatim**, because an edited copy of the Capitol is still
+    /// made of USGS LiDAR and the credit travels with the file (`ecosim/worlds/capitol/README.md`).
+    #[serde(default)]
+    source: String,
 }
 
 /// A tree as the scene contract writes it: metres from the south-west corner.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tree {
     pub x: f32,
     pub y: f32,
@@ -28,7 +37,7 @@ pub struct Tree {
 }
 
 /// A shrub: an ellipse in plan, `angle` radians from east.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Shrub {
     pub x: f32,
     pub y: f32,
@@ -54,6 +63,12 @@ pub struct Bundle {
     pub building_h: Vec<f32>,
     pub trees: Vec<Tree>,
     pub shrubs: Vec<Shrub>,
+    /// `bundle.json`'s `source`, carried through a save untouched. Empty for a synthetic world.
+    pub source: String,
+    /// Where this bundle was read from, or `None` for a synthetic one. A save copies `pipes.json`
+    /// from here rather than writing an empty list: the viewer has no pipe model and shot G6 will,
+    /// so dropping the drains on the way through an edit would silently change the site.
+    pub dir: Option<std::path::PathBuf>,
 }
 
 fn bad(msg: String) -> io::Error {
@@ -113,6 +128,8 @@ impl Bundle {
             building_h: read_f32(&dir.join("building_h.f32"), cells)?,
             trees: read_json(&dir.join("trees.json"))?,
             shrubs: read_json(&dir.join("shrubs.json"))?,
+            source: meta.source,
+            dir: Some(dir.to_path_buf()),
         })
     }
 
@@ -175,7 +192,108 @@ impl Bundle {
             building_h,
             trees,
             shrubs: Vec::new(),
+            source: String::new(),
+            dir: None,
         }
+    }
+
+    /// Writes this bundle, with `grids` in place of its own three, into a **fresh** directory.
+    ///
+    /// This is the first half of the round trip: the viewer edits columns in [`crate::VoxelWorld`],
+    /// and `ecosim` reads a directory, so the edited grids have to become files before anything can
+    /// be run on them. `grids` is `(ground_h, medium, building_h)` straight off the voxel world;
+    /// passing them in rather than mutating the bundle keeps the loaded bundle the site as it was
+    /// read, which is what `--world` still means after twenty edits.
+    ///
+    /// **It never writes over the bundle it came from.** `dir` is a scratch directory the caller
+    /// made; the committed Capitol is 22 MB of public LiDAR and an editor that could overwrite it
+    /// by mis-clicking is an editor nobody should run. The one guard is here rather than in the
+    /// caller so every caller has it.
+    ///
+    /// `pipes.json` is copied byte for byte from [`Bundle::dir`] when there is one, and written as
+    /// `[]` when there is not. Everything else is this bundle's own fields.
+    pub fn save(&self, dir: &Path, grids: (&[f32], &[u8], &[f32]), note: &str) -> io::Result<()> {
+        if let Some(src) = &self.dir {
+            if same_dir(src, dir) {
+                return Err(bad(format!(
+                    "refusing to write the edited bundle over its own source at {}",
+                    src.display()
+                )));
+            }
+        }
+        let (ground_h, medium, building_h) = grids;
+        let cells = self.width * self.depth;
+        for (name, len) in [
+            ("ground_h", ground_h.len()),
+            ("medium", medium.len()),
+            ("building_h", building_h.len()),
+        ] {
+            if len != cells {
+                return Err(bad(format!(
+                    "{name} has {len} cells and the bundle is {}x{} = {cells}",
+                    self.width, self.depth
+                )));
+            }
+        }
+        std::fs::create_dir_all(dir)?;
+        // The site's drains, copied byte for byte. Read before `bundle.json` is written because the
+        // counts below are of what actually goes in the directory, not of what was hoped for.
+        let pipes = match &self.dir {
+            Some(src) => std::fs::read(src.join("pipes.json")).unwrap_or_else(|_| b"[]".to_vec()),
+            None => b"[]".to_vec(),
+        };
+        let pipe_count = serde_json::from_slice::<serde_json::Value>(&pipes)
+            .ok()
+            .and_then(|v| v.as_array().map(Vec::len))
+            .unwrap_or(0);
+        // `edited_by` is not in the scene contract. `ecosim`'s reader ignores unknown keys by
+        // design ("a later exporter may add fields"), and a bundle that has been through an editor
+        // should say so on its face rather than only in the directory it happens to sit in.
+        let meta = serde_json::json!({
+            "format": BUNDLE_FORMAT,
+            "version": BUNDLE_VERSION,
+            "name": self.name,
+            "size_m": self.size_m,
+            "ground_cell_m": self.ground_cell_m,
+            "ground_width": self.width,
+            "ground_depth": self.depth,
+            "media": self.media,
+            "source": self.source,
+            // The exporter writes these and nothing reads them; they are a human's check that the
+            // directory holds what its name says, so they are recounted rather than carried over.
+            "counts": {
+                "trees": self.trees.len(),
+                "shrubs": self.shrubs.len(),
+                "pipes": pipe_count,
+            },
+            "edited_by": note,
+        });
+        std::fs::write(dir.join("bundle.json"), serde_json::to_vec_pretty(&meta)?)?;
+        std::fs::write(dir.join("ground_h.f32"), f32_bytes(ground_h))?;
+        std::fs::write(dir.join("medium.u8"), medium)?;
+        std::fs::write(dir.join("building_h.f32"), f32_bytes(building_h))?;
+        std::fs::write(dir.join("trees.json"), serde_json::to_vec(&self.trees)?)?;
+        std::fs::write(dir.join("shrubs.json"), serde_json::to_vec(&self.shrubs)?)?;
+        std::fs::write(dir.join("pipes.json"), pipes)?;
+        Ok(())
+    }
+}
+
+/// Little-endian f32s, the way both projects read them.
+fn f32_bytes(v: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for f in v {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    out
+}
+
+/// Are these the same directory? Compared by canonical path when both exist, and textually when
+/// they do not -- the destination is usually about to be created, so `canonicalize` fails on it.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
     }
 }
 

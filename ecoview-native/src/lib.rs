@@ -15,6 +15,7 @@ pub mod mesh;
 pub mod overlay;
 pub mod palette;
 pub mod run;
+pub mod sim;
 pub mod tree;
 pub mod voxel;
 
@@ -24,6 +25,7 @@ pub use mesh::{mesh_chunk, ChunkMesh, Scratch};
 pub use overlay::{Fields, Scale};
 pub use palette::Overlay;
 pub use run::Run;
+pub use sim::{SimJob, SimState};
 pub use tree::{Life, TreeForm};
 pub use voxel::{ChunkPos, EditAction, VoxelWorld};
 

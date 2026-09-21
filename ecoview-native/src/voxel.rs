@@ -720,9 +720,41 @@ impl VoxelWorld {
             }
         }
         let after = self.column_span(i);
-        // Only the levels between the old and new ground and tops changed; below them it is still
-        // soil, which no edit rewrites. Lowering ground under a building moves the building's base
-        // too, so the span runs from the lower of the two ground levels to the higher of the two tops.
+        self.touched(x, y, before, after)
+    }
+
+    /// What a column holds: `(ground height, medium code, building height)`.
+    ///
+    /// The crosshair reads this to say what it is pointing at, and an undo entry is taken from it
+    /// **before** the edit rather than derived from the action afterwards: `LowerGround` clamps at
+    /// zero and `SetSurface` throws the old code away, so the opposite action is not an undo.
+    pub fn column(&self, x: usize, y: usize) -> Option<(f32, u8, f32)> {
+        (x < self.width && y < self.depth).then(|| {
+            let i = x + self.width * y;
+            (self.ground_h[i], self.medium[i], self.building_h[i])
+        })
+    }
+
+    /// Puts a column back the way [`VoxelWorld::column`] found it. Returns the stale chunks.
+    pub fn restore_column(&mut self, x: usize, y: usize, was: (f32, u8, f32)) -> Vec<ChunkPos> {
+        if x >= self.width || y >= self.depth {
+            return Vec::new();
+        }
+        let i = x + self.width * y;
+        let before = self.column_span(i);
+        self.ground_h[i] = was.0;
+        self.medium[i] = was.1;
+        self.building_h[i] = was.2;
+        let after = self.column_span(i);
+        self.touched(x, y, before, after)
+    }
+
+    /// The chunks a change to column `(x, y)` between these two spans leaves stale.
+    ///
+    /// Only the levels between the old and new ground and tops changed; below them it is still
+    /// soil, which no edit rewrites. Lowering ground under a building moves the building's base
+    /// too, so the span runs from the lower of the two ground levels to the higher of the two tops.
+    fn touched(&self, x: usize, y: usize, before: (i32, i32), after: (i32, i32)) -> Vec<ChunkPos> {
         let lo = (before.0.min(after.0).max(0) as usize).min(self.levels - 1);
         let hi = (before.1.max(after.1).max(0) as usize).min(self.levels - 1);
         let mut out = Vec::new();
@@ -743,6 +775,47 @@ impl VoxelWorld {
             }
         }
         out
+    }
+
+    /// The ground cell a ray first meets, marched from `origin` along `dir` for at most `max_m`
+    /// metres. `None` when it never touches anything solid inside the site.
+    ///
+    /// A ray march rather than a proper DDA: the world is a heightfield, so the test at each sample
+    /// is one comparison against that column's own top, and a quarter-cell step over 120 m is under
+    /// a thousand of them -- far cheaper than the remesh the hit is about to cause. A coarser step
+    /// would slip through a wall seen edge-on; a finer one would only find the same cell again.
+    ///
+    /// Plants are not in it. The crosshair edits ground, paving and buildings, and a tree is
+    /// something the simulator planted: pointing through a canopy at the lawn under it is what a
+    /// gardener means, and it is the only reading that stays true when that tree grows a tick later.
+    pub fn pick_cell(&self, origin: [f32; 3], dir: [f32; 3], max_m: f32) -> Option<(usize, usize)> {
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if !len.is_finite() || len <= 0.0 {
+            return None;
+        }
+        let d = [dir[0] / len, dir[1] / len, dir[2] / len];
+        let step = 0.25 * self.cell_m;
+        let steps = (max_m / step).ceil().max(1.0) as i32;
+        for s in 0..=steps {
+            let t = s as f32 * step;
+            let p = [
+                origin[0] + d[0] * t,
+                origin[1] + d[1] * t,
+                origin[2] + d[2] * t,
+            ];
+            if p[0] < 0.0 || p[2] < 0.0 {
+                continue;
+            }
+            let (x, y) = ((p[0] / self.cell_m) as usize, (p[2] / self.cell_m) as usize);
+            if x >= self.width || y >= self.depth {
+                continue;
+            }
+            let i = x + self.width * y;
+            if p[1] <= self.ground_h[i] + self.building_h[i] {
+                return Some((x, y));
+            }
+        }
+        None
     }
 
     /// A column's ground level and its highest solid level, used to find the chunks an edit touches.

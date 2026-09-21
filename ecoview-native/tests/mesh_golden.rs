@@ -7,8 +7,9 @@
 use ecoview_native::bundle::{Bundle, Tree};
 use ecoview_native::mesh::{mesh_chunk, Scratch};
 use ecoview_native::palette::surface_palette;
+use ecoview_native::sim::{self, SimJob, SimState};
 use ecoview_native::tree::{Life, TreeForm, CROWN_BASE_FRACTION};
-use ecoview_native::voxel::{ChunkPos, VoxelWorld};
+use ecoview_native::voxel::{ChunkPos, EditAction, VoxelWorld};
 
 /// A bare bundle of `n` x `n` cells at `cell_m`, all lawn, all at `h` metres.
 fn flat(n: usize, cell_m: f32, h: f32) -> Bundle {
@@ -29,6 +30,8 @@ fn flat(n: usize, cell_m: f32, h: f32) -> Bundle {
         building_h: vec![0.0; n * n],
         trees: Vec::new(),
         shrubs: Vec::new(),
+        source: String::new(),
+        dir: None,
     }
 }
 
@@ -1404,4 +1407,389 @@ fn golden_cover() {
     let p = surface_palette();
     assert_ne!(p[VINE as usize], p[CANOPY as usize]);
     assert_ne!(p[GRASS as usize], p[SHRUB as usize]);
+}
+
+// -------------------------------------------------------------------------------------------
+// V5: edit, run, grow, in place.
+//
+// The round trip is four things, and three of them have no engine in them, so they are gated here:
+// write the edited site back out as a world bundle, build the command line, start `ecosim` as a
+// **command** and watch it, and read what it wrote. The fourth -- drawing it -- is the viewer's own
+// and is measured in MEASUREMENTS.md instead.
+//
+// Nothing below models any ecology. The edit changes three numbers in a column; every consequence
+// of that edit is the simulator's, computed in its own process, and arrives back as files on disk.
+// The two projects still share no code and have no IPC (CLAUDE.md).
+
+/// A 16 m site with one raised, repaved column and one column of building.
+fn edited_site(n: usize) -> (Bundle, VoxelWorld) {
+    let b = flat(n, 0.5, 4.0);
+    let mut w = VoxelWorld::from_bundle(&b);
+    w.apply(7, 9, EditAction::RaiseGround);
+    w.apply(7, 9, EditAction::SetSurface(6)); // asphalt
+    w.apply(20, 4, EditAction::RaiseBuilding);
+    (b, w)
+}
+
+#[test]
+fn the_bundle_that_is_written_is_the_site_that_was_edited() {
+    let dir = tmp("v5-save");
+    let (b, w) = edited_site(32);
+    b.save(
+        &dir,
+        (&w.ground_h, &w.medium, &w.building_h),
+        "the mesh golden gate",
+    )
+    .unwrap();
+
+    // What `ecosim` will read is what the viewer is drawing, cell for cell -- not the bundle as it
+    // was loaded. A round trip that ran on the unedited site would be a very convincing lie.
+    let back = Bundle::load(&dir).unwrap();
+    assert_eq!(back.ground_h, w.ground_h);
+    assert_eq!(back.medium, w.medium);
+    assert_eq!(back.building_h, w.building_h);
+    assert_eq!((back.width, back.depth), (b.width, b.depth));
+    assert_eq!(back.ground_cell_m, b.ground_cell_m);
+    assert_eq!(back.size_m, b.size_m);
+    assert_eq!(back.media, b.media);
+    assert_eq!(back.name, b.name);
+
+    // And nothing else moved: two columns were edited, two columns differ.
+    let changed = (0..b.width * b.depth)
+        .filter(|&i| {
+            back.ground_h[i] != b.ground_h[i]
+                || back.medium[i] != b.medium[i]
+                || back.building_h[i] != b.building_h[i]
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(changed, vec![20 + 32 * 4, 7 + 32 * 9]);
+    assert_eq!(back.ground_h[7 + 32 * 9], 4.5, "one cell of ground, raised");
+    assert_eq!(back.medium[7 + 32 * 9], 6);
+    assert_eq!(back.building_h[20 + 32 * 4], 0.5);
+
+    // The directory is a bundle in its own right: v2, and it says it has been through an editor.
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("bundle.json")).unwrap()).unwrap();
+    assert_eq!(meta["format"], "ecosim-world-bundle");
+    assert_eq!(meta["version"], 2);
+    assert_eq!(meta["edited_by"], "the mesh golden gate");
+    assert_eq!(meta["counts"]["pipes"], 0, "a synthetic site has no drains");
+    assert_eq!(std::fs::read(dir.join("pipes.json")).unwrap(), b"[]");
+}
+
+#[test]
+fn the_capitol_comes_out_of_a_save_byte_for_byte() {
+    let src = std::path::Path::new(ecoview_native::CAPITOL);
+    let b = Bundle::load(src).expect("the committed reference bundle");
+    let dir = tmp("v5-capitol");
+    b.save(&dir, (&b.ground_h, &b.medium, &b.building_h), "unedited")
+        .unwrap();
+
+    // An unedited save is a copy. The three grids are the same bytes, which is the strongest thing
+    // that can be said about a float grid that has been through memory and back.
+    for f in ["ground_h.f32", "medium.u8", "building_h.f32", "pipes.json"] {
+        assert_eq!(
+            std::fs::read(src.join(f)).unwrap(),
+            std::fs::read(dir.join(f)).unwrap(),
+            "{f} changed on the way through the viewer"
+        );
+    }
+    let back = Bundle::load(&dir).unwrap();
+    assert_eq!(back.trees.len(), b.trees.len());
+    assert_eq!(back.shrubs.len(), b.shrubs.len());
+    // The credit travels with the file. The Capitol's medium grid is ODbL and its terrain is USGS
+    // LiDAR; an edited copy is still made of those (CLAUDE.md, worlds/capitol/README.md).
+    assert_eq!(back.source, b.source);
+    assert!(
+        back.source.contains("OpenStreetMap") && back.source.contains("USGS"),
+        "provenance lost: {:?}",
+        back.source
+    );
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("bundle.json")).unwrap()).unwrap();
+    assert_eq!(meta["counts"]["pipes"], 4, "the four drains came through");
+    assert_eq!(meta["counts"]["trees"], b.trees.len());
+}
+
+#[test]
+fn a_save_refuses_to_write_over_the_site_it_came_from() {
+    let dir = tmp("v5-guard");
+    let (b, w) = edited_site(32);
+    let grids = (&w.ground_h[..], &w.medium[..], &w.building_h[..]);
+    b.save(&dir, grids, "first").unwrap();
+    let loaded = Bundle::load(&dir).unwrap();
+
+    // The 22 MB Capitol is public data that took a Blender scene to make, and an editor that can
+    // overwrite its source by mis-clicking is an editor nobody should run.
+    let err = loaded.save(&dir, grids, "over itself").unwrap_err();
+    assert!(
+        err.to_string().contains("refusing"),
+        "wrong refusal: {err}, which should name the directory"
+    );
+    assert!(err.to_string().contains(&dir.display().to_string()));
+    // Somewhere else is fine, and the source is still there afterwards.
+    let other = tmp("v5-guard-2");
+    loaded.save(&other, grids, "elsewhere").unwrap();
+    assert_eq!(Bundle::load(&dir).unwrap().ground_h, w.ground_h);
+    assert_eq!(Bundle::load(&other).unwrap().ground_h, w.ground_h);
+
+    // A grid that is not the site's size is refused before anything is written, not half written.
+    let short = vec![0.0f32; 4];
+    let err = loaded
+        .save(
+            &tmp("v5-short"),
+            (&short, &w.medium, &w.building_h),
+            "short",
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("ground_h"), "{err}");
+}
+
+#[test]
+fn the_command_line_is_the_one_a_person_would_type() {
+    // Copied from `ecoview/scripts/sim-lib.mjs`, not shared with it: the two viewers have no code
+    // in common either. If this drifts, a garden run started from the viewer stops being the run a
+    // hand-typed command produces, and the two stop being comparable.
+    let args = sim::ecosim_args(
+        std::path::Path::new("world"),
+        std::path::Path::new("run"),
+        42,
+        2000,
+        200,
+        None,
+    );
+    let line = args.join(" ");
+    assert!(line.starts_with("run --world world --out run "), "{line}");
+    for expected in [
+        "--seed 42",
+        "--ticks 2000",
+        "--snapshot-every 200",
+        "--snapshot-state false",
+        // MASTER.md's standing rule for every garden run on a bundle world: a rainfall ramp makes
+        // no sense on a 256 m photographed site, and animals are not what this project is about.
+        "--set animals.enabled=false",
+        "--set climate.rain_gradient=0",
+    ] {
+        assert!(line.contains(expected), "{expected:?} missing from {line}");
+    }
+    assert!(!line.contains("--params"), "no params file, no flag");
+
+    let with = sim::ecosim_args(
+        std::path::Path::new("world"),
+        std::path::Path::new("run"),
+        1,
+        10,
+        1,
+        Some(std::path::Path::new("p.toml")),
+    );
+    assert!(with.join(" ").ends_with("--params p.toml"));
+}
+
+#[test]
+fn ten_snapshots_whatever_the_run_is_worth() {
+    assert_eq!(sim::snapshot_every(2000), 200);
+    assert_eq!(sim::snapshot_every(sim::MAX_TICKS), 2000);
+    assert_eq!(sim::snapshot_every(sim::DEFAULT_TICKS), 200);
+    // Short runs still have a timeline to scrub rather than an every-zero-ticks division by zero.
+    assert_eq!(sim::snapshot_every(1), 1);
+    assert_eq!(sim::snapshot_every(4), 1);
+}
+
+#[test]
+fn progress_is_read_off_the_disk_and_nothing_else() {
+    // The simulator says nothing about its progress, so the only honest source is the snapshots it
+    // has actually finished writing. Names that are not `snap_NNNNNN` are ignored, not guessed at.
+    let names = [
+        "meta.json",
+        "series.csv",
+        "snap_000000",
+        "snap_001200",
+        "snap_000100",
+        "snap_12",
+        "snap_abcdef",
+        "snapshot_002000",
+    ];
+    assert_eq!(sim::tick_of_snapshots(names.iter()), 1200);
+    assert_eq!(sim::tick_of_snapshots(std::iter::empty::<&str>()), 0);
+}
+
+#[test]
+fn the_simulator_is_found_where_the_environment_says() {
+    // The only test here that touches the environment, so it cannot race the others.
+    let dir = tmp("v5-env");
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = dir.join("ecosim-somewhere-else");
+    std::fs::write(&fake, b"not really a simulator").unwrap();
+
+    std::env::set_var("ECOSIM_BIN", &fake);
+    assert_eq!(sim::binary(), fake);
+    std::env::remove_var("ECOSIM_BIN");
+    let d = sim::binary();
+    assert!(
+        d.ends_with("ecosim") || d.ends_with("ecosim.exe"),
+        "{}",
+        d.display()
+    );
+    assert!(d.starts_with("../ecosim/target/release"), "{}", d.display());
+
+    // A params file that is not there is `None` rather than a path the simulator would reject:
+    // `ecosim` looks for `params.toml` beside its working directory, and the viewer's scratch
+    // directory is not that, so a round trip either passes the real file or does not run at all.
+    std::env::set_var("ECOSIM_PARAMS", dir.join("no-such-params.toml"));
+    assert_eq!(sim::params_file(), None);
+    let real = dir.join("params.toml");
+    std::fs::write(&real, b"[world]\n").unwrap();
+    std::env::set_var("ECOSIM_PARAMS", &real);
+    assert_eq!(sim::params_file(), Some(real));
+    std::env::remove_var("ECOSIM_PARAMS");
+}
+
+/// Spawns this test binary as a stand-in for the simulator, and attaches a job to it.
+///
+/// `ecosim` is not built in the `ecoview-native` CI job -- the gate compiles this crate alone, with
+/// `--no-default-features` -- so the lifecycle is exercised against a process that exists wherever
+/// the test does. Everything after the spawn is the code a real round trip runs.
+fn job_on(dir: &std::path::Path, args: &[&str], ticks: u32) -> SimJob {
+    std::fs::create_dir_all(dir).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let log = dir.join("ecosim.log");
+    let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let child = sim::spawn(&exe, &owned, dir, &log).unwrap();
+    SimJob::attach(child, dir.join("world"), dir.join("run"), log, ticks)
+}
+
+fn wait_for(job: &mut SimJob) -> SimState {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let s = job.poll();
+        if s != SimState::Running || std::time::Instant::now() > deadline {
+            return s;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_run_is_polled_until_it_stops_and_then_reports_what_it_did() {
+    let dir = tmp("v5-job-ok");
+    let mut job = job_on(&dir, &["--list"], 2000);
+    assert_eq!(job.state(), SimState::Running);
+    assert_eq!(job.every, 200, "ten snapshots over the run");
+
+    // Half a run of snapshots on disk, as the simulator would leave them.
+    std::fs::create_dir_all(job.out.join("snap_001000")).unwrap();
+    std::fs::create_dir_all(job.out.join("snap_000200")).unwrap();
+    let (tick, fraction) = job.progress();
+    assert_eq!(tick, 1000);
+    assert!((fraction - 0.5).abs() < 1e-6, "{fraction}");
+
+    assert_eq!(wait_for(&mut job), SimState::Done);
+    assert_eq!(job.poll(), SimState::Done, "a stopped job is not re-asked");
+    assert!(job.elapsed() > std::time::Duration::ZERO);
+    // A file, not a pipe: the viewer never reads the output, and an unread pipe fills and stops
+    // the writer halfway through a long run with no error anywhere.
+    assert!(!std::fs::read_to_string(&job.log).unwrap().is_empty());
+}
+
+#[test]
+fn a_run_that_fails_says_so_in_the_words_the_process_used() {
+    let dir = tmp("v5-job-bad");
+    let mut job = job_on(&dir, &["--no-such-flag"], 100);
+    match wait_for(&mut job) {
+        SimState::Failed(msg) => {
+            assert!(msg.contains("exited"), "{msg}");
+            // The last line of the log, not "it failed": a viewer that keeps the reason in a file
+            // nobody opens is a viewer that wastes an afternoon.
+            let last = sim::last_line(&job.log);
+            assert!(!last.is_empty());
+            assert!(msg.contains(&last), "{msg} does not carry {last:?}");
+        }
+        other => panic!("a bad command line should fail, not {other:?}"),
+    }
+    // Nothing was written where a run would go, and the viewer keeps the run it already had.
+    assert!(!job.out.join("meta.json").exists());
+}
+
+#[test]
+fn a_cancelled_run_stops_being_a_run() {
+    let dir = tmp("v5-job-cancel");
+    let mut job = job_on(&dir, &["--list"], 2000);
+    job.cancel();
+    assert_eq!(job.state(), SimState::Failed("cancelled".into()));
+    assert_eq!(job.poll(), job.state(), "polling does not revive it");
+    assert!(job.elapsed() > std::time::Duration::ZERO);
+}
+
+#[test]
+fn the_crosshair_points_at_the_column_under_it() {
+    let b = flat(32, 0.5, 4.0); // a 16 m site, flat at 4 m
+    let mut w = VoxelWorld::from_bundle(&b);
+    // Straight down from above: the cell the ray is over, in ground cells, not metres.
+    assert_eq!(
+        w.pick_cell([5.25, 20.0, 7.25], [0.0, -1.0, 0.0], 120.0),
+        Some((10, 14))
+    );
+    // Up is nothing. So is a direction that is not one.
+    assert_eq!(
+        w.pick_cell([5.25, 20.0, 7.25], [0.0, 1.0, 0.0], 120.0),
+        None
+    );
+    assert_eq!(
+        w.pick_cell([5.25, 20.0, 7.25], [0.0, 0.0, 0.0], 120.0),
+        None
+    );
+    // Off the side of the site: the ray passes nothing solid and says so.
+    assert_eq!(
+        w.pick_cell([-5.0, 20.0, 7.25], [0.0, -1.0, 0.0], 120.0),
+        None
+    );
+    // Out of range is out of range: 20 m up, looking down, with 5 m of reach.
+    assert_eq!(w.pick_cell([5.25, 20.0, 7.25], [0.0, -1.0, 0.0], 5.0), None);
+
+    // A wall a metre and a half up. A level ray at 5 m passes over the lawn and stops at the first
+    // column of building -- the crosshair edits what it can see, which includes what is built.
+    for y in 0..32 {
+        for x in 20..24 {
+            w.apply(x, y, EditAction::RaiseBuilding);
+            w.apply(x, y, EditAction::RaiseBuilding);
+            w.apply(x, y, EditAction::RaiseBuilding);
+        }
+    }
+    assert_eq!(w.column(20, 14).unwrap().2, 1.5);
+    assert_eq!(
+        w.pick_cell([0.1, 5.0, 7.25], [1.0, 0.0, 0.0], 120.0),
+        Some((20, 14)),
+        "the near face of the wall, not the far side of the site"
+    );
+}
+
+#[test]
+fn undo_puts_back_what_the_edit_took_rather_than_acting_again() {
+    let mut w = VoxelWorld::from_bundle(&flat(32, 0.5, 4.0));
+    assert_eq!(w.column(5, 5), Some((4.0, 1, 0.0)));
+    assert_eq!(w.column(32, 0), None, "outside the site is not a column");
+    assert!(w.restore_column(32, 0, (0.0, 0, 0.0)).is_empty());
+
+    // Surface: the action throws the old code away, so only a record of it can put it back.
+    let was = w.column(5, 5).unwrap();
+    let stale = w.apply(5, 5, EditAction::SetSurface(6));
+    assert!(!stale.is_empty(), "the edit leaves its own chunk stale");
+    assert_eq!(w.column(5, 5).unwrap().1, 6);
+    assert!(!w.restore_column(5, 5, was).is_empty());
+    assert_eq!(w.column(5, 5), Some(was));
+
+    // Ground: `LowerGround` clamps at zero, so the opposite action is not an inverse. Eight drops
+    // take this column to the floor; the ninth does nothing, and a raise afterwards would leave it
+    // half a metre above where it started. The recorded column does not.
+    for _ in 0..8 {
+        w.apply(0, 0, EditAction::LowerGround);
+    }
+    let floor = w.column(0, 0).unwrap();
+    assert_eq!(floor.0, 0.0);
+    w.apply(0, 0, EditAction::LowerGround);
+    assert_eq!(w.column(0, 0).unwrap().0, 0.0, "it cannot go below zero");
+    w.apply(0, 0, EditAction::RaiseGround);
+    assert_eq!(w.column(0, 0).unwrap().0, 0.5, "the opposite over-corrects");
+    w.restore_column(0, 0, floor);
+    assert_eq!(w.column(0, 0), Some(floor));
 }

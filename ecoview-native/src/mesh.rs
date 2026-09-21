@@ -3,7 +3,7 @@
 //! This module never mentions Bevy. It is the only thing CI gates (V0-spike.md, CI item 7a): a fixed
 //! chunk in, a hashed vertex and index buffer out, on a runner with no GPU.
 
-use crate::voxel::{ChunkPos, VoxelWorld, CS, CS_P3, ID_COUNT};
+use crate::voxel::{ChunkPos, VoxelWorld, CS, CS_P3};
 use binary_greedy_meshing::{Face, Mesher, Quad};
 
 /// A chunk's mesh in the viewer's own frame: X east, Y up, Z north, metres from the world origin.
@@ -79,11 +79,13 @@ impl Scratch {
     }
 }
 
-/// Fills and meshes one chunk. `palette` gives a colour per voxel id.
+/// Fills and meshes one chunk. `palette` gives a colour per voxel id; an id past its end is drawn as
+/// its last entry rather than panicking, which is what the surface-only palette does with an overlay
+/// band it was not built for.
 pub fn mesh_chunk(
     world: &VoxelWorld,
     c: ChunkPos,
-    palette: &[[f32; 4]; ID_COUNT],
+    palette: &[[f32; 4]],
     s: &mut Scratch,
 ) -> ChunkMesh {
     world.fill_chunk(c, &mut s.voxels);
@@ -117,7 +119,7 @@ pub fn mesh_chunk(
         let normal = [n[0] as f32, n[1] as f32, n[2] as f32];
         let quads: Vec<Quad> = mesher.quads[face as usize].clone();
         for quad in quads {
-            let color = palette[(quad.voxel_id() as usize).min(ID_COUNT - 1)];
+            let color = palette[(quad.voxel_id() as usize).min(palette.len() - 1)];
             let base = m.positions.len() as u32;
             for v in f.vertices_packed(quad) {
                 let p = v.xyz();

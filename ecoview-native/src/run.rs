@@ -50,6 +50,56 @@ pub struct RunMeta {
     pub snapshot_every: u64,
     pub snapshots: Vec<u64>,
     pub world: Option<RunWorld>,
+    /// The species table. The simulator owns the species colours (CLAUDE.md) and this is where it
+    /// says so; `palette` reads the tree's trunk and canopy colours out of it.
+    #[serde(default)]
+    pub species: Vec<Species>,
+    /// The subset of `params` an overlay scale is built from. Everything else in the object is
+    /// ignored, and every field here is optional: a run written before a parameter existed still
+    /// loads, and the viewer says on screen that the number is its own fallback rather than the
+    /// simulator's (`Scale::source`).
+    #[serde(default)]
+    pub params: Params,
+}
+
+/// One row of `meta.json`'s `species`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Species {
+    pub id: u32,
+    pub name: String,
+    pub kind: String,
+    pub color: String,
+    #[serde(default)]
+    pub canopy_color: Option<String>,
+}
+
+/// A species' temperature tolerance curve: the four breakpoints in °C.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Curves {
+    pub temp: Option<Vec<f32>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DiseaseParams {
+    pub grazer_threshold: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FireParams {
+    pub duration: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Params {
+    pub grass: Curves,
+    pub shrub: Curves,
+    pub tree: Curves,
+    pub disease: DiseaseParams,
+    pub fire: FireParams,
 }
 
 /// The three tree stages `ecosim` writes, and the shape each one draws as.
@@ -90,11 +140,17 @@ impl Stage {
     }
 }
 
+/// One row of `entities.json`.
+///
+/// `x` and `y` are read as floats because the simulator writes animals at continuous positions --
+/// `"x":82.0` -- and trees at whole columns. V1 read both as `i32`, which parsed every Capitol
+/// snapshot (that run has animals off) and failed on the first run with a grazer in it, taking the
+/// whole snapshot with it. One field of one kind must not decide whether the trees draw.
 #[derive(Debug, Deserialize)]
 struct EntityJson {
     kind: String,
-    x: i32,
-    y: i32,
+    x: f32,
+    y: f32,
     #[serde(default)]
     stage: String,
 }
@@ -115,6 +171,12 @@ pub struct SnapshotTrees {
 pub struct Run {
     pub dir: PathBuf,
     pub meta: RunMeta,
+    /// Every `burnout` row of `events.csv`, as `(tick, patch_x, patch_y)`. The fire overlay draws a
+    /// patch burnt when one of these falls between the previous snapshot and this one, which is what
+    /// `ecoview` does (`loader.ts`, `burntPatches`). Kept in full because there are few of them --
+    /// 600 in the 1.6 MB `events.csv` of the 20,000-tick Capitol run -- and filtering once at load
+    /// is cheaper than re-reading the file at every scrub.
+    pub burnouts: Vec<(u64, u32, u32)>,
 }
 
 fn bad(msg: String) -> io::Error {
@@ -138,9 +200,11 @@ impl Run {
         if meta.snapshots.is_empty() {
             return Err(bad(format!("{}: the run has no snapshots", dir.display())));
         }
+        let burnouts = crate::overlay::read_burnouts(&dir.join("events.csv"));
         Ok(Run {
             dir: dir.to_path_buf(),
             meta,
+            burnouts,
         })
     }
 
@@ -243,8 +307,8 @@ impl Run {
             };
             let (height, crown_base, crown_radius) = stage.shape();
             out.trees.push(Tree {
-                x: e.x as f32 + 0.5,
-                y: e.y as f32 + 0.5,
+                x: e.x.floor() + 0.5,
+                y: e.y.floor() + 0.5,
                 height,
                 crown_radius,
                 crown_base,

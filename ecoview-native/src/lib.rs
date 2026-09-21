@@ -11,14 +11,22 @@
 pub mod brp;
 pub mod bundle;
 pub mod mesh;
+pub mod overlay;
 pub mod palette;
 pub mod run;
 pub mod voxel;
 
 pub use bundle::Bundle;
 pub use mesh::{mesh_chunk, ChunkMesh, Scratch};
+pub use overlay::{Fields, Scale};
+pub use palette::Overlay;
 pub use run::Run;
 pub use voxel::{ChunkPos, EditAction, VoxelWorld};
+
+/// One ecology column is one metre across, whatever the bundle's ground cell is (CLAUDE.md: "the
+/// ecology grid stays at 1 m columns, the ground grid is finer"). The overlays need this to put a
+/// column's colour on the ground cells it covers.
+pub const ECO_CELL_M: f32 = 1.0;
 
 /// The committed reference bundle, relative to the repo root.
 pub const CAPITOL: &str = "../ecosim/worlds/capitol";

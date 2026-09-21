@@ -6,6 +6,8 @@
 //! read it are re-filled and re-meshed.
 
 use crate::bundle::{Bundle, Shrub, Tree};
+use crate::palette::BAND_BASE;
+use crate::ECO_CELL_M;
 
 /// The mesher's chunk size. 62 voxels padded to 64 is the layout `binary-greedy-meshing` requires.
 pub const CS: usize = 62;
@@ -72,8 +74,23 @@ pub struct VoxelWorld {
     pub building_h: Vec<f32>,
     /// Plant voxels, bucketed by chunk so a fill never scans every tree: `(local x, level, local y, id)`.
     plants: Vec<Vec<(u8, u8, u8, u16)>>,
+    /// The overlay band of each **ground cell**, or `None` for the surface-type palette.
+    ///
+    /// An overlay is a set of voxel ids rather than a colour per column, because the mesher merges
+    /// faces that share an id: a per-column colour would leave greedy meshing nothing to merge
+    /// (palette.rs, `BANDS`). The bands are resampled from the run's 1 m ecology columns onto the
+    /// bundle's finer ground grid once, when the overlay or the snapshot changes.
+    bands: Option<Vec<u8>>,
     pub chunks: ChunkPos,
     pub levels: usize,
+}
+
+/// One overlay band per ecology column, as [`crate::overlay::Fields::bands`] produces them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnBands {
+    pub x: usize,
+    pub y: usize,
+    pub bands: Vec<u8>,
 }
 
 impl VoxelWorld {
@@ -106,6 +123,7 @@ impl VoxelWorld {
             medium: b.medium.clone(),
             building_h: b.building_h.clone(),
             plants: vec![Vec::new(); chunks.x * chunks.y * chunks.z],
+            bands: None,
             chunks,
             levels,
         };
@@ -301,9 +319,93 @@ impl VoxelWorld {
         // Only the top voxel carries the surface medium; everything under it is soil, so digging
         // exposes soil instead of painting the cut face with lawn (ecoview/DECISIONS.md, E3).
         if z == g {
-            return self.medium[i] as u16 + 1;
+            // Under a field overlay the top voxel of every ground column is the band instead, which
+            // is what makes the site read as a map. A column under a building is covered anyway, and
+            // the soil below is untouched, so switching the overlay off gets the site back exactly.
+            return match &self.bands {
+                Some(b) => BAND_BASE + b[i] as u16,
+                None => self.medium[i] as u16 + 1,
+            };
         }
         SOIL
+    }
+
+    /// Puts one overlay's bands on the world, or takes the overlay off with `None`, and returns the
+    /// chunks whose mesh is now stale.
+    ///
+    /// The bands arrive per ecology column -- 1 m, the grid the simulator computes on -- and are
+    /// resampled at each ground cell's centre, so a 0.5 m bundle draws each column as 2x2 cells and
+    /// the overlay never claims a resolution the simulator does not have.
+    pub fn set_overlay(&mut self, field: Option<&ColumnBands>) -> Vec<ChunkPos> {
+        let next: Option<Vec<u8>> = field.map(|f| {
+            let mut v = vec![0u8; self.width * self.depth];
+            let to_col = |g: usize, n: usize| {
+                ((((g as f32 + 0.5) * self.cell_m) / ECO_CELL_M) as usize).min(n.saturating_sub(1))
+            };
+            for gy in 0..self.depth {
+                let ey = to_col(gy, f.y);
+                for gx in 0..self.width {
+                    let ex = to_col(gx, f.x);
+                    v[gx + self.width * gy] = f.bands.get(ex + f.x * ey).copied().unwrap_or(0);
+                }
+            }
+            v
+        });
+        if next == self.bands {
+            return Vec::new();
+        }
+        let changed: Vec<usize> = (0..self.width * self.depth)
+            .filter(|&i| self.bands.as_ref().map(|b| b[i]) != next.as_ref().map(|b| b[i]))
+            .collect();
+        self.bands = next;
+        let mut stale = vec![false; self.chunk_count()];
+        for i in changed {
+            let (x, y) = (i % self.width, i / self.width);
+            let g = self.ground_level(x as i32, y as i32);
+            if g < 0 || g as usize >= self.levels {
+                continue;
+            }
+            let z = g as usize;
+            // A voxel reaches into a neighbouring chunk's one-voxel pad only when it sits on its own
+            // chunk's boundary layer, so the 26-neighbour sweep is only needed there.
+            let span = |v: usize, n: usize| -> (usize, usize) {
+                let c = v / CS;
+                let lo = if v.is_multiple_of(CS) {
+                    c.saturating_sub(1)
+                } else {
+                    c
+                };
+                let hi = if v % CS == CS - 1 {
+                    (c + 1).min(n - 1)
+                } else {
+                    c
+                };
+                (lo, hi)
+            };
+            let (x0, x1) = span(x, self.chunks.x);
+            let (y0, y1) = span(y, self.chunks.y);
+            let (z0, z1) = span(z, self.chunks.z);
+            for cz in z0..=z1 {
+                for cy in y0..=y1 {
+                    for cx in x0..=x1 {
+                        stale[self.chunk_index(ChunkPos {
+                            x: cx,
+                            y: cy,
+                            z: cz,
+                        })] = true;
+                    }
+                }
+            }
+        }
+        (0..self.chunk_count())
+            .filter(|&i| stale[i])
+            .map(|i| self.chunk_pos(i))
+            .collect()
+    }
+
+    /// Is a field overlay on?
+    pub fn has_overlay(&self) -> bool {
+        self.bands.is_some()
     }
 
     /// Fills the mesher's padded 64^3 buffer for one chunk. The buffer's axes are the mesher's own:

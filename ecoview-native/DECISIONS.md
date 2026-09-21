@@ -175,3 +175,101 @@ generated the stress world every measurement in `MEASUREMENTS.md` was taken on, 
 `TAU` changes the terrain, the mesh, the triangle counts and the bytes of the lavapipe screenshots. A
 shot that was asked for a timeline does not get to move the baseline everything else is compared
 against. V1 verified it changed neither line.
+
+# Shot V2: the ecological overlays
+
+## V2 an overlay is a set of voxel ids, not a colour per column
+
+The mesher merges neighbouring faces that share a voxel id. A per-column colour would give it nothing
+to merge and turn a 79,504-quad site into one quad per ground cell — 262,144 on the Capitol at 0.5 m.
+So each overlay is quantised into **32 bands**, the bands get their own ids above the scene contract's
+media (`BAND_BASE = ID_COUNT`), and the palette grows from 13 entries to 45. Merging survives inside a
+band, and the cost is one band boundary's worth of extra quads: the worst overlay on the Capitol is
+moisture at 97,046 quads against surface's 79,504, and three of the six are *cheaper* than the surface
+map (MEASUREMENTS.md). 32 bands over a 0–255 field is 8 index units a band, below what the eye
+separates on a lit surface.
+
+Only the top voxel of a ground column carries the band. Everything under it stays soil, so taking the
+overlay off restores the surface mesh exactly — asserted by hash in
+`set_overlay_reports_exactly_the_chunks_whose_mesh_changed`.
+
+## V2 what `meta.json` owns, and the one thing it does not
+
+The row asks for overlays "coloured from `meta.json` so the simulator still owns the palette". The run
+directory format has no overlay palette in it, and adding one is an `ecosim` change an
+`ecoview-native` shot may not make (MASTER.md, component isolation). So ownership is split, and the
+split is stated rather than blurred:
+
+- **Every number comes from the run.** Temperature's ends are the union of `params.{grass,shrub,tree}
+  .temp`, the species tolerance curves — outside them every curve is zero, so that is exactly the
+  interval where a colour means anything. Crowding's top is `2 × params.disease.grazer_threshold`.
+  Fire's is `params.fire.duration`. Light, moisture and fertility come from the file format itself
+  (`ecosim/UNITS.md`): 255 × the fraction of full sun, 255 × soil water / AWC, and the 0–255 index
+  UNITS.md still marks deferred.
+- **The two species colours come from the run.** `palette()` takes the trunk from the tree species'
+  `color` and the canopy from its `canopy_color`. V0 hard-coded both, and got one wrong: the constant
+  said `#3f7a2e` and `meta.json` says `#2e8b3d`. With a run loaded the file wins, and
+  `the_scale_and_the_species_colours_come_from_meta_json` fails if that ever regresses.
+- **The two ramp hues are the viewer's**, copied from `ecoview/src/world.ts` so the two viewers ramp
+  the same way — copied, not shared, because the components share no code. This is the piece
+  `meta.json` cannot yet supply, and a worker note in `overnight/BACKLOG.md` says so, because
+  publishing an overlay palette is an `ecosim` row.
+
+A run whose `meta.json` carries no `params` still draws. It falls back to `ecoview`'s constants and
+**says so on screen** — `Scale::source` reads "this viewer's fallback: meta.json has no …" and the HUD
+marks the line `(!)`. A silent constant is the failure this is built to avoid.
+
+## V2 the scale is the simulator's range, never the data's
+
+The ramp is not stretched to the values present at the tick being viewed. If it were, the same colour
+would mean different things at different snapshots and the timeline would be unreadable. The cost is
+that a field occupying a small part of its range looks flat: temperature on `runs/capitol-s42` spans
+10.31–12.00 °C inside a −5…35 °C scale, and the picture is one shade of magenta. So the HUD and the
+headless stdout line always print the field's **actual** min, max and mean beside the scale. A flat
+picture and a narrow range are the same fact, and only one of them is visible.
+
+## V2 fire is three things, not one ramp
+
+Fire's band 0 is quiet ground and band 1 is ground that **burnt out since the previous snapshot**,
+both off the ramp; the orange ramp covers the burning bands only, so a patch with one tick left is
+already dull orange rather than a third of the way up a ramp whose bottom means "not on fire". The
+burn scars are read once at load from `events.csv`'s `burnout` rows — 600 of them in the 1.6 MB file
+of the 20,000-tick Capitol run, so filtering once beats re-reading at every scrub. A missing
+`events.csv` is not fatal: the overlay then shows what is alight and nothing that has already burnt,
+which is a smaller picture and not a wrong one.
+
+This is also why the headless line carries the fire counts. At tick 10000 the field is `0.00..0.00` —
+nothing is alight — while 155 patches are drawn burnt. The stats alone would have reported an empty
+overlay over a picture full of scars.
+
+## V2 light is sampled one voxel above the surface
+
+`light.bin` is a voxel field, and the surface voxel is ground: it is dark everywhere. The sample is
+`height[c] + 1`, the voxel a seedling would sit in, which is what `ecoview` does in `world.ts`. The
+test writes 99 into every surface voxel and asserts it appears nowhere in the sampled field.
+
+## V2 animals are written at continuous positions
+
+Found while measuring, not while coding. V1's `entities.json` reader took `x` and `y` as `i32`; the
+simulator writes animals at continuous positions (`"x":82.0`, and fractions between columns). Every
+Capitol run has `animals.enabled=false`, so this parsed for two shots and then failed on the first run
+with a grazer in it — and because serde fails the whole array, it took the trees with it. Both readers
+now take floats and floor them to a column. The V2 test fixture writes its grazers at `1.75`, `0.5`
+and `2.5` for that reason, and asserts the trees in the same file still load.
+
+## V2 switching an overlay on remeshes the site; scrubbing under one does not
+
+Turning an overlay on changes the top voxel of every ground column, so every chunk really is stale and
+`main.rs` rebuilds all of them — 28–38 ms for the Capitol's 324 chunks. Changing snapshot under an
+overlay is the common case and touches only what the field changed: 162 chunks in 2–3 ms. `set_overlay`
+compares the resampled band map against the previous one and dilates only the cells that sit on a
+chunk's boundary layer, and the test hashes every chunk before and after to prove the reported set
+covers every mesh that moved.
+
+## V2 the new tests live in `mesh_golden.rs` too
+
+Nine more, for V1's reason: the CI gate runs exactly one target, and a second file means editing
+`.github/workflows/ci.yml`, which belongs to a `ci` row. The file is still engine-free — all twenty
+tests compile with `--no-default-features`. `golden_banded` is a fourth golden hash, taken on a chunk
+meshed under an overlay, so a change in the band ids, the resampling or the ramp fails a test rather
+than quietly changing a screenshot.

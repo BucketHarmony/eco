@@ -1,15 +1,16 @@
-//! The viewer: a world bundle as voxels, a run directory over the top of it, a fly camera, one
-//! overlay, one edit action set, and a remote-control surface an agent can drive.
+//! The viewer: a world bundle as voxels, a run directory over the top of it, a fly camera, seven
+//! overlays, one edit action set, and a remote-control surface an agent can drive.
 //!
 //! Usage:
 //! ```text
-//! ecoview-native [--world DIR | --stress] [--run DIR] [--tick N] [--headless] [--frames N]
-//!                [--screenshot PATH] [--bench SECS] [--port N]
+//! ecoview-native [--world DIR | --stress] [--run DIR] [--tick N] [--overlay NAME] [--headless]
+//!                [--frames N] [--screenshot PATH] [--bench SECS] [--port N]
 //! ```
 //!
 //! Keys: WASD, Space and Shift to fly; right mouse to look; wheel for speed; **R** to reset the view;
 //! **P** to play or pause; **,** and **.** to step a snapshot; **Home** and **End** for the ends of
-//! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub.
+//! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**7** for
+//! the overlay.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -30,9 +31,10 @@ use bevy_brp_extras::BrpExtrasPlugin;
 use serde_json::{json, Value};
 
 use ecoview_native::mesh::{mesh_chunk, ChunkMesh, Scratch};
-use ecoview_native::palette::surface_palette;
+use ecoview_native::overlay::{FieldStats, Scale};
+use ecoview_native::palette::{palette, Overlay, BANDS};
 use ecoview_native::run::Run;
-use ecoview_native::voxel::{ChunkPos, EditAction, VoxelWorld};
+use ecoview_native::voxel::{ChunkPos, ColumnBands, EditAction, VoxelWorld};
 use ecoview_native::{brp, stress_world, Bundle, CAPITOL};
 
 /// Fly speed and its wheel step, copied from `ecoview`'s `edit.ts` so the two viewers feel the same.
@@ -55,6 +57,12 @@ const BAR_BOTTOM: f32 = 24.0;
 const BAR_HEIGHT: f32 = 16.0;
 const HUD_FONT: f32 = 15.0;
 
+/// The overlay legend: a strip of one swatch per band, sitting just above the timeline bar, with the
+/// scale's two ends written beside it. A ramp with no numbers on it is decoration.
+const LEGEND_BOTTOM: f32 = BAR_BOTTOM + BAR_HEIGHT + 14.0;
+const LEGEND_HEIGHT: f32 = 12.0;
+const LEGEND_WIDTH: f32 = 320.0;
+
 #[derive(Resource, Clone)]
 struct Args {
     world: String,
@@ -66,6 +74,7 @@ struct Args {
     screenshot: Option<String>,
     bench: f32,
     port: u16,
+    overlay: Overlay,
 }
 
 fn args() -> Args {
@@ -79,6 +88,7 @@ fn args() -> Args {
         screenshot: None,
         bench: 0.0,
         port: brp::PORT,
+        overlay: Overlay::Surface,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -115,6 +125,18 @@ fn args() -> Args {
                 a.port = next().parse().unwrap_or(brp::PORT);
                 i += 1;
             }
+            // A mistyped overlay is fatal rather than ignored: the screenshot scripts pass this, and
+            // a silent fall back to the surface map would file the wrong picture under the right name.
+            "--overlay" => {
+                let n = next();
+                a.overlay = Overlay::parse(&n).unwrap_or_else(|| {
+                    panic!(
+                        "unknown overlay {n}; expected one of {}",
+                        Overlay::ALL.map(|o| o.name()).join(", ")
+                    )
+                });
+                i += 1;
+            }
             other => eprintln!("ignoring unknown argument {other}"),
         }
         i += 1;
@@ -128,6 +150,9 @@ struct Site {
     world: VoxelWorld,
     entities: Vec<Option<Entity>>,
     material: Handle<StandardMaterial>,
+    /// The colour of every voxel id under the active overlay. Rebuilt when the overlay changes, and
+    /// built from the run's `meta.json` when there is one (palette.rs).
+    palette: Vec<[f32; 4]>,
     /// Milliseconds the last single-edit remesh took, reported over BRP.
     last_remesh_ms: f64,
     edits: u64,
@@ -221,6 +246,84 @@ impl Timeline {
     }
 }
 
+/// Which overlay is on, what its scale is, and what the field it draws actually held.
+///
+/// `applied` is the `(overlay, snapshot)` pair whose bands are in the voxel world. It differs from
+/// the pair the user has asked for for exactly one frame, the same way `Timeline::applied` does.
+#[derive(Resource)]
+struct OverlayState {
+    active: Overlay,
+    applied: Option<(Overlay, usize)>,
+    /// The ramp's two ends and where they came from, from the run's `meta.json`. `None` until a
+    /// field overlay is on with a run behind it.
+    scale: Option<Scale>,
+    stats: Option<FieldStats>,
+    /// Patches alight, and patches burnt out since the previous snapshot.
+    fire: (usize, usize),
+    /// Why the last overlay could not be drawn, if it could not.
+    error: Option<String>,
+}
+
+impl OverlayState {
+    fn new(active: Overlay) -> OverlayState {
+        OverlayState {
+            active,
+            applied: None,
+            scale: None,
+            stats: None,
+            fire: (0, 0),
+            error: None,
+        }
+    }
+}
+
+/// Reads the snapshot's fields, bands them and puts them on the world. Returns the stale chunks.
+///
+/// Everything that can go wrong here -- a missing field file, a short one, a `patches.json` of the
+/// wrong length -- takes the overlay off and puts the reason on the screen. A viewer that draws a
+/// stale map after a failed read is worse than one that admits it is showing the surface.
+fn apply_overlay_bands(
+    world: &mut VoxelWorld,
+    ov: &mut OverlayState,
+    t: &Timeline,
+) -> Vec<ChunkPos> {
+    ov.scale = None;
+    ov.stats = None;
+    ov.fire = (0, 0);
+    ov.error = None;
+    let stale = match (&t.run, ov.active.is_field()) {
+        (Some(run), true) => {
+            let scale = Scale::of(ov.active, &run.meta);
+            let out = match run.fields_at(t.index) {
+                Ok(f) => {
+                    let d = run.meta.dims;
+                    let (bands, stats) = f.bands(ov.active, &d, &scale);
+                    ov.stats = Some(stats);
+                    ov.fire = f.fire_counts();
+                    world.set_overlay(Some(&ColumnBands {
+                        x: d.x,
+                        y: d.y,
+                        bands,
+                    }))
+                }
+                Err(e) => {
+                    ov.error = Some(e.to_string());
+                    world.set_overlay(None)
+                }
+            };
+            ov.scale = Some(scale);
+            out
+        }
+        (None, true) => {
+            ov.error = Some("no run loaded -- pass --run DIR for the ecological overlays".into());
+            world.set_overlay(None)
+        }
+        _ => world.set_overlay(None),
+    };
+    ov.applied = Some((ov.active, t.index));
+    stale
+}
+
 fn main() {
     let a = args();
     let load = Instant::now();
@@ -285,18 +388,21 @@ fn main() {
             .with_method_main("ecoview.edit", edit_method)
             .with_method_main("ecoview.camera", camera_method)
             .with_method_main("ecoview.stats", stats_method)
-            .with_method_main("ecoview.timeline", timeline_method),
+            .with_method_main("ecoview.timeline", timeline_method)
+            .with_method_main("ecoview.overlay", overlay_method),
     )
     .add_plugins(BrpExtrasPlugin::with_port(a.port))
     .insert_resource(Site {
         world,
         entities: Vec::new(),
         material: Handle::default(),
+        palette: palette(Overlay::Surface, None),
         last_remesh_ms: 0.0,
         edits: 0,
     })
     .init_resource::<EditQueue>()
     .init_resource::<CameraQueue>()
+    .insert_resource(OverlayState::new(a.overlay))
     .insert_resource(timeline)
     .insert_resource(Bench {
         until: a.bench,
@@ -310,7 +416,8 @@ fn main() {
             timeline_keys,
             timeline_scrub,
             timeline_play,
-            apply_snapshot,
+            overlay_keys,
+            apply_world_state,
             apply_edits,
             move_camera,
             fly_camera,
@@ -397,6 +504,7 @@ fn load_snapshot(world: &mut VoxelWorld, t: &mut Timeline) -> Vec<ChunkPos> {
 }
 
 /// Builds every chunk mesh on the compute task pool, then spawns one entity per non-empty chunk.
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     mut site: ResMut<Site>,
@@ -404,15 +512,45 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut timeline: ResMut<Timeline>,
+    mut overlays: ResMut<OverlayState>,
     args: Res<Args>,
 ) {
-    // The run's trees go in before the first mesh, so the site is never drawn with the bundle's
-    // vegetation and then corrected a frame later.
+    // The run's trees and the overlay both go in before the first mesh, so the site is never drawn
+    // with the bundle's vegetation under the wrong palette and then corrected a frame later.
     load_snapshot(&mut site.world, &mut timeline);
-    let palette = surface_palette();
+    apply_overlay_bands(&mut site.world, &mut overlays, &timeline);
+    site.palette = palette(overlays.active, timeline.run.as_ref().map(|r| &r.meta));
+    // One line on stdout for a headless or scripted run, so a screenshot is never the only record of
+    // what the picture means.
+    // Fire's field is the ticks left on a patch that is alight, and most snapshots have none; the
+    // patches drawn burnt are a different count and go on the line too, or a run with 155 burn scars
+    // in the picture would report "0.00..0.00" and nothing else.
+    let fire = if overlays.active == Overlay::Fire {
+        format!(
+            "; {} patches alight, {} burnt since the previous snapshot",
+            overlays.fire.0, overlays.fire.1
+        )
+    } else {
+        String::new()
+    };
+    match (&overlays.scale, overlays.stats, &overlays.error) {
+        (Some(sc), Some(st), _) => println!(
+            "overlay {}: {:.2}..{:.2} {} from {}; field {:.2}..{:.2} mean {:.2}{fire}",
+            overlays.active.name(),
+            sc.lo,
+            sc.hi,
+            sc.unit,
+            sc.source,
+            st.min,
+            st.max,
+            st.mean
+        ),
+        (_, _, Some(e)) => println!("overlay {}: off -- {e}", overlays.active.name()),
+        _ => println!("overlay {}", overlays.active.name()),
+    }
     let chunks = site.world.all_chunks();
     let t = Instant::now();
-    let built = mesh_all(&site.world, &chunks, &palette);
+    let built = mesh_all(&site.world, &chunks, &site.palette);
     let mesh_ms = t.elapsed().as_secs_f64() * 1000.0;
     let quads: usize = built.iter().map(|m| m.indices.len() / 6).sum();
     let material = materials.add(StandardMaterial {
@@ -516,6 +654,14 @@ struct HudText;
 #[derive(Component)]
 struct TimelineFill;
 
+/// The legend strip and its two parts: one swatch per band, and the range written beside them.
+#[derive(Component)]
+struct LegendRoot;
+#[derive(Component)]
+struct LegendBand(usize);
+#[derive(Component)]
+struct LegendLabel;
+
 /// One text block top-left and one bar along the bottom. Both exist whether or not a run is loaded:
 /// the text still has the fly speed in it, which is one of the three things V1 was asked to make
 /// visible, and an empty bar says plainly that there is no run rather than leaving the screen silent.
@@ -536,6 +682,52 @@ fn spawn_hud(commands: &mut Commands, has_run: bool) {
             ..default()
         },
         HudText,
+    ));
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(BAR_MARGIN),
+                bottom: Val::Px(LEGEND_BOTTOM),
+                width: Val::Px(LEGEND_WIDTH),
+                height: Val::Px(LEGEND_HEIGHT),
+                display: Display::None,
+                ..default()
+            },
+            LegendRoot,
+        ))
+        .with_children(|strip| {
+            for b in 0..BANDS {
+                strip.spawn((
+                    Node {
+                        width: Val::Percent(100.0 / BANDS as f32),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::BLACK),
+                    LegendBand(b),
+                ));
+            }
+        });
+    commands.spawn((
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(HUD_FONT),
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        TextShadow::default(),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(BAR_MARGIN + LEGEND_WIDTH + 12.0),
+            bottom: Val::Px(LEGEND_BOTTOM - 4.0),
+            padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+            ..default()
+        },
+        // The label sits over the site rather than over the sky, and under the light overlay the
+        // site is white: white text with a shadow on it was unreadable in `shots/v2-light.png`.
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+        LegendLabel,
     ));
     // No run, no bar. An empty track along the bottom of the screen offers a scrub that would do
     // nothing; the HUD says so in words instead.
@@ -568,11 +760,7 @@ fn spawn_hud(commands: &mut Commands, has_run: bool) {
 }
 
 /// Meshes a list of chunks in parallel on Bevy's compute pool, one scratch buffer per task.
-fn mesh_all(
-    world: &VoxelWorld,
-    chunks: &[ChunkPos],
-    palette: &[[f32; 4]; ecoview_native::voxel::ID_COUNT],
-) -> Vec<ChunkMesh> {
+fn mesh_all(world: &VoxelWorld, chunks: &[ChunkPos], palette: &[[f32; 4]]) -> Vec<ChunkMesh> {
     ComputeTaskPool::get().scope(|s| {
         for &c in chunks {
             s.spawn(async move {
@@ -604,7 +792,7 @@ fn apply_edits(
     if queue.0.is_empty() {
         return;
     }
-    let palette = surface_palette();
+    let palette = site.palette.clone();
     let mut scratch = Scratch::new();
     for (x, y, action) in std::mem::take(&mut queue.0) {
         let t = Instant::now();
@@ -713,29 +901,72 @@ fn timeline_play(time: Res<Time>, mut t: ResMut<Timeline>) {
     t.step(1);
 }
 
-/// Loads the snapshot the timeline is pointing at, if it is not the one already drawn, and remeshes
-/// only the chunks whose plant voxels changed.
-fn apply_snapshot(
+/// Brings the drawn world up to the snapshot and the overlay the user has asked for, and remeshes
+/// once for both.
+///
+/// The two were one system rather than two because they overlap: scrubbing under a field overlay
+/// changes the trees *and* the ground's bands, and two systems would remesh the surface chunks twice
+/// in the same frame.
+fn apply_world_state(
     mut commands: Commands,
     mut site: ResMut<Site>,
     mut timeline: ResMut<Timeline>,
+    mut overlays: ResMut<OverlayState>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    if timeline.applied == Some(timeline.index) || timeline.run.is_none() {
+    let snapshot_moved = timeline.run.is_some() && timeline.applied != Some(timeline.index);
+    let overlay_moved = overlays.applied != Some((overlays.active, timeline.index));
+    if !snapshot_moved && !overlay_moved {
         return;
     }
     let start = Instant::now();
-    let stale = load_snapshot(&mut site.world, &mut timeline);
+    let repalette = overlays.applied.map(|(o, _)| o) != Some(overlays.active);
+    let mut stale = if snapshot_moved {
+        load_snapshot(&mut site.world, &mut timeline)
+    } else {
+        Vec::new()
+    };
+    for c in apply_overlay_bands(&mut site.world, &mut overlays, &timeline) {
+        if !stale.contains(&c) {
+            stale.push(c);
+        }
+    }
+    // A new overlay is a new palette, and a band index that happens not to have moved is still a
+    // different colour, so `set_overlay`'s stale set is not enough on its own: everything is remeshed.
+    // It costs about as much as the first frame did and happens on a key press, not on a scrub.
+    if repalette {
+        site.palette = palette(overlays.active, timeline.run.as_ref().map(|r| &r.meta));
+        stale = site.world.all_chunks();
+    }
     if !stale.is_empty() {
-        let palette = surface_palette();
-        let built = mesh_all(&site.world, &stale, &palette);
+        let pal = site.palette.clone();
+        let built = mesh_all(&site.world, &stale, &pal);
         let material = site.material.clone();
         for (c, m) in stale.iter().zip(built) {
             let i = site.world.chunk_index(*c);
             sync_chunk(&mut commands, &mut site, &mut meshes, i, &m, &material);
         }
     }
+    timeline.last_chunks = stale.len();
     timeline.last_ms = start.elapsed().as_secs_f64() * 1000.0;
+}
+
+/// **1**-**7** pick the overlay, in `Overlay::ALL` order.
+fn overlay_keys(keys: Res<ButtonInput<KeyCode>>, mut ov: ResMut<OverlayState>) {
+    const DIGITS: [KeyCode; 7] = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+    ];
+    for (i, k) in DIGITS.iter().enumerate() {
+        if keys.just_pressed(*k) {
+            ov.active = Overlay::ALL[i];
+        }
+    }
 }
 
 /// Puts a freshly built mesh on the entity for chunk `i`, spawning or despawning as the chunk gains
@@ -771,13 +1002,57 @@ fn sync_chunk(
     }
 }
 
-/// The two things on the screen: the text block and the bar's fill.
+/// Everything on the screen: the text block, the bar's fill, and the overlay legend.
+#[allow(clippy::too_many_arguments)]
 fn hud(
     timeline: Res<Timeline>,
+    overlays: Res<OverlayState>,
+    site: Res<Site>,
     fly: Query<&Fly>,
     mut text: Query<&mut Text, With<HudText>>,
-    mut fill: Query<&mut Node, With<TimelineFill>>,
+    mut fill: Query<&mut Node, (With<TimelineFill>, Without<LegendRoot>)>,
+    mut legend: Query<&mut Node, With<LegendRoot>>,
+    mut swatches: Query<(&LegendBand, &mut BackgroundColor)>,
+    mut label: Query<
+        (&mut Text, &mut Node),
+        (
+            With<LegendLabel>,
+            Without<HudText>,
+            Without<LegendRoot>,
+            Without<TimelineFill>,
+        ),
+    >,
 ) {
+    let scale = overlays.scale.as_ref();
+    for mut node in &mut legend {
+        node.display = if scale.is_some() {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    if scale.is_some() {
+        for (band, mut bg) in &mut swatches {
+            let c = site.palette[ecoview_native::voxel::ID_COUNT + band.0];
+            bg.0 = Color::linear_rgb(c[0], c[1], c[2]);
+        }
+    }
+    let legend_text = match scale {
+        Some(s) => format!("{:.2} to {:.2} {}", s.lo, s.hi, s.unit),
+        None => String::new(),
+    };
+    for (mut t, mut node) in &mut label {
+        if t.0 != legend_text {
+            t.0 = legend_text.clone();
+        }
+        // The label's own background is padded, so an empty string is still a visible grey tab in
+        // the corner of a surface screenshot. Hide the node, not just its text.
+        node.display = if scale.is_some() {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
     let speed = fly.iter().next().map_or(FLY_SPEED, |f| f.speed);
     let frac = if timeline.count() > 1 {
         timeline.index as f32 / (timeline.count() - 1) as f32
@@ -788,6 +1063,40 @@ fn hud(
         node.width = Val::Percent(frac * 100.0);
     }
     let mut s = format!("fly {speed:.1} m/s   [wheel] speed  [R] reset view\n");
+    s.push_str(&format!(
+        "overlay {} ({} of {})   [1-7] switch\n",
+        overlays.active.name(),
+        Overlay::ALL
+            .iter()
+            .position(|o| *o == overlays.active)
+            .unwrap_or(0)
+            + 1,
+        Overlay::ALL.len()
+    ));
+    // Where the scale came from, in words, every frame it is on the screen. The simulator owns these
+    // numbers, and the viewer says so rather than asking to be trusted.
+    if let Some(sc) = scale {
+        s.push_str(&format!(
+            "  scale from {}{}\n",
+            sc.source,
+            if sc.from_meta() { "" } else { "  (!)" }
+        ));
+        if let Some(st) = overlays.stats {
+            s.push_str(&format!(
+                "  field {:.2} to {:.2}, mean {:.2} {}\n",
+                st.min, st.max, st.mean, sc.unit
+            ));
+        }
+        if overlays.active == Overlay::Fire {
+            s.push_str(&format!(
+                "  {} patches alight, {} burnt since the last snapshot\n",
+                overlays.fire.0, overlays.fire.1
+            ));
+        }
+    }
+    if let Some(e) = &overlays.error {
+        s.push_str(&format!("  overlay off: {e}\n"));
+    }
     match &timeline.run {
         Some(run) => {
             s.push_str(&format!(
@@ -1033,8 +1342,14 @@ fn camera_method(In(params): In<Option<Value>>, mut queue: ResMut<CameraQueue>) 
     Ok(json!({"pos": [pos.x, pos.y, pos.z], "look_at": [look.x, look.y, look.z]}))
 }
 
-/// `ecoview.stats` -- what the world is, what the last edit cost, and where the timeline is.
-fn stats_method(In(_): In<Option<Value>>, site: Res<Site>, t: Res<Timeline>) -> BrpResult {
+/// `ecoview.stats` -- what the world is, what the last edit cost, where the timeline is, and which
+/// overlay is on with what scale.
+fn stats_method(
+    In(_): In<Option<Value>>,
+    site: Res<Site>,
+    t: Res<Timeline>,
+    ov: Res<OverlayState>,
+) -> BrpResult {
     Ok(json!({
         "cell_m": site.world.cell_m,
         "width": site.world.width,
@@ -1056,6 +1371,44 @@ fn stats_method(In(_): In<Option<Value>>, site: Res<Site>, t: Res<Timeline>) -> 
         "trees": t.trees,
         "snapshot_chunks": t.last_chunks,
         "snapshot_ms": t.last_ms,
+        "overlay": ov.active.name(),
+        "overlay_bands": site.world.has_overlay().then_some(BANDS),
+        "scale": ov.scale.as_ref().map(|s| json!({
+            "lo": s.lo,
+            "hi": s.hi,
+            "unit": s.unit,
+            "source": s.source,
+            "from_meta": s.from_meta(),
+        })),
+        "field": ov.stats.map(|s| json!({"min": s.min, "max": s.max, "mean": s.mean})),
+        "fire": {"alight": ov.fire.0, "burnt_since_last_snapshot": ov.fire.1},
+        "overlay_error": ov.error,
+    }))
+}
+
+/// `ecoview.overlay {"name": "moisture"}`, or no parameters to read the current one.
+///
+/// An explicit method for the same reason the timeline has one: an agent that has to discover a
+/// component schema retries, and one that is handed a named method does not (MEASUREMENTS.md, the
+/// agent loop). The reply carries the scale, so a caller can check what the colours mean without a
+/// second call.
+fn overlay_method(In(params): In<Option<Value>>, mut ov: ResMut<OverlayState>) -> BrpResult {
+    let p = params.unwrap_or(Value::Null);
+    if let Some(name) = p.get("name").and_then(|v| v.as_str()) {
+        let next = Overlay::parse(name).ok_or_else(|| {
+            brp_err(format!(
+                "unknown overlay {name}; expected one of {}",
+                Overlay::ALL.map(|o| o.name()).join(", ")
+            ))
+        })?;
+        ov.active = next;
+    }
+    Ok(json!({
+        "overlay": ov.active.name(),
+        "overlays": Overlay::ALL.map(|o| o.name()),
+        "scale": ov.scale.as_ref().map(|s| json!({
+            "lo": s.lo, "hi": s.hi, "unit": s.unit, "source": s.source, "from_meta": s.from_meta(),
+        })),
     }))
 }
 

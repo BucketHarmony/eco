@@ -321,3 +321,104 @@ Three machines, three times, and rasterisation stretches the CPU's own ratio eve
 at least three tickets, so a per-screenshot time is a reading of the runner unless the CPU is quoted
 beside it.
 
+
+# ecoview-native V2: what six overlays cost, and what they actually show
+
+All of it on this machine (Windows 11, Ryzen 9 5950X, RTX 3080), release build, headless, against the
+committed Capitol bundle (512 × 512 ground cells at 0.5 m) and `ecosim/runs/capitol-s42` at tick
+10000 unless another run is named. Each figure is one `ecoview-native --headless --frames 300` run,
+read off its own stdout.
+
+## Quads, and the greedy-meshing bill for banding the ground
+
+| Overlay | Quads | Full-site mesh | Against surface |
+|---|---|---|---|
+| surface | 79,504 | 23 ms | — |
+| light | 78,044 | 25 ms | 0.98× |
+| moisture | 97,046 | 24 ms | 1.22× |
+| fertility | 96,370 | 23 ms | 1.21× |
+| temperature | 75,921 | 23 ms | 0.95× |
+| crowding | 75,518 | 24 ms | 0.95× |
+| fire | 76,068 | 23 ms | 0.96× |
+
+The quad counts are deterministic; the mesh times are one pass each and drift 23–38 ms run to run on
+an otherwise busy machine, so the ratio column is the quads and not the milliseconds.
+
+The worst overlay costs **22% more quads** than the surface map, and three of the six cost *less*.
+That is the answer to the question the banding was designed around: a field with large smooth
+neighbourhoods (temperature, which is per patch; crowding, which is empty on this run; fire, which is
+two flat colours over most of the site) merges *better* than the scene contract's media, because the
+media map has a path, a kerb and a flowerbed in it. Only moisture and fertility, which vary column to
+column along drainage lines, pay for the resolution they show. A per-column colour instead of 32
+bands would have cost 262,144 quads — 3.3× the surface map — on every overlay.
+
+## Remeshing when the tick moves
+
+Jumping to tick 10000 remeshes **162 of 324 chunks in 2.1–2.9 ms** under every overlay (the HUD line
+in all seven screenshots). Switching the overlay itself is the expensive direction and is not
+incremental: it changes the top voxel of every ground column, so all 324 chunks rebuild, which is the
+whole-site mesh in the table above. Both are far below a frame the user would notice, so neither was
+optimised further.
+
+## What the fields actually held
+
+The point of printing these is that an overlay's picture cannot distinguish "flat field" from "no
+data", and three of the six are flat on the reference run.
+
+| Overlay | Scale, and where it came from | Field at tick 10000 |
+|---|---|---|
+| light | 0–1 of full sun (`light.bin`'s own unit) | 0.00–1.00, mean 0.83 |
+| moisture | 0–1 of AWC (`moisture.bin`'s own unit) | 0.00–1.00, mean 0.22 |
+| fertility | 0–255 index (deferred in UNITS.md) | 0.00–168.00, mean 61.21 |
+| temperature | −5–35 °C, from `params.{grass,shrub,tree}.temp` | 10.31–12.00, mean 11.86 |
+| crowding | 0–32 grazers, from 2 × `params.disease.grazer_threshold` | 0.00–0.00 |
+| fire | 0–3 ticks left, from `params.fire.duration` | 0 alight, **155 patches burnt** since tick 9000 |
+
+Three readings worth keeping:
+
+**Crowding is empty on every Capitol run, and that is the run, not the overlay.** Bundle-world runs
+carry `--set animals.enabled=false` (ecosim DECISIONS, shot G3a), so there are no grazers to count. To
+see the overlay work at all, this shot made a 2,000-tick animals-on Capitol run locally
+(`runs/capitol-s42-animals`, 15.4 s, gitignored): 9,204 grazers, 28 hunters, 24 trees left standing,
+and a field of **0–95 grazers per patch, mean 8.99** against a 0–32 scale, so the busiest patches sit
+clamped at the top of the ramp. `shots/v2-crowding.png` is that run. The clamp is correct — the scale
+is the simulator's disease threshold, not the data's maximum — and the HUD prints 95 beside it.
+
+**Temperature spans 1.7 °C inside a 40 °C scale**, so the site is one shade of magenta. The scale is
+the union of the species' tolerance curves, which is the interval where a colour means anything about
+growth; stretching it to the data would make the same colour mean different things at different
+ticks. The stats line carries the real range.
+
+**Fire's field is zero at a tick with 155 burn scars on screen.** The field is ticks-left-alight and
+the scars are a separate count, which is why the headless line prints both. At tick 1000 the same run
+reads 1 patch alight, 8 burnt.
+
+## The screenshots
+
+Seven, all at 1280 × 800, all on the committed Capitol except crowding. One line each, written after
+looking at them:
+
+| File | Verdict |
+|---|---|
+| `v2-surface.png` | The V0/V1 picture unchanged — lawn, paths, asphalt, 998 trees — with the legend correctly absent. |
+| `v2-light.png` | Reads as a shadow map: the Capitol's own shade is black to the north, each tree drops a grey square, open lawn is white at 1.00. |
+| `v2-moisture.png` | The drainage network is the picture — blue threads along the flow paths, pale everywhere else, mean 0.22 of capacity. |
+| `v2-fertility.png` | Faint brown mottling on a mostly white site: honest for a field whose maximum is 168 of 255, and the flattest of the six. |
+| `v2-temperature.png` | One magenta site, as the 1.7 °C span predicts; useful only because the HUD says what the span is. |
+| `v2-crowding.png` | The animals-on run: the patch grid is plainly visible, hot magenta where grazers pile up, and the site is stripped to 24 trees. |
+| `v2-fire.png` | 155 dark burn scars in patch-sized blocks across the olive quiet ground, clustered in the eastern woodland where the fuel is. |
+
+## The stress smoke check's PNG changed again, on purpose
+
+`shots/stress-headless.png` is **835,546 bytes** on this machine against V1's 827,801. The HUD gained a
+line — `overlay surface (1 of 7)   [1-7] switch` — and that is the entire difference; the world, the
+camera and the 363,806 quads are V0's. Recorded because V1 spent a shot proving that this file's size
+is a reading of the runner's CPU unless the code changed, and this time the code changed.
+
+## What this shot does not tell you
+
+Nothing here is a *correctness* check of the simulator's ecology. The viewer reads six files and
+colours them; if `moisture.bin` were wrong, this would draw the wrong thing confidently. The
+invariants live in `ecosim check`. What the overlays add is that a wrong field is now *visible* —
+drainage lines that do not follow the terrain, or shade on the sunny side of a building, are the kind
+of error no scalar in `series.csv` reports.

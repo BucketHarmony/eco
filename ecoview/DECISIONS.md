@@ -735,3 +735,39 @@ forbidden configurations larger. A tree germinating in the middle of a road now 
 whatever the site's tree count; the old proxy needed about eighty of them before it noticed. Backlog row
 G11 moves this invariant into `ecosim check`, where the component that can violate it lives, and deletes
 the copy here.
+
+## E7 shot 09's fire tick
+
+**Shot 09 moves from tick 17100 to tick 13800, and the reference moves with it.** `scripts/shots.mjs`
+is the whole code change: one row's file name and `tick=`, with the comment that records the choice.
+The old `09_fire_t17100_top.png` is deleted from `shots/` and from `shots/reference/`, the new
+`09_fire_t13800_top.png` is accepted with `shot-ref.mjs accept 09_fire`, and nothing else in the set is
+re-rendered or re-accepted — `shot:check` reports the other sixteen at the percentages they had before.
+
+**Why the tick had to move.** 17100 was chosen in shot 16 as the snapshot with the most patches alight
+(3 then). Ecosim shots G4 and G4c changed what fire does, and on the current run tick 17100 has no
+burning patch and no `burnout` event in the preceding hundred ticks, so the overlay drew the plain
+material colour. Shots E2 and E6 both reported it and neither was asked to fix it. A screenshot that
+illustrates nothing is worse than no screenshot, because it is in the SAD's table and in
+`shots/REPORT.md` where a reader takes it as evidence.
+
+**Why 13800 and not the run's peak.** The peak is 6 patches at tick **8924**, which is not a snapshot.
+The renderer can only draw a snapshot, `runs/s42` snapshots every 100 ticks, and a fire lasts about 3
+ticks, so a spread's peak is almost never on the grid. Of the 201 snapshots, exactly two have any patch
+alight: 5300 (1 alight, nothing burnt since 5200) and 13800 (2 alight, 16 burnouts over 11 patches since
+13700). 13800 is the only one that shows both halves of the overlay — flame *and* charcoal — so the
+choice is a count, not a preference, and there is no third candidate.
+
+**No automatic guard was added, on purpose.** The obvious one — a test asserting the chosen tick still
+burns — would put an ecosim fact back on ecoview's critical path, which is what shot E6 took off it and
+what row G11 is finishing, and it would redden the frozen viewer's job every time the simulator's fire
+moves with no renderer defect behind it. The fire *palette* stays gated by `tests/e2e/overlays.spec.ts`
+on a synthetic patch. The freshness of the *tick* stays a human verdict in `shots/REPORT.md`, which is
+where it was in fact caught, twice, before this shot. If anyone wants it mechanised, its home is
+`ecosim check`, next to the invariant G11 is moving there.
+
+**The picture, measured from the PNG.** Two 30×30 px blocks, one patch each at the top camera's 3.75 px
+per column: patch (0, 0) in `#b3300a` (one tick left) and patch (1, 2) in `#d97015` (two), so the palette
+reads a fire's age correctly. 11 charcoal patches in two connected regions — 6,847 px over the western
+40 × 32 m and one isolated 874 px block past its north-east corner — with both live fires inside the
+large scar. `shots/REACCEPT-E7.md` has the side-by-side and the numbers.

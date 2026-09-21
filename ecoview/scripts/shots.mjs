@@ -41,8 +41,12 @@ export const SHOTS = [
   ['06_temperature_t1000_top.png', 'run=runs/s42&tick=1000&overlay=temperature&cam=top', SHOWN],
   ['07_temperature_t3000_top.png', 'run=runs/s42&tick=3000&overlay=temperature&cam=top', SHOWN],
   ['08_chart_t20000.png', 'run=runs/s42&tick=20000&overlay=material&cam=iso', GATED],
-  // 17100 is the snapshot with the most patches burning in the strip's runs/s42 (3), with 27 burnouts since 17000.
-  ['09_fire_t17100_top.png', 'run=runs/s42&tick=17100&overlay=fire&cam=top', SHOWN],
+  // 13800 is the only snapshot of the strip's runs/s42 that shows both of the things this overlay draws:
+  // 2 patches still alight, and 16 burnouts since 13700 for the charcoal. The run's peak is 6 patches at
+  // tick 8924, which is not a snapshot; across all 201 snapshots only 5300 (1 alight, nothing burnt) and
+  // 13800 have any flame at all, so there is no second candidate. Shot E7 moved it here from 17100, which
+  // had neither flame nor scar after ecosim shot G4c and pictured nothing.
+  ['09_fire_t13800_top.png', 'run=runs/s42&tick=13800&overlay=fire&cam=top', SHOWN],
   ['10_crowding_t20000_top.png', 'run=runs/s42&tick=20000&overlay=crowding&cam=top', SHOWN],
   ['11_traits_t20000_top.png', 'run=runs/s42&tick=20000&overlay=traits&cam=top', SHOWN],
   ['12_capitol_medium_t0_iso.png', 'run=runs/capitol-s42&tick=0&overlay=medium&cam=iso', GATED],

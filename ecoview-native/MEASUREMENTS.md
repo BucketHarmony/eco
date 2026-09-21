@@ -839,8 +839,8 @@ stands.
 
 `git diff --stat 4d18d76 -- ecoview-native/` is **1,223 insertions and 48 deletions**, plus the new
 untracked `src/sim.rs` at **347 lines**, which `--stat` cannot see: 1,522 net before the write-ups,
-and **1,782 net with them, against the row's 1,500** — 282 over, 18.8%. The two write-ups are 257 of
-those lines (140 here, 117 in DECISIONS.md), more than V1's 200, because this shot has a three-run
+and **1,782 net with them, against the row's 1,500** — 282 over, 18.8%. The two write-ups are 260 of
+those lines (143 here, 117 in DECISIONS.md), more than V1's 200, because this shot has a three-run
 experiment and six pictures to account for.
 
 The split is **1,134 non-test and 388 test**. Comments are 222 of the 1,223 added tracked lines, 18%,

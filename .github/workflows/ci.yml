@@ -329,7 +329,10 @@ jobs:
   # MEASUREMENTS.md and carries `continue-on-error: true`.
   ecoview-native:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The gate itself takes seconds; the budget is for the ten software-rendered screenshots after it,
+    # which cost about 4 minutes each on lavapipe (MEASUREMENTS.md). At 45 the job was cancelled with
+    # nine of ten measured, and a cancelled job is a red run even when every step in it is optional.
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: ecoview-native

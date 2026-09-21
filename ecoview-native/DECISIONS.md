@@ -659,3 +659,63 @@ not spawn — so the tests drive the whole poll-progress-finish-fail-cancel path
 itself standing in for the simulator, and `SimJob::start` goes through the same constructor, so the
 tested path is the flown path. Nothing in the gate runs `ecosim`; the round trip's own timings are
 measured by hand and written down in MEASUREMENTS.md instead.
+
+## V6 ambient occlusion is a voxel id, not a vertex attribute
+
+`binary-greedy-meshing` merges neighbouring faces that share a voxel id. Per-corner ambient
+occlusion, which is the usual way, would give every corner of every face its own number and break
+every merge on the site; the quad count is the whole reason this viewer can draw 450,000 faces at
+200 fps. So occlusion is quantised to four levels and packed **into the id**: `id + PALETTE_LEN *
+level`, and the palette is the same 48 colours four times over, each block dimmer than the last
+(`sky::AO_SHADE`). Two voxels of the same material at the same shade still merge; only the boundary
+between two shades costs a quad, which is 452,385 against 322,068 on the Capitol at tick 10000.
+
+Level 0 is exactly 1.0, so the first block of the shaded palette is the palette. That is what makes
+`--no-ao` give back V5's mesh **to the byte**, and it is the assertion the gate leads with.
+
+What counts as an occluder is the eight cells in the layer **directly above** a voxel, and nothing
+else. Not the coplanar ring: on flat ground every voxel has eight coplanar neighbours, so that would
+dim a lawn uniformly and dim nothing relative to anything else. Not the layer below, which is solid
+under every ground voxel there is. The layer above is what a face looks into, so this darkens
+exactly the concave places -- the foot of a wall, the inside of a step, the inside of a crown. One
+voxel of reach is also the whole reach, which matters because the mesher's padded buffer is exactly
+one voxel wider than its chunk: every neighbour a voxel needs is already in the pad, including the
+ones belonging to the chunk next door, so there is no seam along a chunk boundary and no second
+pass.
+
+## V6 the day of the year is the run's, the hour of the day is the viewer's
+
+A tick is `8766 / year_len` hours (`ecosim/UNITS.md`), 2.1915 h at the shipped `year_len`, so the
+viewer could read an hour of the day straight off the tick. It does not. Half of every run's
+snapshots would then be photographed in the dark, for a diurnal cycle **the simulator does not
+model** -- its light field is computed under a fixed 45 degree sun and has no time of day in it at
+all. Drawing night would be the viewer inventing a claim the run never made, and an expensive one:
+the pictures are the product.
+
+The day of the year is a different case, because the simulator's temperature and rain both swing on
+it. So that half is the run's, and the alignment is the simulator's own: `abiotic.rs` peaks
+temperature a quarter of the way through its year, and that tick is drawn as the summer solstice.
+Tick 0 is then the spring equinox, and the viewer's autumn is the run's autumn. The hour is a key
+(**K**, **L**) and a flag (`--hour`), and every HUD line and every `ecoview.stats` reply says which
+half is whose.
+
+## V6 the latitude is the viewer's, and nothing in the project can tell it otherwise
+
+No world bundle and no run directory carries a latitude. `bundle.json` has a `source` string naming
+the site in prose and nothing machine-readable, and `meta.json` has no place for one. So `--lat`
+defaults to 42.7 N -- Lansing, Michigan, where the committed bundle's own `source` line says its
+LiDAR was flown -- and the HUD names it as the viewer's, the way V2 named the overlay hues and V4
+named the vine's. **Handed up**: a latitude in the bundle format is an `ecosim` change and this row
+may not make one (MASTER.md, component isolation).
+
+## V6 the season is quantised into 64 steps because colour is baked into vertices
+
+Seasonal colour is a palette change, and this viewer bakes colour into vertex attributes, so moving
+the palette means remeshing every chunk. Sixty-four steps is 5.7 days a step, finer than one
+snapshot of the reference run at 9.1 days, so nothing visible is lost -- and a camera move, an hour
+key or a HUD tick never rebuilds the world, because none of them changes the step. With the tint off
+the step is not part of the key at all, so `--no-sky` scrubs the timeline at exactly V5's cost.
+
+**Colour only.** The trees keep every leaf in December. Leaf fall is a change of geometry and it is
+the simulator's to make, not the viewer's -- row G10 is that shot. A bare winter tree drawn here
+would be this viewer inventing a plant behaviour, which is the one thing the direction file forbids.

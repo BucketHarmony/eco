@@ -852,3 +852,108 @@ would land it at 1,394, under the limit and at the cost of the 388 lines the rul
 nothing else in the shot is large enough to cut instead. MASTER's budget rule says to block
 rather than trim tests to fit, so this shot blocks on the number and hands the operator the
 arithmetic, exactly as V2 did. `overnight/shots/V5.BLOCKED.md` has the options.
+
+# V6: the beauty pass
+
+Every figure below is this machine (RTX 4090, release build), the committed Capitol bundle and
+`ecosim/runs/capitol-s42` unless another world is named. `--no-ao --no-sky` is the control: it is
+the picture V5 took, from the V6 binary.
+
+## What occlusion costs, and what it buys
+
+| World, tick | Quads, pass off | Quads, pass on | First mesh, off | on |
+|---|---|---|---|---|
+| Capitol, tick 10000 | 322,068 | 452,385 (+40.5%) | 30 ms | 39 ms |
+| stress world | 335,544 | 452,272 (+34.8%) | 50 ms | 63 ms |
+
+The extra quads are all boundary: a run of lawn at one shade still merges into one quad, and only
+the seam between two shades splits. 40% is the price of the merge key being the voxel id, which is
+also the reason the mesh is this small to begin with (DECISIONS.md, V6).
+
+**Frame rate, flying the full stress world for 10 s** (`--stress --bench 10`, the V0 gate of 60 fps):
+
+| | mean | p95 |
+|---|---|---|
+| beauty pass off | 4.44 ms, **225.5 fps** | 5.55 ms, 180.2 fps |
+| on, with cascaded shadows | 4.95 ms, **201.8 fps** | 6.21 ms, **161.0 fps** |
+
+Shadows and 35% more quads cost 0.51 ms a frame. The gate wanted 60; the p95 is 161.
+
+## What a season step costs
+
+Seasonal colour is baked into vertex colours, so crossing a season step is a full-site remesh.
+Measured over BRP, scrubbing `capitol-s42` from snapshot 10 to 11 (tick 10000 to 11000):
+
+| | chunks remeshed | total |
+|---|---|---|
+| `--no-ao --no-sky` | 162 | 327.7 ms |
+| `--no-sky` (occlusion on, season off) | 162 | 335.3 ms |
+| beauty pass on, crossing 16 season steps | 324 | 395.3 ms |
+
+**+68 ms, +21%, and only when the step actually moves.** This run is the worst case for it:
+`snapshot_every` is 1000 against a `year_len` of 4000, so every snapshot is a quarter of a year and
+every scrub crosses sixteen steps. The reference `runs/s42` snapshots every 100 ticks, 0.16 of a
+step, so most of its scrubs cross none and cost exactly the V5 number. An hour key, a camera move
+and a HUD tick never remesh at any snapshot rate, which is what the quantising is for.
+
+That also means this run only ever shows four days of the year: tick 0 is 22 March, and the
+snapshots land on 22 June, 21 September and 21 December and then repeat. The seasonal colour is real
+and the dates are the run's, but this run samples the year four times, not sixty-four.
+
+## The screenshots
+
+Seven, all 1280 by 800. The six new ones are one `ecoview-native --headless --frames 120 --run
+../ecosim/runs/capitol-s42` each, with the flags in the table; the default camera unless named.
+
+| File | Flags | Verdict |
+|---|---|---|
+| `v6-off.png` | `--tick 10000 --no-ao --no-sky` | The control, and the case for the shot: V5's picture, flat dark green on black, every face of every tree lit identically, no shadow anywhere, the building a grey slab. Nothing is wrong with it and nothing in it reads as depth. |
+| `v6-on.png` | `--tick 10000` | The same frame, same tick, same trees: a pale sky behind the site, tree shadows lying north-west across the lawn, the crowns split into lit gold and shaded olive, and the HUD saying `21 September, autumn` with `42.7 N, the hour, the latitude and the hue are the viewer's, the date is the run's`. The site reads as a place with a time of day. |
+| `v6-close.png` | `--tick 10000 --eye 40,40,20 --look 140,6,140` | Ground level, looking at the Capitol's west face: the building shadows itself down one wall, the colonnade's recesses are dark where occlusion put them, and two foreground crowns in full sun have gone gold against their shaded neighbours. The one picture where all three halves of the pass are visible at once. |
+| `v6-summer.png` | `--tick 9000` | 22 June, sun 59 degrees up, shadows short and directly under the crowns; canopy at its base green, the lawn at its lightest. 3,867 trees -- a different tick, so the wood is different too; the season here is the colour, not the count. |
+| `v6-winter.png` | `--tick 11000` | 21 December, sun 18 degrees up: shadows reach half across the lawn, the grass has gone straw-olive and the canopy grey-green and dull. Every leaf is still on the trees, which is correct and is the one thing about this picture to be careful with -- the viewer does not model leaf fall and does not pretend to. |
+| `v6-dusk.png` | `--tick 10000 --hour 17.75` | Sun 3 degrees up, fifteen minutes from setting: the sky burns salmon, the west faces catch the last of it and everything else is in shadow that runs the full length of the site. Honest limit -- the warm band is the whole horizon ring, not a glow around the sun's own azimuth, so the sunset looks the same in every direction. |
+| `shots/stress-headless.png` | `--stress --frames 200` | Regenerated: 486 chunks, **247 drawn, unchanged from V3-V5**, now 452,272 quads instead of 335,544, under a blue sky with the tower bases and the ground between them darkened. The HUD carries the new sky line and says `no run loaded, so the date is the viewer's too`, which is the right thing for a world with no year. |
+
+`shots/agent-loop.png` is **1,556,163 bytes** against V5's 1,531,622, regenerated by the gate run
+below; `shots/stress-headless.png` is **970,259** against 873,792. `shots/capitol-headless.png` is
+**still stale, now across five shots** -- V4 and V5 each left it and handed it up, and this row does
+the same rather than fold five shots of drift into one that did not ask for it.
+
+**Owed to the operator session:** the private home scene has not been photographed under this pass.
+A worker never does that pass and never looks at that data; it is the operator's to run.
+
+## The gates
+
+`cargo test --release --no-default-features --test mesh_golden`: **58 pass**, 50 of them V0-V5's,
+unchanged. All six earlier golden hashes stand untouched with occlusion off, which is the claim this
+shot rests on. The eight new ones are the occluded golden, the off-is-V5 proof, what occlusion does
+to a wall foot and a roof, the shaded palette's shape, solar geometry against the almanac at three
+days and four hours and two hemispheres, the tick-to-day mapping, the season's continuity over all
+64 steps, and the dome's winding and vertex count.
+
+`cargo test --release`: pass. `cargo fmt --check`: clean. `cargo clippy --release --all-targets`:
+the three pre-existing `src/bundle.rs` findings from V1 and nothing else; this shot adds none.
+
+`agent_loop --run ../ecosim/runs/capitol-s42`: **PASS**, 19 calls, 0 retries, 4.7 s to the first
+screenshot. `ecoview.stats` now carries a `sky` object -- the sun's elevation, azimuth and
+declination, the day of the year, whether it came from the run, the season's three numbers and the
+step, and the sentence saying which half is whose.
+
+## One thing this shot changed that it was not asked to
+
+The HUD text block got a dark translucent backing. White text on black needed none; white text on a
+bright sky is unreadable, and the top left of the frame is exactly where the sky is brightest. Every
+screenshot in this shot would otherwise have an illegible HUD, which would have undone what V2, V4
+and V5 spent lines on.
+
+## Line budget
+
+`git diff --stat 052aa61 -- ecoview-native/` is **1,494 insertions and 14 deletions, 1,480 net,
+against the row's 1,500** -- 20 to spare, with both write-ups in it. The new `src/sky.rs` is 568 of
+them, `src/main.rs` 368, the gate 301, and the two write-ups 167.
+
+The split is **1,193 non-test and 301 test**. Of the 1,335 code lines added, 309 are comments, 23%,
+which is this component's usual density; `sky.rs` runs higher because every constant in it is a
+number no file in the project could supply, and the reader's first question about each one is whose
+it is.

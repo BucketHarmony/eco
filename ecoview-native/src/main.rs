@@ -6,7 +6,7 @@
 //! ```text
 //! ecoview-native [--world DIR | --stress] [--run DIR] [--tick N] [--overlay NAME] [--no-cover]
 //!                [--eye X,Y,Z] [--look X,Y,Z] [--headless] [--frames N] [--screenshot PATH]
-//!                [--bench SECS] [--port N]
+//!                [--bench SECS] [--port N] [--no-ao] [--no-sky] [--hour H] [--lat DEG]
 //!                [--edit X0,Y0,X1,Y1,ACTION[,MEDIUM]]... [--sim] [--sim-ticks N] [--sim-seed N]
 //!                [--sim-root DIR]
 //! ```
@@ -14,7 +14,8 @@
 //! Keys: WASD, Space and Shift to fly; right mouse to look; wheel for speed; **R** to reset the view;
 //! **P** to play or pause; **,** and **.** to step a snapshot; **Home** and **End** for the ends of
 //! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**7** for
-//! the overlay; **V** for the ground cover and vines.
+//! the overlay; **V** for the ground cover and vines; **K** and **L** move the hour of the day
+//! and **O** turns the beauty pass -- ambient occlusion, sky, sun and seasonal colour -- off.
 //!
 //! Editing, under the crosshair: **Q** and **Z** raise and lower the ground, **T** and **G** raise
 //! and lower a building, **M** cycles the surface, **U** undoes. **Enter** grows what you have made
@@ -39,6 +40,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::image::Image;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::remote::{BrpError, BrpResult, RemotePlugin};
@@ -55,6 +57,7 @@ use ecoview_native::overlay::{FieldStats, Fields, Scale};
 use ecoview_native::palette::{palette, Overlay, BANDS};
 use ecoview_native::run::Run;
 use ecoview_native::sim::{self, SimJob, SimState};
+use ecoview_native::sky::{self, shaded_palette, Clock, SkyState};
 use ecoview_native::tree::Life;
 use ecoview_native::voxel::{ChunkPos, ColumnBands, EditAction, VoxelWorld};
 use ecoview_native::{brp, stress_world, Bundle, CAPITOL};
@@ -127,6 +130,13 @@ struct Args {
     /// Where the round trip writes. Under `target/` by default, which git ignores: an edited copy of
     /// a site is scratch, and the run beside it is regenerable by definition.
     sim_root: String,
+    /// Shot V6's beauty pass, in three parts that switch off separately because they cost different
+    /// things: `ao` is baked into the mesh, `sky` is the dome, the sun path and the seasonal tint,
+    /// and `hour` and `lat` are the two numbers the sun path needs that no run carries (`sky.rs`).
+    ao: bool,
+    sky: bool,
+    hour: f32,
+    lat: f32,
 }
 
 /// `X0,Y0,X1,Y1,ACTION[,MEDIUM]` in ground cells, inclusive. Fatal when it does not parse, for the
@@ -178,6 +188,10 @@ fn args() -> Args {
         sim_ticks: sim::DEFAULT_TICKS,
         sim_seed: sim::DEFAULT_SEED,
         sim_root: "target/sim".to_string(),
+        ao: true,
+        sky: true,
+        hour: sky::DEFAULT_HOUR,
+        lat: sky::DEFAULT_LATITUDE_DEG,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -250,6 +264,16 @@ fn args() -> Args {
             }
             "--sim-root" => {
                 a.sim_root = next();
+                i += 1;
+            }
+            "--no-ao" => a.ao = false,
+            "--no-sky" => a.sky = false,
+            "--hour" => {
+                a.hour = next().parse().unwrap_or(sky::DEFAULT_HOUR);
+                i += 1;
+            }
+            "--lat" => {
+                a.lat = next().parse().unwrap_or(sky::DEFAULT_LATITUDE_DEG);
                 i += 1;
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -514,6 +538,91 @@ fn apply_overlay_bands(
     stale
 }
 
+/// The drawn atmosphere, and the two numbers no run carries.
+///
+/// **Nothing here is ecology** (`sky.rs`): the simulator computed its light under a fixed 45 degree
+/// sun and has no hour of the day, so moving this sun changes no number in any run. What it changes
+/// is whether the shape of the site is readable.
+#[derive(Resource)]
+struct Sky {
+    /// The dome, the sun path and the seasonal tint. `--no-sky`, or **O**.
+    on: bool,
+    /// Ambient occlusion, baked into the voxel ids. `--no-ao`, or **O**.
+    ao: bool,
+    hour: f32,
+    lat: f32,
+    state: SkyState,
+    /// The `(on, ao, season step)` the drawn world's palette was built for. Anything else is a
+    /// remesh, which is why the season is quantised at all (`sky::SEASON_STEPS`).
+    applied: Option<(bool, bool, u32)>,
+    /// What the last beauty-pass remesh cost, for `ecoview.stats` and the write-up.
+    remesh_chunks: usize,
+    remesh_ms: f64,
+    /// The state the dome mesh was built for, so a camera move does not rebuild the sky.
+    dome: Option<SkyState>,
+}
+
+impl Sky {
+    fn new(a: &Args, t: &Timeline) -> Sky {
+        let mut sky = Sky {
+            on: a.sky,
+            ao: a.ao,
+            hour: a.hour,
+            lat: a.lat,
+            state: SkyState::of(Clock::of(None, 0, a.hour), a.lat),
+            applied: None,
+            remesh_chunks: 0,
+            remesh_ms: 0.0,
+            dome: None,
+        };
+        sky.recompute(t);
+        sky
+    }
+
+    /// The day of the year is the run's, every time the timeline moves; the hour is the viewer's.
+    fn recompute(&mut self, t: &Timeline) {
+        let (tick, year_len) = match &t.run {
+            Some(r) => (Some(r.tick_at(t.index)), r.meta.year_len),
+            None => (None, 0),
+        };
+        self.state = SkyState::of(Clock::of(tick, year_len, self.hour), self.lat);
+    }
+
+    /// What the drawn palette depends on. With the seasonal tint off the year is not one of them,
+    /// so `--no-sky` scrubs the timeline at exactly the cost V5 did.
+    fn key(&self) -> (bool, bool, u32) {
+        let season = if self.on { self.state.mesh_key() } else { 0 };
+        (self.on, self.ao, season)
+    }
+
+    /// The palette the world is meshed with: the overlay's colours from `meta.json`, moved through
+    /// the year, then expanded into one block per occlusion level.
+    ///
+    /// With the beauty pass off this is exactly `palette()`, which is what makes a V6 build draw a
+    /// V5 picture to the byte (`tests/mesh_golden.rs`).
+    fn palette(&self, ov: Overlay, t: &Timeline) -> Vec<[f32; 4]> {
+        let mut p = palette(ov, t.run.as_ref().map(|r| &r.meta));
+        if self.on {
+            self.state.season.tint_palette(&mut p);
+        }
+        if self.ao {
+            shaded_palette(&p)
+        } else {
+            p
+        }
+    }
+}
+
+/// The sphere of sky around the camera. Its radius has to sit inside the camera's far plane (1000 m
+/// by default) and outside anything on the site, which at 256 m across leaves a wide choice.
+const SKY_RADIUS_M: f32 = 600.0;
+
+/// The fixed 45 degree sun V0 through V5 drew, kept for `--no-sky`: the beauty pass has an off
+/// switch, and off means the picture the last five shots took.
+const FIXED_SUN: (f32, f32) = (0.8, -0.8);
+const FIXED_ILLUMINANCE: f32 = 10_000.0;
+const FIXED_AMBIENT: f32 = 700.0;
+
 fn main() {
     let a = args();
     let load = Instant::now();
@@ -546,7 +655,11 @@ fn main() {
         .as_ref()
         .map_or(0.0, |r| r.life.tall_height_m)
         .max(Life::default().tall_height_m);
-    let world = VoxelWorld::from_bundle_with_headroom(&bundle, headroom);
+    let mut world = VoxelWorld::from_bundle_with_headroom(&bundle, headroom);
+    // Ambient occlusion is a property of the world, not of one mesh: it is baked into the voxel ids
+    // the mesher merges on, so it has to be set before the first chunk is filled (`mesh.rs`).
+    world.ao = a.ao;
+    let sky = Sky::new(&a, &timeline);
     println!(
         "world {} {}x{} cells at {} m, {} chunks, {} levels; read {:.0} ms, voxelise {:.0} ms",
         bundle.name,
@@ -626,6 +739,10 @@ fn main() {
         until: a.bench,
         samples: Vec::new(),
     })
+    // The dome covers the whole sky, so this shows only where the dome does not reach; it is set
+    // from the horizon anyway, so a gap would not be a black band.
+    .insert_resource(ClearColor(Color::BLACK))
+    .insert_resource(sky)
     .insert_resource(a.clone())
     .add_systems(Startup, setup)
     .add_systems(
@@ -635,6 +752,7 @@ fn main() {
             timeline_scrub,
             timeline_play,
             overlay_keys,
+            sky_update,
             apply_world_state,
             edit_keys,
             apply_edits,
@@ -778,6 +896,7 @@ fn setup(
     mut timeline: ResMut<Timeline>,
     mut overlays: ResMut<OverlayState>,
     mut queue: ResMut<EditQueue>,
+    mut sky: ResMut<Sky>,
     args: Res<Args>,
 ) {
     // The scripted edits go in before anything is meshed, so the first frame is already of the
@@ -838,7 +957,27 @@ fn setup(
         );
     }
     apply_overlay_bands(&mut site.world, &mut overlays, &timeline, fields.as_ref());
-    site.palette = palette(overlays.active, timeline.run.as_ref().map(|r| &r.meta));
+    sky.recompute(&timeline);
+    site.palette = sky.palette(overlays.active, &timeline);
+    sky.applied = Some(sky.key());
+    // The sky on stdout for the same reason the trees are: a picture that leans on a low sun should
+    // leave behind which hour and which latitude drew it, and whose each of them is.
+    println!(
+        "sky: {}{}",
+        sky.state.line(),
+        if sky.on {
+            ""
+        } else {
+            "  (--no-sky: the fixed 45 degree sun of V0-V5)"
+        }
+    );
+    println!(
+        "ambient occlusion: {}, {} levels, season step {} of {}",
+        if sky.ao { "on" } else { "off (--no-ao)" },
+        sky::AO_LEVELS,
+        sky.state.season.step(),
+        sky::SEASON_STEPS
+    );
     // One line on stdout for a headless or scripted run, so a screenshot is never the only record of
     // what the picture means.
     // Fire's field is the ticks left on a patch that is alight, and most snapshots have none; the
@@ -921,7 +1060,7 @@ fn setup(
         },
         AmbientLight {
             color: Color::WHITE,
-            brightness: 700.0,
+            brightness: FIXED_AMBIENT,
             affects_lightmapped_meshes: false,
         },
     ));
@@ -957,14 +1096,49 @@ fn setup(
             shot_taken: false,
         });
     }
+    // The sun. `sky_update` points it, colours it and dims it every frame the sky moves; with
+    // `--no-sky` it keeps the fixed 45 degree pose V0 through V5 drew and casts no shadow.
+    //
+    // Shadows are what the sun is for. A sun that lights every face the same is a sun that hides
+    // the site's shape, and the four cascades below cover the Capitol's 256 m twice over.
     commands.spawn((
         DirectionalLight {
-            illuminance: 10_000.0,
-            shadow_maps_enabled: false,
+            illuminance: FIXED_ILLUMINANCE,
+            shadow_maps_enabled: sky.on,
             ..default()
         },
-        // The G1 fixed sun: 45 degrees, from the south-west. G9 replaces it with a real path.
-        Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.8, -0.8, 0.0)),
+        CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 0.5,
+            maximum_distance: 500.0,
+            first_cascade_far_bound: 24.0,
+            overlap_proportion: 0.2,
+        }
+        .build(),
+        Transform::from_rotation(Quat::from_euler(
+            EulerRot::YXZ,
+            FIXED_SUN.0,
+            FIXED_SUN.1,
+            0.0,
+        )),
+        SunLight,
+    ));
+    // The sky itself: a vertex-coloured sphere around the camera, built by the same engine-free
+    // code the ground is and drawn with the same kind of material, unlit and shadowless because it
+    // is the light source's backdrop rather than a thing in the scene.
+    let dome = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(meshes.add(to_bevy_mesh(&sky.state.dome(SKY_RADIUS_M, 12, 32)))),
+        MeshMaterial3d(dome),
+        Transform::from_translation(eye),
+        Visibility::Hidden,
+        NotShadowCaster,
+        NotShadowReceiver,
+        SkyDome,
     ));
     // `AmbientLight` is a camera component in 0.19, not a resource, so it goes on the camera above.
     spawn_hud(&mut commands);
@@ -1008,8 +1182,14 @@ fn spawn_hud(commands: &mut Commands) {
             position_type: PositionType::Absolute,
             top: Val::Px(10.0),
             left: Val::Px(12.0),
+            padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+            max_width: Val::Percent(95.0),
             ..default()
         },
+        // White text on the black of V0-V5 needed no backing. The sky is bright now, and the top
+        // left of the frame is exactly where it is brightest, so every line of the HUD in every
+        // screenshot this shot took would otherwise be unreadable.
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
         HudText,
     ));
     commands
@@ -1465,6 +1645,7 @@ fn apply_world_state(
     mut site: ResMut<Site>,
     mut timeline: ResMut<Timeline>,
     mut overlays: ResMut<OverlayState>,
+    mut sky: ResMut<Sky>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let want = want_cover(&timeline, &overlays);
@@ -1473,11 +1654,14 @@ fn apply_world_state(
     // scrub does, so it goes down the same path rather than getting one of its own.
     let cover_moved = timeline.run.is_some() && timeline.cover_applied != Some(want);
     let overlay_moved = overlays.applied != Some((overlays.active, timeline.index));
-    if !snapshot_moved && !cover_moved && !overlay_moved {
+    // The season and the two switches, quantised: a colour that moved less than one step of the
+    // year is not worth rebuilding 1,900 chunk meshes for (`sky::SEASON_STEPS`).
+    let sky_moved = sky.applied != Some(sky.key());
+    if !snapshot_moved && !cover_moved && !overlay_moved && !sky_moved {
         return;
     }
     let start = Instant::now();
-    let repalette = overlays.applied.map(|(o, _)| o) != Some(overlays.active);
+    let repalette = overlays.applied.map(|(o, _)| o) != Some(overlays.active) || sky_moved;
     let fields = read_fields(&timeline);
     let mut stale = if snapshot_moved || cover_moved {
         load_snapshot(
@@ -1498,7 +1682,12 @@ fn apply_world_state(
     // different colour, so `set_overlay`'s stale set is not enough on its own: everything is remeshed.
     // It costs about as much as the first frame did and happens on a key press, not on a scrub.
     if repalette {
-        site.palette = palette(overlays.active, timeline.run.as_ref().map(|r| &r.meta));
+        // Ambient occlusion is in the ids, so switching it rewrites the world itself, not just the
+        // colours it is drawn in. Either way every chunk is rebuilt, which is what the quantising
+        // above is for.
+        site.world.set_ao(sky.ao);
+        site.palette = sky.palette(overlays.active, &timeline);
+        sky.applied = Some(sky.key());
         stale = site.world.all_chunks();
     }
     if !stale.is_empty() {
@@ -1512,6 +1701,10 @@ fn apply_world_state(
     }
     timeline.last_chunks = stale.len();
     timeline.last_ms = start.elapsed().as_secs_f64() * 1000.0;
+    if sky_moved {
+        sky.remesh_chunks = stale.len();
+        sky.remesh_ms = timeline.last_ms;
+    }
 }
 
 /// **1**-**7** pick the overlay, in `Overlay::ALL` order; **V** turns the cover and vines on and off.
@@ -1536,6 +1729,105 @@ fn overlay_keys(
         if keys.just_pressed(*k) {
             ov.active = Overlay::ALL[i];
         }
+    }
+}
+
+#[derive(Component)]
+struct SunLight;
+
+#[derive(Component)]
+struct SkyDome;
+
+/// Moves the sky: the hour keys, the sun's pose, colour and shadows, the ambient level, and the
+/// dome that follows the camera.
+///
+/// Everything here is free -- one light's transform and, when the sun has actually moved, one
+/// 800-triangle mesh. The one expensive half of the beauty pass is the seasonal tint, which is
+/// baked into vertex colours; [`apply_world_state`] notices that through [`Sky::key`].
+#[allow(clippy::too_many_arguments)]
+fn sky_update(
+    keys: Res<ButtonInput<KeyCode>>,
+    timeline: Res<Timeline>,
+    mut sky: ResMut<Sky>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut clear: ResMut<ClearColor>,
+    mut sun: Query<(&mut DirectionalLight, &mut Transform), (With<SunLight>, Without<SkyDome>)>,
+    mut dome: Query<(&mut Mesh3d, &mut Transform, &mut Visibility), With<SkyDome>>,
+    mut ambient: Query<&mut AmbientLight>,
+    camera: Query<&Transform, (With<Camera3d>, Without<SunLight>, Without<SkyDome>)>,
+) {
+    // **O** is the whole beauty pass, both halves together: the question a reader of a screenshot
+    // asks is "what does this shot add", and answering it means one key that takes all of it away.
+    if keys.just_pressed(KeyCode::KeyO) {
+        sky.on = !sky.on;
+        sky.ao = sky.on;
+    }
+    // Half an hour a press. The hour is the viewer's (`sky.rs`), so it is a key and not a scrub.
+    for (k, by) in [(KeyCode::KeyK, -0.5), (KeyCode::KeyL, 0.5)] {
+        if keys.just_pressed(k) {
+            sky.hour = (sky.hour + by).rem_euclid(24.0);
+        }
+    }
+    sky.recompute(&timeline);
+    let st = sky.state;
+    let up = st.sun.dir;
+    let (illuminance, color, rotation) = if sky.on {
+        let d = Vec3::new(up[0], up[1], up[2]);
+        // Near the zenith "up" is no longer a usable reference for the light's roll; north is.
+        let reference = if d.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+        (
+            st.sun.illuminance,
+            Color::linear_rgb(st.sun.color[0], st.sun.color[1], st.sun.color[2]),
+            Transform::default().looking_to(-d, reference).rotation,
+        )
+    } else {
+        (
+            FIXED_ILLUMINANCE,
+            Color::WHITE,
+            Quat::from_euler(EulerRot::YXZ, FIXED_SUN.0, FIXED_SUN.1, 0.0),
+        )
+    };
+    for (mut light, mut tf) in &mut sun {
+        light.illuminance = illuminance;
+        light.color = color;
+        // A sun below the horizon casting shadows would draw them from underneath the ground.
+        light.shadow_maps_enabled = sky.on && st.sun.is_up();
+        tf.rotation = rotation;
+    }
+    for mut a in &mut ambient {
+        a.brightness = if sky.on { st.ambient } else { FIXED_AMBIENT };
+        a.color = if sky.on {
+            Color::linear_rgb(
+                st.ambient_color[0],
+                st.ambient_color[1],
+                st.ambient_color[2],
+            )
+        } else {
+            Color::WHITE
+        };
+    }
+    clear.0 = if sky.on {
+        Color::linear_rgb(st.horizon[0], st.horizon[1], st.horizon[2])
+    } else {
+        Color::BLACK
+    };
+    let eye = camera.iter().next().map(|t| t.translation);
+    let rebuild = sky.on && sky.dome != Some(st);
+    for (mut mesh, mut tf, mut vis) in &mut dome {
+        if let Some(e) = eye {
+            tf.translation = e;
+        }
+        *vis = if sky.on {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if rebuild {
+            *mesh = Mesh3d(meshes.add(to_bevy_mesh(&st.dome(SKY_RADIUS_M, 12, 32))));
+        }
+    }
+    if rebuild {
+        sky.dome = Some(st);
     }
 }
 
@@ -1598,6 +1890,7 @@ fn hud(
     scene: Res<Scene>,
     editor: Res<Editor>,
     sim: Res<Sim>,
+    sky: Res<Sky>,
     fly: Query<&Fly>,
     mut bar: Query<&mut Node, TimelineBarFilter>,
     mut text: Query<&mut Text, With<HudText>>,
@@ -1713,6 +2006,25 @@ fn hud(
                 c.vigour,
             ),
         });
+    }
+    // The sky says whose each of its numbers is, on the screen and not only in the write-up, for
+    // the same reason the cover does: a screenshot travels further than a report.
+    if sky.on {
+        s.push_str(&format!(
+            "{}
+  beauty pass on -- ambient occlusion {} levels, season {} ({}/{})                [K] [L] hour  [O] off
+",
+            sky.state.line(),
+            sky::AO_LEVELS,
+            sky.state.season.name,
+            sky.state.season.step(),
+            sky::SEASON_STEPS,
+        ));
+    } else {
+        s.push_str(
+            "beauty pass off -- the fixed 45 degree sun, no occlusion, no season   [O] on
+",
+        );
     }
     s.push_str(&editor_line(&editor, &site, &scene));
     s.push_str(&sim_line(&sim));
@@ -2107,6 +2419,7 @@ fn stats_method(
     ov: Res<OverlayState>,
     editor: Res<Editor>,
     sim: Res<Sim>,
+    sky: Res<Sky>,
 ) -> BrpResult {
     Ok(json!({
         "cell_m": site.world.cell_m,
@@ -2172,6 +2485,37 @@ fn stats_method(
                 "vine_vigour": t.cover_stats.vigour,
             },
             "note": "expression, not simulation: the run owns grass, shrub, moisture and light; the viewer owns only where a blade stands and how far a vine climbs. No vine is an entity in any run and nothing here feeds back into the simulation.",
+        },
+        // Shot V6's beauty pass. `day` is the run's and everything beside it is the viewer's, so
+        // an agent reading this gets the provenance the HUD line carries.
+        "sky": {
+            "on": sky.on,
+            "ao": sky.ao,
+            "ao_levels": sky::AO_LEVELS,
+            "hour": sky.state.clock.hour,
+            "latitude_deg": sky.state.latitude_deg,
+            "day_of_year": sky.state.clock.day,
+            "day_from_run": sky.state.clock.from_run,
+            "tick_hours": sky.state.clock.tick_hours,
+            "sun": {
+                "elevation_deg": sky.state.sun.elevation_deg,
+                "azimuth_deg": sky.state.sun.azimuth_deg,
+                "declination_deg": sky.state.sun.declination_deg,
+                "illuminance": sky.state.sun.illuminance,
+                "up": sky.state.sun.is_up(),
+            },
+            "season": {
+                "name": sky.state.season.name,
+                "step": sky.state.season.step(),
+                "steps": sky::SEASON_STEPS,
+                "senescence": sky.state.season.senescence,
+                "dormancy": sky.state.season.dormancy,
+                "flush": sky.state.season.flush,
+            },
+            "ambient": sky.state.ambient,
+            "remesh_chunks": sky.remesh_chunks,
+            "remesh_ms": sky.remesh_ms,
+            "note": "expression, not simulation: the day of the year is the run's tick over its year_len, and the hour, the latitude and the seasonal hues are the viewer's. The simulator computes light under a fixed 45 degree sun and has no time of day; moving this one changes no number in any run.",
         },
         "snapshot_chunks": t.last_chunks,
         "snapshot_ms": t.last_ms,

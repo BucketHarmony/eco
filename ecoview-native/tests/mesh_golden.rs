@@ -1793,3 +1793,304 @@ fn undo_puts_back_what_the_edit_took_rather_than_acting_again() {
     w.restore_column(0, 0, floor);
     assert_eq!(w.column(0, 0), Some(floor));
 }
+
+// -----------------------------------------------------------------------------------------------
+// Shot V6: the beauty pass. Ambient occlusion is baked into the voxel ids, so it is the mesher's
+// business and belongs in this gate; the sun, the sky and the season are engine-free arithmetic in
+// `sky.rs` and are checked here for the same reason -- this is the one test target CI runs.
+
+use ecoview_native::mesh::bake_occlusion;
+use ecoview_native::palette::{base_id, PALETTE_LEN};
+use ecoview_native::sky::{
+    shaded_palette, Clock, Season, SkyState, Sun, AO_SHADE, AXIAL_TILT_DEG, DAYS_PER_YEAR,
+    DEFAULT_YEAR_LEN, SEASON_STEPS, SOLSTICE_DAY,
+};
+use ecoview_native::voxel::{CS_P, CS_P3};
+
+/// The flat site with one building on it, with occlusion baked in or not.
+fn occluded(on: bool) -> VoxelWorld {
+    let mut w = VoxelWorld::from_bundle(&with_building(64, 6.0));
+    w.ao = on;
+    w
+}
+
+fn mesh_ao(w: &VoxelWorld) -> (u64, usize, usize) {
+    let pal = shaded_palette(&palette(Overlay::Surface, None));
+    let m = mesh_chunk(w, ChunkPos { x: 0, y: 0, z: 0 }, &pal, &mut Scratch::new());
+    (m.hash(), m.positions.len(), m.indices.len())
+}
+
+/// The golden: one occluded chunk in, one hashed mesh out. A change to the neighbourhood counted,
+/// to the four shade levels, or to how a level is packed into an id moves this number.
+#[test]
+fn golden_occluded() {
+    assert_eq!(
+        mesh_ao(&occluded(true)),
+        (GOLDEN_AO, GOLDEN_AO_VERTS, GOLDEN_AO_INDICES)
+    );
+}
+
+const GOLDEN_AO: u64 = 0x677b_50c8_3df8_0b76;
+const GOLDEN_AO_VERTS: usize = 156;
+const GOLDEN_AO_INDICES: usize = 234;
+
+/// **The proof that this shot added a layer and changed nothing under it.** Occlusion costs quads
+/// -- two voxels of one material at different shade no longer merge into one -- and turning it off
+/// gives back the V5 mesh to the byte, because level 0 is the palette's first block untouched.
+#[test]
+fn ambient_occlusion_off_is_the_mesh_of_the_shot_before() {
+    let off = mesh_ao(&occluded(false));
+    let on = mesh_ao(&occluded(true));
+    assert_ne!(off.0, on.0, "occlusion has to change something");
+    assert!(
+        on.2 > off.2,
+        "occlusion splits merges: {} indices on, {} off",
+        on.2,
+        off.2
+    );
+    // And the switch is reversible, from a world that has already been meshed occluded.
+    let mut w = occluded(true);
+    assert_eq!(mesh_ao(&w), on);
+    assert_eq!(w.set_ao(false).len(), w.all_chunks().len());
+    assert_eq!(mesh_ao(&w), off, "off gives back exactly the V5 mesh");
+    assert!(
+        w.set_ao(false).is_empty(),
+        "switching to what it already is"
+    );
+}
+
+/// What "occluded" means, on a site whose answer is known by eye: the lawn under open sky is
+/// level 0, the strip of ground the building's wall stands on is not, and under the roof is darkest.
+#[test]
+fn occlusion_darkens_the_foot_of_a_wall_and_leaves_the_lawn_alone() {
+    let c = ChunkPos { x: 0, y: 0, z: 0 };
+    let mut plain = vec![0u16; CS_P3];
+    occluded(true).fill_chunk(c, &mut plain);
+    let mut baked = plain.clone();
+    bake_occlusion(&mut baked);
+    // Occlusion never changes what a voxel is, only how dark it is drawn.
+    for (a, b) in plain.iter().zip(&baked) {
+        assert_eq!(*a, base_id(*b), "the material under the shade");
+    }
+    let at = |x: usize, y: usize, z: usize| baked[(y + 1) + (x + 1) * CS_P + (z + 1) * CS_P * CS_P];
+    let level = |x: usize, y: usize, z: usize| at(x, y, z) as usize / PALETTE_LEN;
+    let top = |x: usize, y: usize| (0..40).filter(|z| at(x, y, *z) != 0).next_back().unwrap();
+    // 4 m of ground on a 0.5 m lattice, and the building's 6 m on top of that.
+    let (ground, roof) = (top(2, 2), top(25, 25));
+    assert!(roof > ground, "the building stands on the lawn");
+    assert_eq!(level(2, 2, ground), 0, "open sky is the V5 colour exactly");
+    assert_eq!(level(25, 25, roof), 0, "so is the top of the roof");
+    // x 19 is the ring of lawn immediately west of the building, which starts at x 20: three of
+    // the eight cells over it are wall.
+    assert_eq!(level(19, 25, ground), 1, "the foot of a wall is occluded");
+    // And inside the building's own volume every one of the eight is.
+    assert_eq!(level(25, 25, ground), AO_SHADE.len() - 1, "under a roof");
+    // Soil under soil is the darkest there is, and is never meshed: no face of it is exposed.
+    assert_eq!(level(2, 2, ground - 1), AO_SHADE.len() - 1);
+}
+
+/// The shaded palette is the palette four times over, each block dimmer, the first untouched.
+#[test]
+fn the_shaded_palette_keeps_its_first_block() {
+    let base = palette(Overlay::Moisture, None);
+    let pal = shaded_palette(&base);
+    assert_eq!(pal.len(), PALETTE_LEN * AO_SHADE.len());
+    assert_eq!(&pal[..PALETTE_LEN], &base[..]);
+    for level in 1..AO_SHADE.len() {
+        for i in 0..PALETTE_LEN {
+            let (a, b) = (pal[i], pal[level * PALETTE_LEN + i]);
+            for ch in 0..3 {
+                assert!(b[ch] <= a[ch] + 1e-6, "level {level} is no brighter");
+            }
+            assert_eq!(a[3], b[3], "alpha is not a shade");
+        }
+    }
+    assert!(AO_SHADE.windows(2).all(|w| w[1] < w[0]), "monotone");
+}
+
+/// A clock on a chosen day of the year. `Clock::of` maps a tick to a day, so this goes the other
+/// way to pick one; the hour is the viewer's either way.
+fn on_day(day: f32, hour: f32) -> Clock {
+    let year_len = 36525u64;
+    let f = (day - SOLSTICE_DAY).rem_euclid(DAYS_PER_YEAR) / DAYS_PER_YEAR + 0.25;
+    Clock::of(
+        Some((f * year_len as f32) as u64 % year_len),
+        year_len,
+        hour,
+    )
+}
+
+/// The sun, against what the geometry says. Noon at an equinox is `90 - latitude` above a southern
+/// horizon; the two solstices are that plus and minus the axial tilt; midnight is below it.
+#[test]
+fn the_sun_is_where_the_geometry_says() {
+    let lat = 42.7;
+    for (day, expect) in [
+        (80.0, 90.0 - lat),
+        (SOLSTICE_DAY, 90.0 - lat + AXIAL_TILT_DEG),
+        (SOLSTICE_DAY + 182.6, 90.0 - lat - AXIAL_TILT_DEG),
+    ] {
+        let noon = Sun::at(&on_day(day, 12.0), lat);
+        assert!(
+            (noon.elevation_deg - expect).abs() < 1.5,
+            "day {day}: {:.1} deg up, expected about {expect:.1}",
+            noon.elevation_deg
+        );
+        assert!(
+            (noon.azimuth_deg - 180.0).abs() < 1.0,
+            "north of the tropics the noon sun is due south, got {:.1}",
+            noon.azimuth_deg
+        );
+        assert!(noon.is_up());
+    }
+    let midnight = Sun::at(&on_day(SOLSTICE_DAY, 0.0), lat);
+    assert!(!midnight.is_up(), "{:.1} deg up", midnight.elevation_deg);
+    assert_eq!(midnight.illuminance, 0.0);
+    // Morning sun in the east, afternoon sun in the west, and the unit vector agrees with both.
+    let noon = Sun::at(&on_day(SOLSTICE_DAY, 12.0), lat);
+    let morning = Sun::at(&on_day(SOLSTICE_DAY, 8.0), lat);
+    let evening = Sun::at(&on_day(SOLSTICE_DAY, 16.0), lat);
+    assert!(morning.azimuth_deg < 180.0 && morning.dir[0] > 0.0, "east");
+    assert!(evening.azimuth_deg > 180.0 && evening.dir[0] < 0.0, "west");
+    assert!(morning.illuminance < noon.illuminance, "and dimmer");
+    // A sun near the horizon is redder than one overhead, which is the air mass it came through.
+    assert!(Sun::at(&on_day(SOLSTICE_DAY, 6.0), lat).color[2] < noon.color[2]);
+    // South of the equator the same day is midwinter and the noon sun stands in the north.
+    let south = Sun::at(&on_day(SOLSTICE_DAY, 12.0), -33.9);
+    assert!(
+        south.azimuth_deg < 5.0 || south.azimuth_deg > 355.0,
+        "north"
+    );
+}
+
+/// **The day of the year is the run's**, and the alignment is the simulator's own temperature peak.
+#[test]
+fn the_day_of_the_year_comes_from_the_tick() {
+    let year = 4000u64;
+    // The simulator's warmest tick is a quarter of the way through its year (`abiotic.rs`), and
+    // that is the tick this viewer draws as the summer solstice.
+    let summer = Clock::of(Some(year / 4), year, 10.0);
+    assert!((summer.day - SOLSTICE_DAY).abs() < 0.1, "{}", summer.day);
+    assert_eq!(Season::of(summer.day).name, "summer");
+    // Which fixes tick 0 as the spring equinox.
+    let spring = Clock::of(Some(0), year, 10.0);
+    assert!((spring.day - (SOLSTICE_DAY - DAYS_PER_YEAR / 4.0)).abs() < 0.1);
+    // A tick is the hours `ecosim/UNITS.md` derives from `year_len`, and the year wraps.
+    assert!(
+        (spring.tick_hours - 2.1915).abs() < 1e-3,
+        "{}",
+        spring.tick_hours
+    );
+    assert_eq!(Clock::of(Some(4 * year), year, 10.0).day, spring.day);
+    assert!((Clock::of(Some(6000), year, 10.0).years() - 1.5).abs() < 1e-6);
+    // No run, no year: the viewer says whose the date is, and lights the site anyway.
+    let none = Clock::of(None, 0, 10.0);
+    assert!(!none.from_run && none.day == SOLSTICE_DAY);
+    assert!(Clock::of(Some(0), year, 10.0).from_run);
+    // A `year_len` of zero is a run that did not state one; the shipped default stands in.
+    assert_eq!(none.year_len, DEFAULT_YEAR_LEN);
+    assert_eq!(Clock::of(Some(0), year, 25.5).hhmm(), "01:30");
+    assert_eq!(Clock::of(Some(0), year, 10.0).month_day(), ("March", 22));
+}
+
+/// The season moves the leaves, moves nothing else, and moves them smoothly.
+#[test]
+fn the_season_turns_the_leaves_and_leaves_the_paving_alone() {
+    let base = palette(Overlay::Surface, None);
+    let autumn = Season::of(288.0);
+    assert_eq!(autumn.name, "autumn");
+    let mut tinted = base.clone();
+    autumn.tint_palette(&mut tinted);
+    // A canopy in October is not the canopy `meta.json` named, and it has gone towards the red.
+    let c = CANOPY as usize;
+    assert_ne!(tinted[c], base[c]);
+    assert!(
+        tinted[c][0] > base[c][0] && tinted[c][1] < base[c][1],
+        "redder"
+    );
+    assert_ne!(tinted[GRASS as usize], base[GRASS as usize]);
+    // Nothing that is not alive moves, in any season, ever -- including every overlay band.
+    for day in [0.0, 90.0, 180.0, 270.0, 364.0] {
+        let mut p = palette(Overlay::Moisture, None);
+        let before = p.clone();
+        Season::of(day).tint_palette(&mut p);
+        for id in 0..PALETTE_LEN {
+            if ![CANOPY, VINE, SHRUB, GRASS].contains(&(id as u16)) {
+                assert_eq!(p[id], before[id], "id {id} is not alive, on day {day}");
+            }
+        }
+    }
+    // Summer is the base colour, near enough that a July screenshot is the V5 one.
+    let mut july = base.clone();
+    Season::of(200.0).tint_palette(&mut july);
+    for ch in 0..3 {
+        assert!(
+            (july[c][ch] - base[c][ch]).abs() < 0.05,
+            "summer is the base"
+        );
+    }
+    // And the year is continuous: no two adjacent steps of it jump.
+    let mut prev: Option<[f32; 4]> = None;
+    for step in 0..SEASON_STEPS {
+        let day = (step as f32 + 0.5) * DAYS_PER_YEAR / SEASON_STEPS as f32;
+        let s = Season::of(day);
+        assert_eq!(s.step(), step, "day {day} is step {step}");
+        let mut p = base.clone();
+        s.tint_palette(&mut p);
+        if let Some(q) = prev {
+            for ch in 0..3 {
+                assert!((p[c][ch] - q[ch]).abs() < 0.15, "step {step} jumps");
+            }
+        }
+        prev = Some(p[c]);
+    }
+    // Winter keeps every leaf: leaf fall is geometry, and the simulator's to model, not the
+    // viewer's (row G10). Only the colour moves.
+    assert_eq!(Season::of(15.0).name, "winter");
+    assert_eq!(Season::of(135.0).name, "spring");
+}
+
+/// The sky is a mesh like any other: inward-facing, darker at the top than at the horizon by day,
+/// and carrying a disc of sun only while the sun is up.
+#[test]
+fn the_sky_dome_faces_the_camera_inside_it() {
+    let (rings, segments) = (12usize, 32usize);
+    let ring_verts = (rings + 1) * (segments + 1);
+    let noon = SkyState::of(on_day(SOLSTICE_DAY, 12.0), 42.7);
+    let d = noon.dome(600.0, rings, segments);
+    // The rings, then a fan of sun: one centre and a rim, at the 24 segments the disc is capped to.
+    assert_eq!(d.positions.len(), ring_verts + 26);
+    assert_eq!(d.indices.len(), rings * segments * 6 + 24 * 3);
+    assert_eq!(d.positions.len(), d.normals.len());
+    assert_eq!(d.positions.len(), d.colors.len());
+    for (p, n) in d.positions.iter().zip(&d.normals) {
+        let dot = p[0] * n[0] + p[1] * n[1] + p[2] * n[2];
+        assert!(dot < 0.0, "every normal points back at the centre");
+    }
+    // The disc's centre is where the sun is, and it is brighter than the sky behind it.
+    let centre = d.positions[ring_verts];
+    let s = noon.sun.dir;
+    let along = centre[0] * s[0] + centre[1] * s[1] + centre[2] * s[2];
+    assert!(along > 500.0, "the disc sits in the sun's direction");
+    assert!(
+        d.colors[ring_verts][0] > d.colors[0][0],
+        "brighter than sky"
+    );
+    // Night: no disc, a darker sky, and an ambient level that never reaches zero.
+    let night = SkyState::of(on_day(SOLSTICE_DAY, 0.0), 42.7);
+    let nd = night.dome(600.0, rings, segments);
+    assert_eq!(nd.positions.len(), ring_verts, "no sun to draw");
+    assert!(night.zenith[2] < noon.zenith[2], "night is a darker sky");
+    assert!(night.ambient > 0.0 && night.ambient < noon.ambient);
+    assert!(noon.ambient > 700.0, "noon is at least what V0-V5 lit with");
+    // The one line every scripted run prints says whose each half of this is.
+    let line = noon.line();
+    assert!(line.contains("the hour, the latitude and the hue are the viewer's"));
+    assert!(line.contains("the date is the run's"), "{line}");
+    assert!(SkyState::of(Clock::of(None, 0, 12.0), 42.7)
+        .line()
+        .contains("no run loaded"));
+    // Remeshing hangs on the season step and on nothing else the sun does.
+    assert_eq!(noon.mesh_key(), noon.season.step());
+    assert_eq!(night.mesh_key(), noon.mesh_key(), "an hour is not a season");
+}

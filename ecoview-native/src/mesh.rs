@@ -3,8 +3,26 @@
 //! This module never mentions Bevy. It is the only thing CI gates (V0-spike.md, CI item 7a): a fixed
 //! chunk in, a hashed vertex and index buffer out, on a runner with no GPU.
 
-use crate::voxel::{ChunkPos, VoxelWorld, CS, CS_P3};
+use crate::palette::PALETTE_LEN;
+use crate::sky::AO_LEVELS;
+use crate::voxel::{ChunkPos, VoxelWorld, AIR, CS, CS_P, CS_P3};
 use binary_greedy_meshing::{Face, Mesher, Quad};
+
+/// Which occlusion level each count of solid neighbours above a voxel falls in, indexed by that
+/// count, 0 through 8.
+///
+/// **What "occluded" means here, exactly**: the eight cells in the layer *directly above* the voxel,
+/// and nothing else. Not the coplanar ring -- on flat ground every voxel has eight coplanar
+/// neighbours, so counting those would dim a lawn uniformly and dim nothing relative to anything
+/// else. Not the layer below, which is solid under every ground voxel there is. The layer above is
+/// the one a face looks into, so this darkens exactly the concave places: the foot of a wall, the
+/// inside of a step, and the inside of a crown, where a leaf has leaves over it.
+///
+/// One voxel carries one level for all six of its faces, which is coarser than the per-corner
+/// ambient occlusion a mesher that owned its own merge key could do. The merge key here is the
+/// voxel id (`binary-greedy-meshing` merges on equal ids), so per-corner values would have to
+/// break every merge, and the quad count is already what this costs (DECISIONS.md, V6).
+const OCCLUSION_LEVEL: [u16; 9] = [0, 0, 1, 1, 2, 2, 3, 3, 3];
 
 /// A chunk's mesh in the viewer's own frame: X east, Y up, Z north, metres from the world origin.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -89,6 +107,9 @@ pub fn mesh_chunk(
     s: &mut Scratch,
 ) -> ChunkMesh {
     world.fill_chunk(c, &mut s.voxels);
+    if world.ao {
+        bake_occlusion(&mut s.voxels);
+    }
     let Scratch {
         voxels,
         mesher,
@@ -136,4 +157,54 @@ pub fn mesh_chunk(
         }
     }
     m
+}
+
+/// Rewrites every interior voxel's id to carry its occlusion level: `id + PALETTE_LEN * level`.
+///
+/// The padded buffer is exactly the right shape for this. Every interior voxel's eight neighbours
+/// in the layer above lie inside the pad, including the ones that belong to the chunk next door, so
+/// the level a voxel gets does not depend on which chunk it was meshed in and no seam appears along
+/// a chunk boundary. A one-voxel pad is also the whole reach: this measures contact, not a horizon.
+///
+/// Level 0 leaves the id alone, which is what makes an unoccluded voxel's colour -- and therefore a
+/// flat, open site's whole mesh -- identical with ambient occlusion on and off.
+///
+/// Public so the gate can bake a chunk and read the levels back off it; [`mesh_chunk`] calls it for
+/// every chunk of a world whose `ao` is on.
+pub fn bake_occlusion(buf: &mut [u16]) {
+    const UP: isize = (CS_P * CS_P) as isize;
+    const EAST: isize = CS_P as isize;
+    const NORTH: isize = 1;
+    const RING: [isize; 8] = [
+        UP - EAST - NORTH,
+        UP - EAST,
+        UP - EAST + NORTH,
+        UP - NORTH,
+        UP + NORTH,
+        UP + EAST - NORTH,
+        UP + EAST,
+        UP + EAST + NORTH,
+    ];
+    let block = PALETTE_LEN as u16;
+    for pz in 1..=CS {
+        for px in 1..=CS {
+            for py in 1..=CS {
+                let i = py + px * CS_P + pz * CS_P * CS_P;
+                if buf[i] == AIR {
+                    continue;
+                }
+                let mut solid = 0usize;
+                for o in RING {
+                    // Rewriting as we go is safe: a level never turns a voxel into air, and this
+                    // only ever asks whether a neighbour is air.
+                    if buf[(i as isize + o) as usize] != AIR {
+                        solid += 1;
+                    }
+                }
+                let level = OCCLUSION_LEVEL[solid];
+                debug_assert!((level as usize) < AO_LEVELS);
+                buf[i] += block * level;
+            }
+        }
+    }
 }

@@ -217,9 +217,16 @@ pub fn palette(overlay: Overlay, meta: Option<&RunMeta>) -> Vec<[f32; 4]> {
     out
 }
 
+/// The voxel id under an occlusion level. With ambient occlusion on, a voxel's id is its own plus
+/// [`PALETTE_LEN`] per level of shade (`mesh::bake_occlusion`), so anything that wants to know what
+/// a voxel *is* rather than how dark it is takes this first.
+pub fn base_id(id: u16) -> u16 {
+    id % PALETTE_LEN as u16
+}
+
 /// The legend, for the measurement write-up and for a caller that wants to name an id.
 pub fn id_name(id: u16) -> &'static str {
-    match id {
+    match base_id(id) {
         0 => "air",
         BUILDING => "building",
         TRUNK => "trunk",

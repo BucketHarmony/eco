@@ -101,6 +101,13 @@ pub struct VoxelWorld {
     /// shared**: the two projects have no common code, only the files on disk (CLAUDE.md). A medium
     /// the viewer does not recognise grows things, which is the harmless way to be wrong.
     grows: Vec<bool>,
+    /// Bake ambient occlusion into the voxel ids when this world is meshed (shot V6)?
+    ///
+    /// **Off by default, and the viewer turns it on.** A `VoxelWorld` built by the library alone
+    /// therefore meshes to exactly the bytes V5 produced, which is what lets the five golden hashes
+    /// from V0 through V4 stand unchanged and prove this shot added a layer over them rather than
+    /// moving anything underneath (`mesh::bake_occlusion`).
+    pub ao: bool,
     pub chunks: ChunkPos,
     pub levels: usize,
 }
@@ -160,6 +167,7 @@ impl VoxelWorld {
                 .iter()
                 .map(|m| !matches!(m.as_str(), "concrete" | "asphalt" | "roof" | "water"))
                 .collect(),
+            ao: false,
             chunks,
             levels,
         };
@@ -646,6 +654,20 @@ impl VoxelWorld {
     /// Is a field overlay on?
     pub fn has_overlay(&self) -> bool {
         self.bands.is_some()
+    }
+
+    /// Turns ambient occlusion on or off, and returns the chunks whose mesh is now stale.
+    ///
+    /// Every chunk, or none: occlusion is a property of the whole world's shading, not of one
+    /// column, so there is no cheaper answer than rebuilding. It is a toggle rather than something
+    /// the world is built with because the viewer offers it as a key, and because a shot that wants
+    /// to measure what it costs has to be able to mesh the same world both ways.
+    pub fn set_ao(&mut self, on: bool) -> Vec<ChunkPos> {
+        if self.ao == on {
+            return Vec::new();
+        }
+        self.ao = on;
+        self.all_chunks()
     }
 
     /// Fills the mesher's padded 64^3 buffer for one chunk. The buffer's axes are the mesher's own:

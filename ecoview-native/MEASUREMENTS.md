@@ -126,6 +126,10 @@ not run: at ten runs of four minutes the step overran the job's 45-minute budget
 cancelled, which turned the whole CI run red even though every step in it carries
 `continue-on-error: true`. The budget is now 90 minutes.
 
+(Shot V1: those 237-244 s were an AMD runner. A later Intel one drew the same scene in 136-142 s and
+wrote a different number of bytes, and the whole of that is explained under "The lavapipe drift" below.
+Shot C1 has since cut this step to one screenshot.)
+
 So headless rendering does leave this machine: the same binary that draws at 292 fps on a 4090 draws the
 same picture on a GitHub runner with no GPU at all, in four minutes a frame-set. That is the number to
 weigh if the track ever wants screenshot tests in CI — four minutes per picture, not four seconds.
@@ -186,3 +190,120 @@ rules — all of it named by the shot prompt's build list, none of it optional t
 Cutting 339 lines of it would have meant dropping something the shot asked for; the rest is this file
 and `DECISIONS.md`, which the acceptance list requires. The operator should know the spike cost 1.4×
 its budget.
+
+---
+
+# ecoview-native V1: time, and a number that drifted for two shots
+
+Same machine as above. The run is `ecosim/runs/capitol-s42` — seed 42, 20,000 ticks, a snapshot every
+1,000, so 21 snapshots — laid over the Capitol bundle it was computed on.
+
+| Snapshot | Tick | Trees drawn | `entities.json` |
+|---|---|---|---|
+| 0 | 0 | 79 | 7 KB |
+| 1 | 1,000 | 334 | 30 KB |
+| 11 | 10,000 | 998 | 91 KB |
+| 20 | 20,000 | (all of them) | 380 KB |
+
+## Changing snapshot
+
+The cost of moving one snapshot is reading `entities.json`, replacing every plant voxel in the world
+and remeshing the chunks that changed. `ecoview.stats` reports the last one as `snapshot_ms` and
+`snapshot_chunks`; the HUD prints the same pair.
+
+| Where | Plants before → after | Chunks stale | Measured |
+|---|---|---|---|
+| At startup, `--run` with no `--tick` | bundle's trees → 79 | 162 | **0.44, 0.45, 0.46 ms** |
+| At startup, `--tick 10000` | bundle's trees → 998 | 162 | **1.8 ms** |
+| Scrubbing, snapshot 0 → 1 | 79 → 334 | 150 | **14.27, 14.83, 14.27, 15.55 ms** |
+
+Four runs of the agent loop produced those figures, so the spread inside each row is under 10% and the
+numbers are stable. **The gap between the rows is not.** A scrub to 334 trees costs eight times a
+startup load of 998, and tree count is therefore not what it is made of — the two rows run the same
+`Run::trees_at` and the same `VoxelWorld::set_plants`, differing only in that the startup measurement is
+taken before the first frame and the scrub one inside a running frame. That is where to look, and this
+shot did not look: 14 ms is a thirty-fifth of the 500 ms play rate and a fifth of what the remesh after
+it costs, so nothing the user can feel depends on the answer. It is written down here rather than
+rounded off, because a number nobody writes down is a number nobody corrects — which is the rest of this
+page.
+
+Remeshing 150 stale chunks after a scrub is what actually dominates a snapshot change, and it is the
+same meshing measured in V0: the full Capitol rebuild is 53 ms of 24-thread work for 324 chunks.
+
+## The agent loop, now with a timeline
+
+`agent_loop --run ../ecosim/runs/capitol-s42` does everything V0's did and then drives
+`ecoview.timeline` five times — seek to the last snapshot, seek to the first, step forward one, play,
+pause — and re-reads `ecoview.stats` to prove the world moved.
+
+| | V0 | V1 |
+|---|---|---|
+| Calls | 8 | **14** |
+| Retries | **0** | **0** |
+| Time to the first screenshot | 3.3 s | **2.7 s** (22–23 ms for the call itself) |
+| Screenshot | 1280×800 | 1280×800, 888,441 bytes |
+
+Five more methods' worth of surface and still no retry. The fourth explicit method, `ecoview.timeline`,
+is the decision from V0 applied again: an agent is given one documented name that takes `snapshot`,
+`tick`, `step` or `playing`, rather than a `Timeline` component to discover.
+
+## The lavapipe drift, explained
+
+Shot C1 found that the lavapipe screenshot figures in circulation — 136–142 s and 811,550 bytes each —
+did not match what its own runs measured: 259–267 s and 815,129 bytes, ten times out of ten on b48e7bd,
+and 273 s and 815,129 on the one screenshot it kept. V1's row asked for the answer or an admission that
+there isn't one. **There is an answer, and the picture did not change.**
+
+**First, where the figures were.** Not in this file. V0 measured the 9/10 attempt at 237–244 s and
+815,129 bytes and that is what the CI section above records; the 10/10 confirmation at 136–142 s and
+811,550 bytes was taken after V0's final commit and written only into `overnight/LOG.md` (line 301),
+whose own last sentence says so. `.github/DECISIONS.md` and `.github/workflows/ci.yml` then cited it as
+if it were in MEASUREMENTS.md. So the file was never 1.9× stale about its own measurement — it was
+missing one, and two later readers filled the gap from a log line.
+
+**Then, why the two differ.** The `ecoview-native-shots` artifacts from three CI runs were downloaded
+and their logs read. Bevy prints the runner's CPU in its own `SystemInfo` line:
+
+| Run | Commit | Runner CPU | Per screenshot | PNG bytes | voxelise | mesh |
+|---|---|---|---|---|---|---|
+| 35548275114 | 34cfa2e | Intel Xeon 6973P-C | 136–142 s | **811,550** | 174 ms | 251 ms |
+| 35556941399 | 2a7a0de | AMD EPYC 7763 | 262–272 s | **815,129** | 249 ms | 337 ms |
+| 35562043184 | b48e7bd | AMD EPYC 7763 | 259–267 s | **815,129** | 258 ms | 339 ms |
+
+Everything else is identical across the three: Mesa 25.2.8-0ubuntu0.24.04.2, llvmpipe on LLVM 20.1.2 at
+256 bits, the stress world at 405 chunks with 247 drawn and **363,806 quads**, and — checked
+character by character — the same shell command in the lavapipe step on 34cfa2e and b48e7bd. The PNGs
+are **byte-identical within a CPU type**: md5 `e97cbad9…` on the Intel run across its own ten
+screenshots, `a0dc62c6…` on both AMD runs, on different days. This is C2's runner lottery, which drew
+Intel once and AMD twice.
+
+**And the picture is the same picture.** Differencing the Intel PNG against the AMD one:
+
+```
+pixels 1024000, differing 20014 (1.954%), max channel delta 1, mean delta over differing 1.00
+```
+
+Two per cent of the pixels are off by exactly one in one channel, and none by more than that. llvmpipe
+JIT-compiles its shaders for the host's vector width, so the two CPUs round the last bit of a few
+interpolated values differently; PNG's row filters and deflate turn 20,014 ±1 changes into a 3,579-byte
+size change, because a filtered row that was previously a repeat no longer is. **The file size is a
+function of the runner's CPU, not of the code.** Nothing about what is drawn changed between 34cfa2e
+and b48e7bd, and a size change of that scale is not evidence that anything did.
+
+The 1.93× time ratio has the same cause and is consistent with the rest: the pure-Rust meshing on the
+same two runners is 251 ms against 337–339 ms, a ratio of **1.34×**, which is C2's measured 1.36×
+machine spread. Rasterisation stretches that to 1.93× because lavapipe is entirely CPU vector work and
+has nothing else to be limited by.
+
+**What to take from it.** PNG size is not a signature for this measurement and should never have been
+read as one; per-screenshot time is only comparable between runs that drew the same CPU. Anything
+watching those screenshots for change has to compare pixels — and to be worth anything, has to allow a
+delta of 1.
+
+One more byte count is coming, and this one *is* the code: V1 draws a HUD over every screenshot, so the
+stress shot the smoke check takes is a different picture from V0's on purpose — 827,801 bytes on this
+machine, and 827,146 in the build before it, whose only difference was that the empty timeline bar was
+still drawn. A dark strip 1,232 px wide was worth 655 bytes; suppressing it exposes noisier terrain
+underneath and the file gets *bigger*. Whatever lavapipe writes next will match neither 811,550 nor
+815,129, and this time the reason is in the diff.
+

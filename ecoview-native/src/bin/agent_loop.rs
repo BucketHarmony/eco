@@ -4,7 +4,7 @@
 //! and read the PNG back -- with no human and no MCP server installed on this machine. Every call,
 //! every retry and every failure is printed, which is the measurement.
 //!
-//! `agent_loop [--exe PATH] [--world DIR|--stress] [--port N] [--out PATH]`
+//! `agent_loop [--exe PATH] [--world DIR|--stress] [--run DIR] [--port N] [--out PATH]`
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -29,7 +29,11 @@ impl Loop {
             let t = Instant::now();
             match brp::call(self.port, method, params.clone()) {
                 Ok(v) => {
-                    println!("  {method} ok in {:.0} ms{}", t.elapsed().as_secs_f64() * 1000.0, if attempt > 0 { " (after a retry)" } else { "" });
+                    println!(
+                        "  {method} ok in {:.0} ms{}",
+                        t.elapsed().as_secs_f64() * 1000.0,
+                        if attempt > 0 { " (after a retry)" } else { "" }
+                    );
                     return Some(v);
                 }
                 Err(e) => {
@@ -76,13 +80,22 @@ fn main() {
     } else {
         cmd.args(["--world", &arg("--world", ecoview_native::CAPITOL)]);
     }
+    let run = arg("--run", "");
+    if !run.is_empty() {
+        cmd.args(["--run", &run]);
+    }
     cmd.args(["--port", &port.to_string()])
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    let mut child: Child = cmd.spawn().unwrap_or_else(|e| panic!("cannot launch {exe}: {e}"));
+    let mut child: Child = cmd
+        .spawn()
+        .unwrap_or_else(|e| panic!("cannot launch {exe}: {e}"));
 
     let ready = brp::wait_ready(port, 120);
-    println!("launch -> BRP ready: {ready:?} after {:.1} s", started.elapsed().as_secs_f64());
+    println!(
+        "launch -> BRP ready: {ready:?} after {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
     let mut l = Loop {
         port,
         calls: 0,
@@ -90,7 +103,8 @@ fn main() {
         failures: Vec::new(),
     };
     if ready.is_err() {
-        l.failures.push("the viewer never answered on the BRP port".into());
+        l.failures
+            .push("the viewer never answered on the BRP port".into());
     }
 
     let stats = l.call("ecoview.stats", json!({}));
@@ -99,7 +113,10 @@ fn main() {
         .as_ref()
         .and_then(|s| s["cell_m"].as_f64())
         .unwrap_or(0.5) as f32;
-    let width = stats.as_ref().and_then(|s| s["width"].as_u64()).unwrap_or(512) as f32;
+    let width = stats
+        .as_ref()
+        .and_then(|s| s["width"].as_u64())
+        .unwrap_or(512) as f32;
     let size = width * cell;
 
     l.call(
@@ -111,7 +128,10 @@ fn main() {
     );
 
     let (cx, cy) = ((width / 2.0) as u64, (width / 2.0) as u64);
-    for (i, action) in ["RaiseGround", "SetSurface", "RaiseBuilding"].iter().enumerate() {
+    for (i, action) in ["RaiseGround", "SetSurface", "RaiseBuilding"]
+        .iter()
+        .enumerate()
+    {
         l.call(
             "ecoview.edit",
             json!({"x": cx + i as u64, "y": cy, "action": action, "medium": 6}),
@@ -119,6 +139,28 @@ fn main() {
     }
     let after = l.call("ecoview.stats", json!({}));
     println!("  after three edits: {}", after.clone().unwrap_or_default());
+
+    // Shot V1: the timeline gets the same treatment as the three V0 methods -- one documented method
+    // an agent can drive without discovering a component schema. Only exercised when a run is loaded;
+    // `ecoview.timeline` answers with an error when there is none, which would count as a failure.
+    let snapshots = after
+        .as_ref()
+        .and_then(|s| s["run"]["snapshots"].as_u64())
+        .unwrap_or(0);
+    if snapshots > 1 {
+        for params in [
+            json!({"snapshot": snapshots - 1}),
+            json!({"snapshot": 0}),
+            json!({"step": 1}),
+            json!({"playing": true}),
+            json!({"playing": false}),
+        ] {
+            let at = l.call("ecoview.timeline", params.clone());
+            println!("  timeline {params} -> {}", at.unwrap_or_default());
+        }
+        let seeked = l.call("ecoview.stats", json!({}));
+        println!("  after scrubbing: {}", seeked.unwrap_or_default());
+    }
 
     let shot = Instant::now();
     l.call(
@@ -144,7 +186,10 @@ fn main() {
 
     println!("---");
     println!("calls: {}, retries: {}", l.calls, l.retries);
-    println!("time to first screenshot: {:.1} s total, {shot_ms:.0} ms for the call", started.elapsed().as_secs_f64());
+    println!(
+        "time to first screenshot: {:.1} s total, {shot_ms:.0} ms for the call",
+        started.elapsed().as_secs_f64()
+    );
     match png_size(&png) {
         Some((w, h)) => println!(
             "screenshot: {} bytes, {w}x{h}, at {}",

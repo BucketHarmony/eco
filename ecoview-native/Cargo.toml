@@ -25,9 +25,16 @@ dynamic_linking = ["bevy/dynamic_linking"]
 binary-greedy-meshing = "=0.5.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+# `bevy_ui`, `bevy_ui_render`, `bevy_text` and `default_font` are shot V1's: the timeline has to be
+# on the screen to be scrubbed and the fly speed has to be on the screen to be visible. `default_font`
+# embeds the font, so there is no asset to ship and nothing to find at runtime on a CI runner.
 bevy = { version = "=0.19.1", optional = true, default-features = false, features = [
     "3d",
     "bevy_remote",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_ui_render",
+    "default_font",
     "png",
 ] }
 bevy_brp_extras = { version = "=0.22.6", optional = true, default-features = false }

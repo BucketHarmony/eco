@@ -83,3 +83,95 @@ that the agent loop reported failure while the viewer was answering every call c
 - **Three explicit BRP methods — `ecoview.stats`, `ecoview.camera`, `ecoview.edit` — instead of driving
   component reflection.** An agent that must discover a component schema retries; an agent given three
   documented method names does not. The agent loop's zero retries is that decision's measurement.
+
+---
+
+# Shot V1: the run directory, and time
+
+## V1 only version 4
+
+`Run::load` rejects any `format_version` but 4, by name, rather than reading what it recognises.
+Version 4 is the first that records the ground grid in `meta.json` (CLAUDE.md, "The run directory
+contract"), and without it there is no way to tell whether a run and a bundle describe the same site.
+That is the one thing here that must not be guessed at: a run laid over the wrong ground puts trees in
+the air with nothing on screen to say so. `Run::check_against` compares the ground grid, the cell size,
+the ecology grid's extent in metres and the world's name, and refuses with a sentence naming both sides.
+
+The refusal is a refusal, not a warning that draws anyway: `--run` with a run that does not fit prints
+why and the viewer carries on showing the bundle alone. A picture that quietly lies is worse than no
+picture.
+
+## V1 whose trees these are
+
+A run's vegetation **replaces** the bundle's, rather than adding to it. The bundle's trees are the site
+as it was surveyed; the run's are the same site as the simulator grew it. Drawing both stands two trees
+in every spot and reads as neither. Bundle shrubs go with them for the same reason — the simulator has
+shrubs of its own as a patch field, and V1 does not draw patch fields, so a snapshot's ground is bare
+where the bundle's was planted. That is honest about what the simulator actually decided.
+
+## V1 the simulator owns the tree, the viewer owns the metre
+
+`entities.json` gives a tree a `stage` and an `age` and nothing dimensional, because ecology happens on
+a 1 m grid where a tree is one to three voxels tall. So `Stage::shape` turns sapling, young and mature
+into a height, a crown base and a crown radius **in metres** — the same three shapes `ecoview` draws
+(`ecoview/src/entities.ts`, `canopyVoxels`), read off its 1 m voxels and written as lengths. The
+viewer's own lattice then draws them at whatever the bundle's cell size is. No height is invented that
+the simulator never computed, and the viewer does not push the simulator to 0.25 m to get one
+(`overnight/DIRECTION-native-viewer.md`). Shot V3 replaces all of this with branching geometry.
+
+A tree's `z` is **not** used. That is the ecology grid's surface level in whole metres, and the terrain
+under it is drawn on the bundle's finer lattice, so a tree placed at the ecology level floats or sinks
+by up to a metre against ground the user can see. The base comes from the viewer's own column, exactly
+as it already does for bundle trees.
+
+An unknown `stage` is **counted and not drawn**. `ecoview.stats` and the HUD report the count. A stage
+the simulator adds should appear as a number that is not zero, not as a guess at what it might look
+like.
+
+## V1 P, not space
+
+Play/pause is `P`. Space already flies the camera up and takes precedence — this is a flying viewer
+first. The rest of the timeline keys are `,`/`.` to step a snapshot, `Home`/`End` for the ends, `[`/`]`
+for the play rate, and the bar at the bottom of the screen is draggable anywhere along its width. With
+no run loaded there is no bar at all: an empty track offers a scrub that would do nothing, so the HUD
+says "no run loaded" in words instead.
+
+## V1 the wheel was backwards for a measurable reason
+
+V0's scroll wheel made the camera slower when pushed away from you, which is the wrong way round. The
+cause is not taste: `src/main.rs` copied `ecoview/src/edit.ts:348` verbatim, and a DOM wheel event's
+`deltaY` is positive scrolling **towards** the user while Bevy's `AccumulatedMouseScroll.delta.y` is
+positive scrolling **away**. The same expression, on the other engine, inverts. Fixed by flipping the
+comparison, and the sign convention is written beside it so the next port does not re-import it.
+
+## V1 the HUD needs `IsDefaultUiCamera` to exist headless
+
+Not a preference, a finding, recorded because it costs an hour to rediscover. `bevy_ui`'s
+`DefaultUiCamera::get` only falls back to a camera whose `RenderTarget` is a **window**. The headless
+camera renders to an image, so no root node is ever assigned a camera, and the entire UI is laid out
+nowhere — no error, no warning, just a screenshot with no HUD on it. Marking the camera
+`IsDefaultUiCamera` fixes it in both modes. The other Bevy 0.19 surprise beside it: `font_size` is now
+`FontSize::Px(..)`, not an `f32`.
+
+And one in our own code, the same shape as V0's chunked-transfer bug: `--headless` exits once the
+screenshot path exists, so a **stale** PNG from a previous run makes it exit before the new capture is
+sent, and the run ends with `Failed to send screenshot: sending on a closed channel`. The path is now
+deleted at startup. Waiting on a path is only a signal if the path starts empty.
+
+## V1 the new tests live in `mesh_golden.rs`
+
+The six run-directory and `set_plants` tests are appended to `tests/mesh_golden.rs` rather than given a
+file of their own, because the CI gate runs exactly one target —
+`cargo test --release --no-default-features --test mesh_golden` — and a second file means editing
+`.github/workflows/ci.yml`, which belongs to a `ci` row and not to a viewer shot. The file is still
+engine-free: all eleven tests compile with `--no-default-features` and none of them touches a GPU.
+
+## V1 three clippy findings left alone on purpose
+
+`cargo clippy --release --all-targets -- -D warnings` reports three, all of them in `src/bundle.rs` and
+all of them older than this shot: a `chunks_exact` suggestion in `read_f32` and two `approx_constant`
+hits on the `6.28` in `Bundle::stress`. The TAU ones are not typos to fix — `6.28` is the literal that
+generated the stress world every measurement in `MEASUREMENTS.md` was taken on, and replacing it with
+`TAU` changes the terrain, the mesh, the triangle counts and the bytes of the lavapipe screenshots. A
+shot that was asked for a timeline does not get to move the baseline everything else is compared
+against. V1 verified it changed neither line.

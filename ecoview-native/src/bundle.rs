@@ -121,10 +121,12 @@ impl Bundle {
     /// rather than hiding (V0-spike.md, correction 4). Deterministic from `seed`.
     pub fn stress(n: usize, cell_m: f32, buildings: usize, seed: u64) -> Bundle {
         let mut rng = Lcg(seed);
-        let media: Vec<String> = ["soil", "lawn", "bed", "mulch", "gravel", "concrete", "asphalt", "roof", "water"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let media: Vec<String> = [
+            "soil", "lawn", "bed", "mulch", "gravel", "concrete", "asphalt", "roof", "water",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let mut ground_h = vec![0.0f32; n * n];
         for y in 0..n {
             for x in 0..n {
@@ -183,7 +185,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 11
     }
 }

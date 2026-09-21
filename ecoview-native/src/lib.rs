@@ -12,10 +12,12 @@ pub mod brp;
 pub mod bundle;
 pub mod mesh;
 pub mod palette;
+pub mod run;
 pub mod voxel;
 
 pub use bundle::Bundle;
 pub use mesh::{mesh_chunk, ChunkMesh, Scratch};
+pub use run::Run;
 pub use voxel::{ChunkPos, EditAction, VoxelWorld};
 
 /// The committed reference bundle, relative to the repo root.

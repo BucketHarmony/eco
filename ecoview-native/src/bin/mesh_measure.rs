@@ -80,9 +80,18 @@ fn main() {
     remesh.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     let median = remesh[remesh.len() / 2];
 
-    println!("world:            {} {}x{} cells at {} m", bundle.name, bundle.width, bundle.depth, bundle.ground_cell_m);
-    println!("chunks:           {} total, {drawn} with geometry, {tris} triangles", chunks.len());
-    println!("bounds:           x {:.1}..{:.1}, y {:.1}..{:.1}, z {:.1}..{:.1} m", lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+    println!(
+        "world:            {} {}x{} cells at {} m",
+        bundle.name, bundle.width, bundle.depth, bundle.ground_cell_m
+    );
+    println!(
+        "chunks:           {} total, {drawn} with geometry, {tris} triangles",
+        chunks.len()
+    );
+    println!(
+        "bounds:           x {:.1}..{:.1}, y {:.1}..{:.1}, z {:.1}..{:.1} m",
+        lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]
+    );
     println!("read:             {read_ms:.0} ms");
     println!("voxelise:         {voxelise_ms:.0} ms");
     println!("mesh 1 thread:    {serial_ms:.0} ms");

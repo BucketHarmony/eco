@@ -5,7 +5,7 @@
 //! world would be 16.7 M voxels; the columns are 0.26 M. An edit changes a column and the chunks that
 //! read it are re-filled and re-meshed.
 
-use crate::bundle::Bundle;
+use crate::bundle::{Bundle, Shrub, Tree};
 
 /// The mesher's chunk size. 62 voxels padded to 64 is the layout `binary-greedy-meshing` requires.
 pub const CS: usize = 62;
@@ -109,7 +109,15 @@ impl VoxelWorld {
             chunks,
             levels,
         };
-        for t in &b.trees {
+        w.voxelise_plants(&b.trees, &b.shrubs);
+        w
+    }
+
+    /// Turns trees and shrubs into plant voxels, into whatever the buckets already hold.
+    fn voxelise_plants(&mut self, trees: &[Tree], shrubs: &[Shrub]) {
+        let w = self;
+        let cell_m = w.cell_m;
+        for t in trees {
             let cx = (t.x / cell_m) as i32;
             let cy = (t.y / cell_m) as i32;
             let base = w.ground_level(cx, cy) + 1;
@@ -119,23 +127,27 @@ impl VoxelWorld {
             for z in base..=top {
                 w.set_plant(cx, cy, z, TRUNK);
             }
-            // The same trunk-and-blob solid `ecoview` draws: an ellipsoid from the crown base to the tip.
-            let mid = (crown_lo + top) as f32 * 0.5;
-            let half = ((top - crown_lo) as f32 * 0.5).max(1.0);
-            let ri = r.ceil() as i32;
-            for z in crown_lo..=top {
-                for dy in -ri..=ri {
-                    for dx in -ri..=ri {
-                        let fz = (z as f32 - mid) / half;
-                        let fr = (((dx * dx + dy * dy) as f32).sqrt()) / r;
-                        if fr * fr + fz * fz <= 1.0 {
-                            w.set_plant(cx + dx, cy + dy, z, CANOPY);
+            // The same trunk-and-blob solid `ecoview` draws: an ellipsoid from the crown base to the
+            // tip. A zero crown radius means no crown at all, which is how a sapling from a run
+            // directory is a bare trunk (run.rs, `Stage::shape`).
+            if t.crown_radius > 0.0 {
+                let mid = (crown_lo + top) as f32 * 0.5;
+                let half = ((top - crown_lo) as f32 * 0.5).max(1.0);
+                let ri = r.ceil() as i32;
+                for z in crown_lo..=top {
+                    for dy in -ri..=ri {
+                        for dx in -ri..=ri {
+                            let fz = (z as f32 - mid) / half;
+                            let fr = (((dx * dx + dy * dy) as f32).sqrt()) / r;
+                            if fr * fr + fz * fz <= 1.0 {
+                                w.set_plant(cx + dx, cy + dy, z, CANOPY);
+                            }
                         }
                     }
                 }
             }
         }
-        for s in &b.shrubs {
+        for s in shrubs {
             let cx = (s.x / cell_m) as i32;
             let cy = (s.y / cell_m) as i32;
             let base = w.ground_level(cx, cy) + 1;
@@ -160,7 +172,64 @@ impl VoxelWorld {
             bucket.sort_unstable();
             bucket.dedup();
         }
-        w
+    }
+
+    /// Replaces every plant voxel in the world with the ones these trees and shrubs make, and returns
+    /// the chunks whose mesh is now stale.
+    ///
+    /// This is what a snapshot change costs: the ground is untouched -- a run never moves it -- so
+    /// only the buckets that actually differ, and the neighbours that see them through the one-voxel
+    /// pad, are remeshed. A site whose trees all sit near the ground therefore remeshes the ground
+    /// chunk layer and nothing above it.
+    pub fn set_plants(&mut self, trees: &[Tree], shrubs: &[Shrub]) -> Vec<ChunkPos> {
+        let empty = vec![Vec::new(); self.chunk_count()];
+        let before = std::mem::replace(&mut self.plants, empty);
+        self.voxelise_plants(trees, shrubs);
+        let mut stale = vec![false; self.chunk_count()];
+        let changed: Vec<usize> = before
+            .iter()
+            .zip(self.plants.iter())
+            .enumerate()
+            .filter(|(_, (was, is))| was != is)
+            .map(|(i, _)| i)
+            .collect();
+        for i in changed {
+            // A bucket's voxels reach one cell into each of the 26 neighbouring chunks, so their
+            // meshes are stale too (`fill_chunk` reads the neighbours' buckets into its pad).
+            let c = self.chunk_pos(i);
+            for dz in -1..=1i32 {
+                for dy in -1..=1i32 {
+                    for dx in -1..=1i32 {
+                        let (nx, ny, nz) = (c.x as i32 + dx, c.y as i32 + dy, c.z as i32 + dz);
+                        if nx < 0 || ny < 0 || nz < 0 {
+                            continue;
+                        }
+                        let n = ChunkPos {
+                            x: nx as usize,
+                            y: ny as usize,
+                            z: nz as usize,
+                        };
+                        if n.x < self.chunks.x && n.y < self.chunks.y && n.z < self.chunks.z {
+                            stale[self.chunk_index(n)] = true;
+                        }
+                    }
+                }
+            }
+        }
+        (0..self.chunk_count())
+            .filter(|&i| stale[i])
+            .map(|i| self.chunk_pos(i))
+            .collect()
+    }
+
+    /// The inverse of [`VoxelWorld::chunk_index`].
+    #[inline]
+    pub fn chunk_pos(&self, i: usize) -> ChunkPos {
+        ChunkPos {
+            x: i % self.chunks.x,
+            y: (i / self.chunks.x) % self.chunks.y,
+            z: i / (self.chunks.x * self.chunks.y),
+        }
     }
 
     fn set_plant(&mut self, x: i32, y: i32, z: i32, id: u16) {
@@ -208,7 +277,10 @@ impl VoxelWorld {
         if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.depth {
             return -1;
         }
-        level_of(self.ground_h[x as usize + self.width * y as usize], self.cell_m)
+        level_of(
+            self.ground_h[x as usize + self.width * y as usize],
+            self.cell_m,
+        )
     }
 
     /// The voxel at a world lattice position; air outside the world.
@@ -335,7 +407,10 @@ impl VoxelWorld {
     fn column_span(&self, i: usize) -> (i32, i32) {
         let g = level_of(self.ground_h[i], self.cell_m);
         if self.building_h[i] > 0.0 {
-            (g, level_of(self.ground_h[i] + self.building_h[i], self.cell_m).max(g))
+            (
+                g,
+                level_of(self.ground_h[i] + self.building_h[i], self.cell_m).max(g),
+            )
         } else {
             (g, g)
         }

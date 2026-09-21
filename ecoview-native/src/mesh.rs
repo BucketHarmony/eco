@@ -129,14 +129,8 @@ pub fn mesh_chunk(
                 m.normals.push(normal);
                 m.colors.push(color);
             }
-            m.indices.extend_from_slice(&[
-                base + 2,
-                base,
-                base + 1,
-                base + 1,
-                base + 3,
-                base + 2,
-            ]);
+            m.indices
+                .extend_from_slice(&[base + 2, base, base + 1, base + 1, base + 3, base + 2]);
         }
     }
     m

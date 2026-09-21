@@ -12,7 +12,11 @@ use std::time::Duration;
 pub const PORT: u16 = 15702;
 
 /// One JSON-RPC call. Returns the `result` member, or the error as text.
-pub fn call(port: u16, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+pub fn call(
+    port: u16,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -27,7 +31,8 @@ pub fn call(port: u16, method: &str, params: serde_json::Value) -> Result<serde_
     );
     let mut s = TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
     s.set_read_timeout(Some(Duration::from_secs(60))).ok();
-    s.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    s.write_all(req.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
     let mut raw = Vec::new();
     s.read_to_end(&mut raw).map_err(|e| format!("read: {e}"))?;
     let text = String::from_utf8_lossy(&raw);
@@ -37,7 +42,10 @@ pub fn call(port: u16, method: &str, params: serde_json::Value) -> Result<serde_
     // `bevy_remote`'s HTTP transport answers with chunked transfer encoding, so the body arrives as
     // hex length lines around the JSON. Undoing that here is what the first run of the agent loop
     // needed: every call succeeded on the server and every reply failed to parse (MEASUREMENTS.md).
-    let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    let body = if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         dechunk(body)?
     } else {
         body.to_string()

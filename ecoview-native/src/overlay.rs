@@ -226,6 +226,11 @@ pub struct Fields {
     pub burning: Vec<u32>,
     pub grazers: Vec<u32>,
     pub burnt: Vec<bool>,
+    /// The fraction of each patch under grass and under shrub, as the simulator clamps them. No
+    /// overlay ramps these -- shot V4 reads them to scatter ground cover ([`crate::cover`]) -- but
+    /// they come out of the same file on the same grid, so they are read on the same pass.
+    pub grass: Vec<f32>,
+    pub shrub: Vec<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +238,12 @@ struct PatchJson {
     temperature: f32,
     #[serde(default)]
     burning_ticks_left: u32,
+    /// Absent in a run whose patches predate these fields; an absent cover is no cover, which draws
+    /// bare ground rather than refusing to open the run.
+    #[serde(default)]
+    grass: f32,
+    #[serde(default)]
+    shrub: f32,
 }
 
 /// Animals move continuously, so their `x` and `y` are floats in the file; the column one stands in
@@ -295,6 +306,8 @@ impl Run {
         }
         let temperature = patches.iter().map(|p| p.temperature).collect();
         let burning = patches.iter().map(|p| p.burning_ticks_left).collect();
+        let grass = patches.iter().map(|p| p.grass).collect();
+        let shrub = patches.iter().map(|p| p.shrub).collect();
 
         let mut grazers = vec![0u32; d.patch_count()];
         let raw = std::fs::read_to_string(dir.join("entities.json"))?;
@@ -328,6 +341,8 @@ impl Run {
             burning,
             grazers,
             burnt,
+            grass,
+            shrub,
         })
     }
 }

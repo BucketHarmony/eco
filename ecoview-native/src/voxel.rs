@@ -6,6 +6,7 @@
 //! read it are re-filled and re-meshed.
 
 use crate::bundle::{Bundle, Shrub};
+use crate::cover::{CellPlant, Cover, SHRUB_HEIGHT_M};
 use crate::palette::BAND_BASE;
 use crate::tree::TreeForm;
 use crate::ECO_CELL_M;
@@ -18,13 +19,24 @@ pub const CS_P: usize = CS + 2;
 pub const CS_P3: usize = CS_P * CS_P * CS_P;
 
 /// Voxel ids. 0 is air. 1..=9 are the scene contract's media, in `bundle.media` order, plus one.
+///
+/// The plant ids from `TRUNK` up are in **precedence order**: where two plants want the same voxel
+/// the lower id takes it, because `fill_chunk` writes the first of a bucket's sorted entries and the
+/// buckets sort on `(x, z, y, id)`. So wood shows through leaves, leaves through a vine, and a vine
+/// through the ground cover it is rooted in.
 pub const AIR: u16 = 0;
 pub const SOIL: u16 = 1;
 pub const BUILDING: u16 = 10;
 pub const TRUNK: u16 = 11;
 pub const CANOPY: u16 = 12;
+/// A climber on a wall. Expression, not simulation: see [`crate::cover`].
+pub const VINE: u16 = 13;
+/// Ground cover, drawn as fine voxel texture rather than as entities: the simulator has neither a
+/// shrub nor a grass entity, only a fraction per 8 m patch.
+pub const SHRUB: u16 = 14;
+pub const GRASS: u16 = 15;
 /// One past the last id, for palette sizing.
-pub const ID_COUNT: usize = 13;
+pub const ID_COUNT: usize = 16;
 
 /// Quantise a height to a lattice level, the way `ecoview` does at draw time
 /// (ecoview/DECISIONS.md, "E3 block world"): the data stays continuous, only the display is a lattice.
@@ -82,6 +94,13 @@ pub struct VoxelWorld {
     /// (palette.rs, `BANDS`). The bands are resampled from the run's 1 m ecology columns onto the
     /// bundle's finer ground grid once, when the overlay or the snapshot changes.
     bands: Option<Vec<u8>>,
+    /// Can ground cover root in each medium code? Indexed by `medium`, not by voxel id.
+    ///
+    /// This is the simulator's own `Medium::is_sealed` (`ecosim/src/bundle.rs`) plus open water,
+    /// matched on the name the bundle publishes rather than on a code, and **copied rather than
+    /// shared**: the two projects have no common code, only the files on disk (CLAUDE.md). A medium
+    /// the viewer does not recognise grows things, which is the harmless way to be wrong.
+    grows: Vec<bool>,
     pub chunks: ChunkPos,
     pub levels: usize,
 }
@@ -136,11 +155,16 @@ impl VoxelWorld {
             building_h: b.building_h.clone(),
             plants: vec![Vec::new(); chunks.x * chunks.y * chunks.z],
             bands: None,
+            grows: b
+                .media
+                .iter()
+                .map(|m| !matches!(m.as_str(), "concrete" | "asphalt" | "roof" | "water"))
+                .collect(),
             chunks,
             levels,
         };
         let trees: Vec<TreeForm> = b.trees.iter().map(TreeForm::measured).collect();
-        w.voxelise_plants(&trees, &b.shrubs);
+        w.voxelise_plants(&trees, &b.shrubs, None);
         w
     }
 
@@ -152,7 +176,10 @@ impl VoxelWorld {
     /// solid clusters at the branch tips. The silhouette is unchanged -- the envelope is still the
     /// allometry's -- so what the viewer says about a tree's size is still exactly what the
     /// simulator's own age-to-height curve says.
-    fn voxelise_plants(&mut self, trees: &[TreeForm], shrubs: &[Shrub]) {
+    fn voxelise_plants(&mut self, trees: &[TreeForm], shrubs: &[Shrub], cover: Option<&Cover>) {
+        if let Some(c) = cover {
+            self.voxelise_cover(c);
+        }
         let w = self;
         let cell_m = w.cell_m;
         for t in trees {
@@ -207,6 +234,93 @@ impl VoxelWorld {
         }
     }
 
+    /// Draws one snapshot's ground cover and its vines, cell by cell over the whole ground grid.
+    ///
+    /// **This is expression, not ecology** (`overnight/DIRECTION-native-viewer.md`). The simulator
+    /// owns how much grass and shrub a patch has and how wet and how shaded its columns are; this
+    /// decides only which of the patch's ground cells show it and how far up a wall a climber goes.
+    /// Nothing here competes, accumulates or feeds back, and no vine is an entity in any run.
+    ///
+    /// Both are gated on the surface medium: a cell of asphalt or roof or open water grows nothing,
+    /// so paving a lawn in the viewer strips its blades and the vines on the wall beside it. That
+    /// gate is the only place the viewer decides *whether* a plant is there rather than where.
+    ///
+    /// Sweeping every ground cell is O(width x depth) -- 0.26 M on the Capitol -- which is the same
+    /// order as the fill that follows it, so the loop is left plain rather than restricted to the
+    /// patches with cover in them.
+    fn voxelise_cover(&mut self, c: &Cover) {
+        if !c.ground && !c.vines {
+            return;
+        }
+        let cell_m = self.cell_m;
+        let shrub_top = level_of(SHRUB_HEIGHT_M, cell_m).max(0);
+        for gy in 0..self.depth {
+            let ey = self.to_col(gy, c.dims.y);
+            for gx in 0..self.width {
+                let i = gx + self.width * gy;
+                if self.building_h[i] > 0.0 || !self.grows[self.medium[i] as usize] {
+                    continue;
+                }
+                let ex = self.to_col(gx, c.dims.x);
+                let base = level_of(self.ground_h[i], cell_m) + 1;
+                let (x, y) = (gx as i32, gy as i32);
+                if c.vines {
+                    // A vine is rooted in this open cell and climbs whatever wall it touches, so one
+                    // cell wedged between two buildings grows the same height on both: the drivers
+                    // are the ground's, and the ground is what the plant is standing in.
+                    let wall = self.tallest_wall(gx, gy);
+                    if wall >= base {
+                        let top = (base + c.vine_levels(gx, gy, ex, ey, cell_m) - 1).min(wall);
+                        for z in base..=top {
+                            self.set_plant(x, y, z, VINE);
+                        }
+                    }
+                }
+                if !c.ground {
+                    continue;
+                }
+                match c.cell(gx, gy, ex, ey) {
+                    Some(CellPlant::Grass) => self.set_plant(x, y, base, GRASS),
+                    Some(CellPlant::Shrub) => {
+                        for z in base..=base + shrub_top {
+                            self.set_plant(x, y, z, SHRUB);
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    /// The top level of the tallest building in the four cells orthogonally adjacent to this one,
+    /// or `i32::MIN` if none of them has one. A vine climbs the outside of a wall, in the open
+    /// column beside it, because the wall's own column is solid and a plant voxel inside it would
+    /// never be drawn.
+    fn tallest_wall(&self, gx: usize, gy: usize) -> i32 {
+        let mut top = i32::MIN;
+        for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+            let (nx, ny) = (gx as i32 + dx, gy as i32 + dy);
+            if nx < 0 || ny < 0 || nx as usize >= self.width || ny as usize >= self.depth {
+                continue;
+            }
+            let j = nx as usize + self.width * ny as usize;
+            if self.building_h[j] > 0.0 {
+                top = top.max(level_of(self.ground_h[j] + self.building_h[j], self.cell_m));
+            }
+        }
+        top
+    }
+
+    /// The ecology column a ground cell's centre falls in, clamped to the field's own grid.
+    ///
+    /// The one place the viewer crosses between the bundle's ground cells and the simulator's 1 m
+    /// columns. Both the overlays and the cover go through it, so neither can claim a resolution
+    /// the simulator does not have.
+    #[inline]
+    fn to_col(&self, g: usize, n: usize) -> usize {
+        ((((g as f32 + 0.5) * self.cell_m) / ECO_CELL_M) as usize).min(n.saturating_sub(1))
+    }
+
     /// Replaces every plant voxel in the world with the ones these trees and shrubs make, and returns
     /// the chunks whose mesh is now stale.
     ///
@@ -215,9 +329,24 @@ impl VoxelWorld {
     /// pad, are remeshed. A site whose trees all sit near the ground therefore remeshes the ground
     /// chunk layer and nothing above it.
     pub fn set_plants(&mut self, trees: &[TreeForm], shrubs: &[Shrub]) -> Vec<ChunkPos> {
+        self.set_scene(trees, shrubs, None)
+    }
+
+    /// The same, with one snapshot's ground cover and vines drawn alongside the trees.
+    ///
+    /// Cover shares the plant buckets rather than getting its own, so a snapshot change diffs once
+    /// and a cell that holds both a vine and a blade of grass resolves by id in `fill_chunk`. The
+    /// cost is that toggling the cover re-voxelises the trees too; MEASUREMENTS.md, V4 has what that
+    /// is worth on the Capitol at tick 20000.
+    pub fn set_scene(
+        &mut self,
+        trees: &[TreeForm],
+        shrubs: &[Shrub],
+        cover: Option<&Cover>,
+    ) -> Vec<ChunkPos> {
         let empty = vec![Vec::new(); self.chunk_count()];
         let before = std::mem::replace(&mut self.plants, empty);
-        self.voxelise_plants(trees, shrubs);
+        self.voxelise_plants(trees, shrubs, cover);
         let mut stale = vec![false; self.chunk_count()];
         let changed: Vec<usize> = before
             .iter()
@@ -291,6 +420,24 @@ impl VoxelWorld {
             }
         }
         (wood, leaves)
+    }
+
+    /// How many voxels are grass, shrub and vine. Reported beside every picture that shows them,
+    /// because a count of blades is the honest way to say that the blades are a texture: the
+    /// simulator counts no grass at all, only a fraction per patch.
+    pub fn cover_counts(&self) -> (usize, usize, usize) {
+        let (mut grass, mut shrub, mut vine) = (0, 0, 0);
+        for bucket in &self.plants {
+            for &(_, _, _, id) in bucket {
+                match id {
+                    GRASS => grass += 1,
+                    SHRUB => shrub += 1,
+                    VINE => vine += 1,
+                    _ => {}
+                }
+            }
+        }
+        (grass, shrub, vine)
     }
 
     /// The inverse of [`VoxelWorld::chunk_index`].
@@ -435,13 +582,10 @@ impl VoxelWorld {
     pub fn set_overlay(&mut self, field: Option<&ColumnBands>) -> Vec<ChunkPos> {
         let next: Option<Vec<u8>> = field.map(|f| {
             let mut v = vec![0u8; self.width * self.depth];
-            let to_col = |g: usize, n: usize| {
-                ((((g as f32 + 0.5) * self.cell_m) / ECO_CELL_M) as usize).min(n.saturating_sub(1))
-            };
             for gy in 0..self.depth {
-                let ey = to_col(gy, f.y);
+                let ey = self.to_col(gy, f.y);
                 for gx in 0..self.width {
-                    let ex = to_col(gx, f.x);
+                    let ex = self.to_col(gx, f.x);
                     v[gx + self.width * gy] = f.bands.get(ex + f.x * ey).copied().unwrap_or(0);
                 }
             }

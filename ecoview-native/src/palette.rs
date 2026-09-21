@@ -14,7 +14,7 @@
 //! "V2: what meta.json owns and what it does not").
 
 use crate::run::RunMeta;
-use crate::voxel::{BUILDING, CANOPY, ID_COUNT, TRUNK};
+use crate::voxel::{BUILDING, CANOPY, GRASS, ID_COUNT, SHRUB, TRUNK, VINE};
 
 /// How many steps an overlay ramp is drawn in.
 ///
@@ -43,7 +43,19 @@ const HEX: [&str; ID_COUNT] = [
     "#c6c6cb", // building volume (ecoview BUILDING_COLOR)
     "#6b4a2b", // trunk, replaced by meta.json's tree species colour when a run is loaded
     "#3f7a2e", // canopy, replaced by meta.json's `canopy_color` when a run is loaded
+    VINE_HEX,  // vine -- the viewer's own hue, see below
+    "#2f6b2a", // shrub, replaced by meta.json's shrub species colour when a run is loaded
+    "#7cc242", // grass, replaced by meta.json's grass species colour when a run is loaded
 ];
+
+/// A vine's colour is **the viewer's**, not the run's, and it is the only plant colour here that is.
+///
+/// `meta.json` lists the five species the simulator has -- two ground covers, one tree, two animals
+/// -- and a climber is not among them, because the simulator has no climbers (`cover.rs`). Rather
+/// than dress a vine in some other species' colour and let a screenshot imply the run grew it, it
+/// gets a hue of its own, a little yellower than the canopy, and every report says where it came
+/// from (DECISIONS.md, V4).
+pub const VINE_HEX: &str = "#3d7d2e";
 
 /// The seven things the viewer can colour the ground by. `Surface` is V0's surface-type map; the
 /// other six are the ecological overlays shot V2 was asked for.
@@ -177,6 +189,15 @@ pub fn palette(overlay: Overlay, meta: Option<&RunMeta>) -> Vec<[f32; 4]> {
                 out[CANOPY as usize] = linear_rgba(c);
             }
         }
+        // The two ground covers likewise. They are voxels here rather than entities, but the
+        // colour question is the same one: the simulator named the species, so it names the colour.
+        // Both have kind `cover`, so this matches on `name`, which is the field that tells them
+        // apart; a run that renames them falls back to the legend above rather than mixing them up.
+        for (name, id) in [("grass", GRASS), ("shrub", SHRUB)] {
+            if let Some(s) = m.species.iter().find(|s| s.name == name) {
+                out[id as usize] = linear_rgba(&s.color);
+            }
+        }
     }
     let (lo, hi) = overlay.ramp();
     let (lo, hi) = (linear_rgba(lo), linear_rgba(hi));
@@ -203,6 +224,9 @@ pub fn id_name(id: u16) -> &'static str {
         BUILDING => "building",
         TRUNK => "trunk",
         CANOPY => "canopy",
+        VINE => "vine",
+        SHRUB => "shrub",
+        GRASS => "grass",
         n if (n as usize) < ID_COUNT => "medium",
         n if (n as usize) < PALETTE_LEN => "overlay band",
         _ => "unknown",

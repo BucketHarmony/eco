@@ -10,6 +10,7 @@
 
 pub mod brp;
 pub mod bundle;
+pub mod cover;
 pub mod mesh;
 pub mod overlay;
 pub mod palette;
@@ -18,6 +19,7 @@ pub mod tree;
 pub mod voxel;
 
 pub use bundle::Bundle;
+pub use cover::Cover;
 pub use mesh::{mesh_chunk, ChunkMesh, Scratch};
 pub use overlay::{Fields, Scale};
 pub use palette::Overlay;

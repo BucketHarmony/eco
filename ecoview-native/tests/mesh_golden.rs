@@ -1119,3 +1119,289 @@ fn a_run_tree_gets_room_above_the_bundle() {
     assert!(clipped < 2.0, "clipped to {clipped} m");
     assert!(whole > 17.0, "kept to {whole} m");
 }
+
+// ---------------------------------------------------------------------------------------------
+// shot V4: ground cover and vines
+//
+// Every test below is about **expression**, not ecology. The run owns four numbers -- the grass and
+// shrub fraction of a patch, and the moisture and light of a column -- and the viewer owns only
+// where a blade stands and how far a climber gets. Nothing here competes, accumulates or feeds back,
+// and no vine is an entity in any run. What these tests can therefore check is that the viewer's
+// picture *moves with* the run's numbers and is reproducible from them, which is the whole of the
+// claim the row makes.
+// ---------------------------------------------------------------------------------------------
+
+use ecoview_native::cover::{Cover, VINE_JITTER, VINE_REACH_M};
+use ecoview_native::overlay::Fields;
+use ecoview_native::run::Dims;
+use ecoview_native::voxel::{level_of, GRASS, SHRUB, VINE};
+
+/// The ecology grid over a `flat(n, 0.5, _)` world: 1 m columns, 8-column patches (CLAUDE.md).
+fn eco(n: usize) -> Dims {
+    Dims {
+        x: n / 2,
+        y: n / 2,
+        z: 8,
+        patch: 8,
+    }
+}
+
+/// A snapshot's fields, uniform over the site, so a test changes one driver at a time.
+fn drivers(d: Dims, grass: f32, shrub: f32, moisture: u8, light: u8) -> Fields {
+    Fields {
+        moisture: vec![moisture; d.columns()],
+        fertility: vec![0; d.columns()],
+        light: vec![light; d.columns()],
+        temperature: vec![0.0; d.patch_count()],
+        burning: vec![0; d.patch_count()],
+        grazers: vec![0; d.patch_count()],
+        burnt: vec![false; d.patch_count()],
+        grass: vec![grass; d.patch_count()],
+        shrub: vec![shrub; d.patch_count()],
+    }
+}
+
+/// A flat 32 m site with one square building on it, `h` metres tall.
+fn with_building(n: usize, h: f32) -> Bundle {
+    let mut b = flat(n, 0.5, 4.0);
+    for y in 20..30 {
+        for x in 20..30 {
+            b.building_h[x + n * y] = h;
+            b.medium[x + n * y] = 7; // roof
+        }
+    }
+    b
+}
+
+/// The simulator's fractions come out the other side as the fractions of the ground actually drawn.
+///
+/// This is the one number that would let the viewer lie about the run: if a patch the simulator
+/// calls half grass came out fully green, the picture would be saying the site recovered when it
+/// did not. The tolerance is the sampling error of 4096 independent draws, not a fudge.
+#[test]
+fn the_drawn_cover_is_the_fraction_the_run_reported() {
+    let n = 64;
+    let d = eco(n);
+    // With headroom, the way the viewer sizes a world when a run is loaded. Without it the grid
+    // stops two levels above the ground and a shrub is clipped to a single voxel -- which is right,
+    // but it is not what a run ever draws.
+    let mut w = VoxelWorld::from_bundle_with_headroom(&flat(n, 0.5, 4.0), 20.0);
+    let c = Cover::of(&drivers(d, 0.5, 0.1, 128, 200), d, 42);
+    w.set_scene(&[], &[], Some(&c));
+    let (grass, shrub, vine) = w.cover_counts();
+    let cells = (n * n) as f32;
+    // A blade of grass is one voxel; a shrub is `SHRUB_HEIGHT_M` of them.
+    let shrub_voxels = (level_of(1.2, 0.5) + 1) as f32;
+    assert!(
+        ((grass as f32 / cells) - 0.5).abs() < 0.03,
+        "{grass} grass voxels of {cells} cells"
+    );
+    assert!(
+        ((shrub as f32 / shrub_voxels / cells) - 0.1).abs() < 0.02,
+        "{shrub} shrub voxels of {cells} cells"
+    );
+    // No building on this site, so no wall and no climber.
+    assert_eq!(vine, 0);
+    // And the drivers the viewer reports are the ones it was handed.
+    let m = c.means();
+    assert!((m.grass - 0.5).abs() < 1e-6 && (m.shrub - 0.1).abs() < 1e-6);
+    assert!((m.water - 128.0 / 255.0).abs() < 1e-6);
+}
+
+/// Same run, same seed, same blades -- so scrubbing back to a tick is the tick, not a reshuffle.
+#[test]
+fn the_same_seed_scatters_the_same_cover() {
+    let n = 64;
+    let d = eco(n);
+    let f = drivers(d, 0.4, 0.2, 200, 40);
+    let draw = |seed: u64| {
+        let mut w = VoxelWorld::from_bundle(&with_building(n, 8.0));
+        w.set_scene(&[], &[], Some(&Cover::of(&f, d, seed)));
+        w.plant_voxels()
+    };
+    assert_eq!(draw(42), draw(42));
+    assert_ne!(draw(42), draw(43));
+}
+
+/// Sealed ground grows nothing, and neither does the wall standing in it.
+///
+/// This is the only place the viewer decides *whether* a plant is there rather than where, and it
+/// is the simulator's own rule (`Medium::is_sealed`) copied rather than shared. It is also what
+/// makes an edit legible: pave a lawn in the viewer and its blades and its climbers both go.
+#[test]
+fn sealed_ground_grows_nothing() {
+    let n = 64;
+    let d = eco(n);
+    let f = drivers(d, 0.9, 0.09, 255, 0);
+    let count = |medium: u8| {
+        let mut b = with_building(n, 8.0);
+        for y in 0..n {
+            for x in 0..n {
+                if b.building_h[x + n * y] == 0.0 {
+                    b.medium[x + n * y] = medium;
+                }
+            }
+        }
+        let mut w = VoxelWorld::from_bundle(&b);
+        w.set_scene(&[], &[], Some(&Cover::of(&f, d, 7)));
+        w.cover_counts()
+    };
+    let (g, s, v) = count(1); // lawn
+    assert!(g > 1000 && s > 100 && v > 100, "lawn grew {g}/{s}/{v}");
+    assert_eq!(count(6), (0, 0, 0)); // asphalt
+    assert_eq!(count(8), (0, 0, 0)); // open water
+}
+
+/// A vine is drawn on the open side of a wall, from the ground up, and stops at the wall's top.
+///
+/// It has to be on the *outside*: a plant voxel inside a solid building column would never be
+/// drawn, and a climber that overshot the parapet would be a plant standing in mid-air.
+#[test]
+fn a_vine_climbs_the_outside_of_a_wall_and_stops_at_the_top() {
+    let n = 64;
+    let d = eco(n);
+    // A 2 m wall, low enough that a well-fed vine would clear it if nothing stopped it:
+    // `VINE_REACH_M` is 12 m.
+    let mut w = VoxelWorld::from_bundle(&with_building(n, 2.0));
+    assert!(VINE_REACH_M > 2.0);
+    let c = Cover::of(&drivers(d, 0.9, 0.09, 255, 0), d, 11);
+    w.set_scene(&[], &[], Some(&c));
+    let wall_top = level_of(4.0 + 2.0, 0.5);
+    let ground = level_of(4.0, 0.5);
+    let vines: Vec<_> = w
+        .plant_voxels()
+        .into_iter()
+        .filter(|v| v.3 == VINE)
+        .collect();
+    assert!(!vines.is_empty());
+    for (x, y, z, _) in &vines {
+        // Never inside the building, never below the ground, never above the wall.
+        assert!(!(20..30).contains(x) || !(20..30).contains(y), "inside");
+        assert!(*z as i32 > ground && *z as i32 <= wall_top, "at level {z}");
+        // And always touching the wall: one of the four orthogonal neighbours is the building.
+        let touches = [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)]
+            .iter()
+            .any(|(dx, dy)| {
+                let (nx, ny) = (*x as i64 + dx, *y as i64 + dy);
+                (20..30).contains(&nx) && (20..30).contains(&ny)
+            });
+        assert!(touches, "vine at {x},{y} touches no wall");
+    }
+    // At this vigour the climb is capped by the wall, so the ragged top is flat against it.
+    assert_eq!(
+        vines.iter().map(|v| v.2 as i32).max(),
+        Some(wall_top),
+        "the vine stops short of the parapet"
+    );
+}
+
+/// Wetter and shadier grows more vine; drier grows less. The viewer's picture moves with the run's
+/// numbers, which is the whole of what "driven by the simulator" can mean for something the
+/// simulator does not model.
+#[test]
+fn a_vine_answers_the_run_moisture_and_shade() {
+    let n = 64;
+    let d = eco(n);
+    // A tall wall, so nothing is capped and the count is the vigour.
+    let vine_voxels = |grass: f32, moisture: u8, light: u8| {
+        let mut w = VoxelWorld::from_bundle(&with_building(n, 30.0));
+        let c = Cover::of(&drivers(d, grass, 0.0, moisture, light), d, 5);
+        w.set_scene(&[], &[], Some(&c));
+        w.cover_counts().2
+    };
+    let wet = vine_voxels(1.0, 255, 0);
+    let dry = vine_voxels(1.0, 20, 0);
+    let sunny = vine_voxels(1.0, 255, 255);
+    let bare = vine_voxels(0.0, 255, 0);
+    assert!(dry < wet, "dry {dry} not under wet {wet}");
+    assert!(sunny < wet, "sunny {sunny} not under shaded {wet}");
+    // Cover gates the climb: ground the simulator says is bare grows no climber at all.
+    assert_eq!(bare, 0);
+    // The jitter is a ragged edge, not a second driver: it cannot turn the ordering over.
+    assert!(VINE_JITTER < 1.0);
+}
+
+/// A field overlay takes the ground cover off and leaves the vines on.
+///
+/// An overlay is a map of the ground, and a site two thirds under grass would be a map of the
+/// grass. No overlay colours a wall, so the climbers stay -- and the moisture and light maps are
+/// exactly what explains where they are.
+#[test]
+fn the_overlay_hides_the_ground_cover_and_keeps_the_vines() {
+    let n = 64;
+    let d = eco(n);
+    let f = drivers(d, 0.8, 0.1, 255, 0);
+    let mut w = VoxelWorld::from_bundle(&with_building(n, 20.0));
+    let mut c = Cover::of(&f, d, 3);
+    w.set_scene(&[], &[], Some(&c));
+    let (g0, s0, v0) = w.cover_counts();
+    assert!(g0 > 0 && s0 > 0 && v0 > 0);
+
+    c.ground = false;
+    w.set_scene(&[], &[], Some(&c));
+    assert_eq!(w.cover_counts(), (0, 0, v0));
+
+    // And **V** off is all three gone, with the ground left exactly as it was.
+    c.vines = false;
+    let stale = w.set_scene(&[], &[], Some(&c));
+    assert_eq!(w.cover_counts(), (0, 0, 0));
+    assert!(!stale.is_empty(), "taking the cover off remeshes nothing");
+}
+
+/// With no cover the world is the one shot V3 left behind, so the row adds a layer rather than
+/// changing the site under it.
+#[test]
+fn no_cover_leaves_the_world_as_v3_drew_it() {
+    let t = TreeForm::grown(8.0, 8.0, 12.0, 0.8, 0x5eed);
+    let mut a = VoxelWorld::from_bundle(&flat(32, 0.5, 4.0));
+    a.set_plants(std::slice::from_ref(&t), &[]);
+    let mut b = VoxelWorld::from_bundle(&flat(32, 0.5, 4.0));
+    b.set_scene(std::slice::from_ref(&t), &[], None);
+    assert_eq!(a.plant_voxels(), b.plant_voxels());
+    assert_eq!(b.cover_counts(), (0, 0, 0));
+}
+
+/// The cover's two patch fields are read from `patches.json`, off the same pass as the overlays.
+#[test]
+fn the_cover_reads_its_fractions_from_the_run() {
+    let dir = tmp("cover-fields");
+    write_overlay_run(&dir, 8, 4, true);
+    let run = Run::load(&dir).unwrap();
+    let f = run.fields_at(0).unwrap();
+    assert_eq!(f.grass.len(), run.meta.dims.patch_count());
+    assert!(f.grass.iter().all(|g| (*g - 0.5).abs() < 1e-6));
+    assert!(f.shrub.iter().all(|s| (*s - 0.1).abs() < 1e-6));
+    // And the seed the scatter hangs on is the run's, not the viewer's.
+    assert_eq!(run.meta.seed, 42);
+}
+
+/// The golden: one covered chunk in, one hashed mesh out. Grass, shrub and vine are three more
+/// voxel ids, so the mesher treats them the way it treats everything else -- and a change to the
+/// scatter, the climb or the three colours moves this number.
+#[test]
+fn golden_cover() {
+    let n = 64;
+    let d = eco(n);
+    let mut w = VoxelWorld::from_bundle(&with_building(n, 6.0));
+    w.set_scene(
+        &[],
+        &[],
+        Some(&Cover::of(&drivers(d, 0.5, 0.1, 200, 30), d, 42)),
+    );
+    let m = mesh_chunk(
+        &w,
+        ChunkPos { x: 0, y: 0, z: 0 },
+        &surface_palette(),
+        &mut Scratch::new(),
+    );
+    assert_eq!(
+        (m.hash(), m.positions.len(), m.indices.len()),
+        (0x7a35_505d_d651_0006, 23036, 34554),
+        "the covered chunk"
+    );
+    // The three cover ids are all in the palette, and none of them is the canopy's colour: a vine
+    // is the viewer's own hue because the run has no climber species to name one (palette.rs).
+    let p = surface_palette();
+    assert_ne!(p[VINE as usize], p[CANOPY as usize]);
+    assert_ne!(p[GRASS as usize], p[SHRUB as usize]);
+}

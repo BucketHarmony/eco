@@ -551,3 +551,161 @@ the simulator's, and everything else about a tree's shape here — how many limb
 how big a leaf blob is — is expression, tuned by eye at these three ticks and held in place by a test
 that only asserts leaves stay inside the envelope. A BACKLOG note proposes the ecosim row that would
 publish a real per-tree size; until it exists, the HUD says whose numbers these are.
+
+
+# ecoview-native V4: what ground cover and vines cost, and how much of the picture is the run's
+
+All of it on this machine (Windows 11, a 12th Gen Intel Core i9-12900KF, RTX 4090), release build,
+headless, against the committed Capitol bundle (512 × 512 ground cells at 0.5 m) and
+`ecosim/runs/capitol-s42`. Each figure is one `ecoview-native --headless --frames 300` run, read off
+its own stdout.
+
+**Everything measured here is expression, not simulation.** The run owns four numbers — the grass
+and shrub fraction of each 8 m patch, and the moisture and light of each 1 m column. This viewer
+owns which of a patch's ground cells carry a blade, how tall a shrub is drawn, and how far a climber
+gets up a wall. No vine is an entity in any run, nothing here competes for anything, and nothing
+feeds back into the simulation. Every number below should be read in that light.
+
+## The cover at three ticks
+
+| | tick 1000 | tick 10000 | tick 20000 |
+|---|---|---|---|
+| grass voxels | 138,592 | 99,262 | 73,259 |
+| shrub voxels | 48,204 | 172,107 | 248,454 |
+| vine voxels | 7,690 | 5,746 | 11,012 |
+| run's grass fraction | 0.750 | 0.644 | 0.457 |
+| run's shrub fraction | 0.082 | 0.279 | 0.393 |
+| run's soil water | 0.343 | 0.219 | 0.663 |
+| run's shade | 0.143 | 0.172 | 0.424 |
+| vine vigour | 0.217 | 0.167 | 0.392 |
+
+The story in the middle row is the simulator's, not the viewer's: grass gives way to shrub across the
+run, and the picture follows it because it has no choice — the fractions are read, not modelled.
+
+## The drawn fraction against the reported fraction
+
+The Capitol bundle is **169,876 growable cells of 262,144** — 64.8% lawn, with 17.1% asphalt, 9.4%
+roof and 8.7% concrete growing nothing. A shrub is three voxels tall at 0.5 m (`SHRUB_HEIGHT_M` 1.2
+m), so its cell count is the voxel count over three, exactly, at every tick.
+
+| Tick | grass cells / growable | run's grass | shrub cells / growable | run's shrub |
+|---|---|---|---|---|
+| 1000 | 0.816 | 0.750 | 0.095 | 0.082 |
+| 10000 | 0.584 | 0.644 | 0.338 | 0.279 |
+| 20000 | 0.431 | 0.457 | 0.488 | 0.393 |
+
+Shrub is drawn **above** its reported fraction at all three ticks, and the cause is not the scatter.
+The reported number is the mean over all 65,536 ecology columns, including the 35% of the site that
+is pavement and building, where the simulator's cover is low. The drawn number is over the lawn
+only. The two are answering different questions, and the gap between them is the simulator's own
+pattern rather than a viewer error.
+
+Grass runs the other way at ticks 10000 and 20000 — 0.584 against 0.644, and 0.431 against 0.457 —
+and only clears its reported fraction at tick 1000, when shrub is still 8% of the site. That is the
+partition: shrub takes the bottom of the interval, so where the two fractions sum past 1 it is grass
+that loses the cell (DECISIONS.md, V4). Shrub is never clipped, which is why its two columns move
+together and grass's do not.
+
+## What the cover costs
+
+| | tick 10000 | tick 20000 |
+|---|---|---|
+| quads, cover off | 162,966 | 798,340 |
+| quads, cover on | 322,068 | 979,934 |
+| cover's share | +159,102 (1.98×) | +181,594 (1.23×) |
+| voxelise, cover off | 66 ms | — |
+| voxelise, cover on | 81 ms | 593 ms |
+| full-site mesh | 30 ms | 44 ms |
+
+`--no-cover` at tick 10000 meshes to **162,966 quads — V3's number to the quad**, which is the
+measurement behind the claim that this shot adds a layer and changes nothing under it.
+
+The cover costs about 15 ms of voxelisation and doubles the quad count on an open site. It is much
+cheaper proportionally on a closed one: at tick 20000 the trees already dominate, and the cover adds
+23%. The absolute quad cost barely moves between the two ticks (159k against 182k) because it is
+bounded by the growable ground, which does not change — only the cover's composition does, and a
+three-voxel shrub costs more faces than a one-voxel blade, which is the whole of the difference.
+
+A full-site remesh stayed at 30–44 ms throughout, so nothing here changed what the mesher costs per
+quad.
+
+## The vines are a small number because the Capitol is paved
+
+**1,528 lawn cells** on this site stand orthogonally against a building — everything else at the
+building's foot is concrete or asphalt, which grows nothing. That is 0.9% of the growable ground,
+and it is why the vine counts above are more than an order of magnitude under the grass counts.
+
+Per rooting cell that works out at 3.8 voxels (1.9 m) at tick 10000 and 7.2 voxels (3.6 m) at tick
+20000, against the `vigour × 12 m` the model asks for: 2.0 m and 4.7 m. The drawn climb sits under
+the nominal one at both ticks because vigour is read at each rooting cell, not at the site mean, and
+the cells at the Capitol's walls are drier and sunnier than the average column. The tick-20000 gap
+is the larger of the two for the same reason: that snapshot's variance is larger.
+
+This is a case where the picture is honest by being unimpressive. A viewer that put a climber on
+every wall would have looked better and said something the run does not.
+
+## The screenshots
+
+Five, all 1280 × 800, all on the committed Capitol. One line each, written after looking at them.
+**The ground cover and the vines in all five are expression, not simulation** — see the note at the
+head of this write-up.
+
+| File | Command | Verdict |
+|---|---|---|
+| `v4-capitol-t10000.png` | `--run ../ecosim/runs/capitol-s42 --tick 10000` | The lawn has stopped being a flat green sheet: light grass mottled with darker shrub across the whole open ground, the paths and the forecourt still clean grey, and the HUD's "expression, not simulation" line sitting over it with the four drivers it used. |
+| `v4-cover-off.png` | the same, plus `--no-cover` | The same tick with the layer off, for comparison: flat lawn, same 998 trees, same paths, `cover off [V] on` in the HUD — and 162,966 quads, exactly what V3 rendered. |
+| `v4-vines.png` | `--tick 10000 --eye 152.0,13.0,84.0 --look 155.0,9.5,105.0` | The shot the row is about: a band of dark climbers along the base of the Capitol's wall with a ragged top edge, stopping dead where the lawn gives way to pavement — the sealed-ground rule visible in one frame — with shrub cubes standing in the grass in the foreground. |
+| `v4-capitol-t20000.png` | `--tick 20000` | Closed woodland over most of the site, and the cover only legible in the clearing to the east, where shrub has plainly taken the ground from grass; the vines along the building's foot are twice the length they were at tick 10000. |
+| `v4-moisture.png` | `--tick 10000 --overlay moisture` | The moisture map, unobstructed: the ground cover is off and the HUD says why — "(ground cover hidden under the overlay)" — while the 5,746 vine voxels stay, which is the point of keeping them. |
+
+## The agent gate, and one committed PNG regenerated
+
+`agent_loop --run ../ecosim/runs/capitol-s42`: **PASS**, 14 calls, 0 retries, 4.4 s to the first
+screenshot, and `ecoview.stats` now answers with a `cover` object carrying the counts, the four
+drivers and the sentence that says what they are.
+
+`shots/agent-loop.png` is **about 1,319,000 bytes** against V3's 1,043,886. Its run gains a cover
+layer — 138,592 grass, 48,204 shrub and 7,690 vine voxels at tick 1000 — so the 275 kB is a real
+geometry change and not a HUD line.
+
+**"About", because this PNG is not byte-reproducible, and never has been.** Two gate runs of the
+same binary on the same run wrote **1,318,888 and 1,319,071 bytes**, 183 apart. The cause is in the
+HUD, not the cover: the status bar renders `remesh {} chunks in {:.1} ms`, a wall-clock measurement,
+so the pixels behind those digits change between runs. That text is V1's and the behaviour predates
+this shot; V4 found it by regenerating the picture twice. It means the byte size of this file is
+evidence of a change of hundreds of kilobytes and of nothing finer, and it is the second reason —
+after V3's note that these PNGs are accidental plant-model goldens — that nothing should start
+gating them without removing the timing from the HUD first. Handed up as a BACKLOG note.
+
+`shots/stress-headless.png` is **byte-identical** at 839,136. The stress world has no run over it,
+so there are no patch fractions and no fields, therefore no cover, and the HUD's cover line is not
+printed at all when there is no run. Verified by rendering it again to a scratch path and comparing.
+
+## A finding this shot did not cause and did not fix
+
+`shots/capitol-headless.png` no longer matches what the viewer renders. Git says it was last written
+in **shot V0**, and V1 added the timeline bar and V2 the overlay legend, so it has been stale for two
+shots. V4 does not touch that picture — with no run loaded there is no cover, and the cover's HUD
+line is skipped entirely — so it is left as it is and noted here and in BACKLOG rather than
+regenerated inside a row that did not change it.
+
+## A trap worth recording: rustfmt and `\`-continued string literals
+
+Two of this shot's output strings were written with `\`-at-end-of-line continuations, which Rust
+strips along with the following indentation. After `cargo fmt` both had been rewritten as single
+lines with the indentation **baked in as literal spaces**, so the stdout line and the BRP `note`
+came out with fourteen-space gaps in the middle of a sentence. V3's `trees:` line has the same scar,
+which is how it was recognised. Both are now single long source lines, which rustfmt leaves alone.
+The rule for this crate: do not use `\` continuations inside a format string.
+
+## What this shot does not tell you
+
+**Nothing here says a blade of grass is in the right place, because there is no right place.** The
+simulator has no grass entity, no shrub entity and no climber; it has a fraction per patch and two
+fields per column. Everything about *where* — which cell, how tall, how far up a wall — is this
+viewer's, tuned by eye at three ticks and held in place by tests that only assert the realised
+fractions match the run's and that the drivers move the picture in the right direction.
+
+What the picture can be trusted for is the direction and the magnitude of change: grass giving way
+to shrub between tick 1000 and tick 20000, vines twice as long on a wetter shadier site, and bare
+pavement where the simulator's ground is sealed. Those are the run's. The rest is drawing.

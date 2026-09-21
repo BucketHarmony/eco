@@ -3,14 +3,19 @@
 //!
 //! Usage:
 //! ```text
-//! ecoview-native [--world DIR | --stress] [--run DIR] [--tick N] [--overlay NAME] [--headless]
-//!                [--frames N] [--screenshot PATH] [--bench SECS] [--port N]
+//! ecoview-native [--world DIR | --stress] [--run DIR] [--tick N] [--overlay NAME] [--no-cover]
+//!                [--eye X,Y,Z] [--look X,Y,Z] [--headless] [--frames N] [--screenshot PATH]
+//!                [--bench SECS] [--port N]
 //! ```
 //!
 //! Keys: WASD, Space and Shift to fly; right mouse to look; wheel for speed; **R** to reset the view;
 //! **P** to play or pause; **,** and **.** to step a snapshot; **Home** and **End** for the ends of
 //! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**7** for
-//! the overlay.
+//! the overlay; **V** for the ground cover and vines.
+//!
+//! The ground cover and the vines are **expression, not simulation** (`src/cover.rs`): the run says
+//! how much grass and shrub a patch holds and how wet and shaded its columns are, and the viewer
+//! decides only where the blades stand and how far a climber gets. No vine is an entity in any run.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -30,8 +35,9 @@ use bevy::winit::WinitPlugin;
 use bevy_brp_extras::BrpExtrasPlugin;
 use serde_json::{json, Value};
 
+use ecoview_native::cover::{Cover, CoverStats};
 use ecoview_native::mesh::{mesh_chunk, ChunkMesh, Scratch};
-use ecoview_native::overlay::{FieldStats, Scale};
+use ecoview_native::overlay::{FieldStats, Fields, Scale};
 use ecoview_native::palette::{palette, Overlay, BANDS};
 use ecoview_native::run::Run;
 use ecoview_native::voxel::{ChunkPos, ColumnBands, EditAction, VoxelWorld};
@@ -75,6 +81,24 @@ struct Args {
     bench: f32,
     port: u16,
     overlay: Overlay,
+    cover: bool,
+    /// Where the camera stands and what it looks at, in metres. Both default to the overview pose
+    /// `setup` computes from the site's size.
+    ///
+    /// A headless screenshot has no one to fly it, so a picture of anything but the whole site --
+    /// a wall with a climber on it, a tree at eye level -- could only be taken by hand. A shot
+    /// report that says "look at this" has to be re-runnable, so the pose is an argument
+    /// (DECISIONS.md, V4).
+    eye: Option<Vec3>,
+    look: Option<Vec3>,
+}
+
+/// `x,y,z` in metres. A pose that does not parse is fatal for the same reason a mistyped overlay is:
+/// a screenshot script would otherwise file the overview picture under the close-up's name.
+fn vec3(s: &str) -> Vec3 {
+    let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    assert!(v.len() == 3, "expected x,y,z in metres, got {s:?}");
+    Vec3::new(v[0], v[1], v[2])
 }
 
 fn args() -> Args {
@@ -89,6 +113,9 @@ fn args() -> Args {
         bench: 0.0,
         port: brp::PORT,
         overlay: Overlay::Surface,
+        cover: true,
+        eye: None,
+        look: None,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -135,6 +162,15 @@ fn args() -> Args {
                         Overlay::ALL.map(|o| o.name()).join(", ")
                     )
                 });
+                i += 1;
+            }
+            "--no-cover" => a.cover = false,
+            "--eye" => {
+                a.eye = Some(vec3(&next()));
+                i += 1;
+            }
+            "--look" => {
+                a.look = Some(vec3(&next()));
                 i += 1;
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -222,6 +258,15 @@ struct Timeline {
     light_source: String,
     wood: usize,
     leaves: usize,
+    /// Shot V4's cover layer. `cover` is what the user asked for, **V** or `--no-cover`;
+    /// `cover_applied` is the `(ground, vines)` the drawn world actually has, which is not the same
+    /// thing, because a field overlay takes the ground cover off without the user asking.
+    cover: bool,
+    cover_applied: Option<(bool, bool)>,
+    /// Grass, shrub and vine voxels, and the site means of the four run fields that drove them.
+    /// Printed wherever the cover is, so no picture of it stands on its own.
+    cover_counts: (usize, usize, usize),
+    cover_stats: CoverStats,
 }
 
 impl Timeline {
@@ -296,6 +341,7 @@ fn apply_overlay_bands(
     world: &mut VoxelWorld,
     ov: &mut OverlayState,
     t: &Timeline,
+    fields: Option<&Result<Fields, String>>,
 ) -> Vec<ChunkPos> {
     ov.scale = None;
     ov.stats = None;
@@ -304,8 +350,8 @@ fn apply_overlay_bands(
     let stale = match (&t.run, ov.active.is_field()) {
         (Some(run), true) => {
             let scale = Scale::of(ov.active, &run.meta);
-            let out = match run.fields_at(t.index) {
-                Ok(f) => {
+            let out = match fields {
+                Some(Ok(f)) => {
                     let d = run.meta.dims;
                     let (bands, stats) = f.bands(ov.active, &d, &scale);
                     ov.stats = Some(stats);
@@ -316,8 +362,11 @@ fn apply_overlay_bands(
                         bands,
                     }))
                 }
-                Err(e) => {
-                    ov.error = Some(e.to_string());
+                other => {
+                    ov.error = Some(match other {
+                        Some(Err(e)) => e.clone(),
+                        _ => "the snapshot's fields were not read".into(),
+                    });
                     world.set_overlay(None)
                 }
             };
@@ -345,6 +394,7 @@ fn main() {
     };
     let mut timeline = Timeline {
         secs: PLAY_SECS,
+        cover: a.cover,
         ..default()
     };
     if let Some(run) = open_run(&a, &bundle) {
@@ -489,8 +539,34 @@ fn open_run(a: &Args, b: &Bundle) -> Option<Run> {
     Some(run)
 }
 
-/// Puts snapshot `t.index`'s trees into the world. Returns the stale chunks and what it cost.
-fn load_snapshot(world: &mut VoxelWorld, t: &mut Timeline) -> Vec<ChunkPos> {
+/// Reads snapshot `t.index`'s fields once, for the cover and the overlay both.
+///
+/// The two want the same files, and `light.bin` alone is 2 MB on the Capitol, so reading it twice a
+/// scrub would double the one cost a snapshot change is already measured by. The error is kept as a
+/// string rather than an `io::Error` so the value can be handed to both callers.
+fn read_fields(t: &Timeline) -> Option<Result<Fields, String>> {
+    t.run
+        .as_ref()
+        .map(|r| r.fields_at(t.index).map_err(|e| e.to_string()))
+}
+
+/// What the drawn world should hold: the ground cover, and the vines.
+///
+/// A **field overlay takes the ground cover off**, because an overlay is a map of the ground and a
+/// site two thirds under grass would be a map of the grass instead. The vines stay: no overlay
+/// colours a wall, and the moisture and light maps are exactly what explains where they are
+/// (DECISIONS.md, V4).
+fn want_cover(t: &Timeline, ov: &OverlayState) -> (bool, bool) {
+    (t.cover && !ov.active.is_field(), t.cover)
+}
+
+/// Puts snapshot `t.index`'s trees and its ground cover into the world. Returns the stale chunks.
+fn load_snapshot(
+    world: &mut VoxelWorld,
+    t: &mut Timeline,
+    fields: Option<&Fields>,
+    want: (bool, bool),
+) -> Vec<ChunkPos> {
     let Some(run) = &t.run else {
         return Vec::new();
     };
@@ -507,7 +583,20 @@ fn load_snapshot(world: &mut VoxelWorld, t: &mut Timeline) -> Vec<ChunkPos> {
     // site as it was photographed and the run's are the same site as the simulator grew it, so
     // drawing both would stand two trees in every spot. Bundle shrubs go with them, for the same
     // reason (DECISIONS.md, "V1 whose trees these are").
-    let stale = world.set_plants(&snap.trees, &[]);
+    // The cover is built from the snapshot's own fields and the run's own seed, so scrubbing back
+    // to a tick puts every blade back exactly where it was. Its means are read off the run whether
+    // or not anything is drawn from them, so a picture with the cover switched off still says what
+    // the cover would have been.
+    let cover = fields.map(|f| {
+        let mut c = Cover::of(f, run.meta.dims, run.meta.seed);
+        c.ground = want.0;
+        c.vines = want.1;
+        c
+    });
+    t.cover_stats = cover.as_ref().map(|c| c.means()).unwrap_or_default();
+    let stale = world.set_scene(&snap.trees, &[], cover.as_ref());
+    t.cover_applied = Some(want);
+    t.cover_counts = world.cover_counts();
     t.trees = snap.trees.len();
     t.unknown_stage = snap.unknown_stage;
     t.stages = snap.stages;
@@ -535,13 +624,20 @@ fn setup(
 ) {
     // The run's trees and the overlay both go in before the first mesh, so the site is never drawn
     // with the bundle's vegetation under the wrong palette and then corrected a frame later.
-    load_snapshot(&mut site.world, &mut timeline);
+    let fields = read_fields(&timeline);
+    let want = want_cover(&timeline, &overlays);
+    load_snapshot(
+        &mut site.world,
+        &mut timeline,
+        fields.as_ref().and_then(|f| f.as_ref().ok()),
+        want,
+    );
     // The tree model on stdout as well as in the HUD: a procedural tree is the one thing in the
     // picture a reader cannot check against the run by eye, so a scripted run leaves the numbers
     // behind it (MEASUREMENTS.md, V3).
     if let Some(run) = &timeline.run {
         println!(
-            "trees: {} at tick {} ({} sapling, {} young, {} mature), {:.1}..{:.1} m median {:.1};              crown light {:.2}..{:.2} mean {:.2} from {}; {} wood and {} leaf voxels,              voxelised in {:.0} ms; height from age: {}",
+            "trees: {} at tick {} ({} sapling, {} young, {} mature), {:.1}..{:.1} m median {:.1}; crown light {:.2}..{:.2} mean {:.2} from {}; {} wood and {} leaf voxels, voxelised in {:.0} ms; height from age: {}",
             timeline.trees,
             run.tick_at(timeline.index),
             timeline.stages[0],
@@ -559,8 +655,22 @@ fn setup(
             timeline.last_ms,
             run.life.source,
         );
+        // And the cover, with what it is written next to it. A scripted run's stdout is what the
+        // shot report quotes, so the caveat travels with the numbers rather than being remembered.
+        let (g, sh, v) = timeline.cover_counts;
+        let c = timeline.cover_stats;
+        println!(
+            "cover: {g} grass, {sh} shrub, {v} vine voxels (ground {}, vines {}); run drivers -- grass {:.3}, shrub {:.3}, water {:.3}, shade {:.3}, vine vigour {:.3}. Expression, not simulation: the run owns those four numbers, the viewer owns only where a blade stands and how far a climber gets; no vine is an entity in any run and nothing here feeds back into the simulation.",
+            timeline.cover_applied.map(|a| a.0).unwrap_or(false),
+            timeline.cover_applied.map(|a| a.1).unwrap_or(false),
+            c.grass,
+            c.shrub,
+            c.water,
+            c.shade,
+            c.vigour,
+        );
     }
-    apply_overlay_bands(&mut site.world, &mut overlays, &timeline);
+    apply_overlay_bands(&mut site.world, &mut overlays, &timeline, fields.as_ref());
     site.palette = palette(overlays.active, timeline.run.as_ref().map(|r| &r.meta));
     // One line on stdout for a headless or scripted run, so a screenshot is never the only record of
     // what the picture means.
@@ -623,8 +733,12 @@ fn setup(
     );
 
     let size = site.world.width as f32 * site.world.cell_m;
-    let eye = Vec3::new(-0.25 * size, 0.45 * size, -0.25 * size);
-    let look = Vec3::new(0.5 * size, 0.0, 0.5 * size);
+    let eye = args
+        .eye
+        .unwrap_or_else(|| Vec3::new(-0.25 * size, 0.45 * size, -0.25 * size));
+    let look = args
+        .look
+        .unwrap_or_else(|| Vec3::new(0.5 * size, 0.0, 0.5 * size));
     commands.insert_resource(HomeView { eye, look });
     let mut cam = commands.spawn((
         Camera3d::default(),
@@ -956,19 +1070,29 @@ fn apply_world_state(
     mut overlays: ResMut<OverlayState>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    let want = want_cover(&timeline, &overlays);
     let snapshot_moved = timeline.run.is_some() && timeline.applied != Some(timeline.index);
+    // Toggling **V**, or turning a field overlay on over a covered site, rewrites the same voxels a
+    // scrub does, so it goes down the same path rather than getting one of its own.
+    let cover_moved = timeline.run.is_some() && timeline.cover_applied != Some(want);
     let overlay_moved = overlays.applied != Some((overlays.active, timeline.index));
-    if !snapshot_moved && !overlay_moved {
+    if !snapshot_moved && !cover_moved && !overlay_moved {
         return;
     }
     let start = Instant::now();
     let repalette = overlays.applied.map(|(o, _)| o) != Some(overlays.active);
-    let mut stale = if snapshot_moved {
-        load_snapshot(&mut site.world, &mut timeline)
+    let fields = read_fields(&timeline);
+    let mut stale = if snapshot_moved || cover_moved {
+        load_snapshot(
+            &mut site.world,
+            &mut timeline,
+            fields.as_ref().and_then(|f| f.as_ref().ok()),
+            want,
+        )
     } else {
         Vec::new()
     };
-    for c in apply_overlay_bands(&mut site.world, &mut overlays, &timeline) {
+    for c in apply_overlay_bands(&mut site.world, &mut overlays, &timeline, fields.as_ref()) {
         if !stale.contains(&c) {
             stale.push(c);
         }
@@ -993,8 +1117,15 @@ fn apply_world_state(
     timeline.last_ms = start.elapsed().as_secs_f64() * 1000.0;
 }
 
-/// **1**-**7** pick the overlay, in `Overlay::ALL` order.
-fn overlay_keys(keys: Res<ButtonInput<KeyCode>>, mut ov: ResMut<OverlayState>) {
+/// **1**-**7** pick the overlay, in `Overlay::ALL` order; **V** turns the cover and vines on and off.
+fn overlay_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut ov: ResMut<OverlayState>,
+    mut t: ResMut<Timeline>,
+) {
+    if keys.just_pressed(KeyCode::KeyV) {
+        t.cover = !t.cover;
+    }
     const DIGITS: [KeyCode; 7] = [
         KeyCode::Digit1,
         KeyCode::Digit2,
@@ -1138,6 +1269,31 @@ fn hud(
     }
     if let Some(e) = &overlays.error {
         s.push_str(&format!("  overlay off: {e}\n"));
+    }
+    // What the cover is, and what it is not, on the screen rather than only in the write-up: a
+    // screenshot travels further than a report does, and a viewer that draws vines without saying
+    // they are its own has let a picture make a claim the simulator never made.
+    if timeline.run.is_some() {
+        let (g, sh, v) = timeline.cover_counts;
+        let c = timeline.cover_stats;
+        s.push_str(&match timeline.cover_applied {
+            Some((false, false)) => "cover off   [V] on\n".to_string(),
+            applied => format!(
+                "cover {g} grass, {sh} shrub, {v} vine voxels{}   [V] off\n  \
+                 expression, not simulation -- run drivers: grass {:.2}, shrub {:.2}, \
+                 water {:.2}, shade {:.2}; vine vigour {:.2}\n",
+                if applied == Some((false, true)) {
+                    " (ground cover hidden under the overlay)"
+                } else {
+                    ""
+                },
+                c.grass,
+                c.shrub,
+                c.water,
+                c.shade,
+                c.vigour,
+            ),
+        });
     }
     match &timeline.run {
         Some(run) => {
@@ -1447,6 +1603,24 @@ fn stats_method(
                 "tall_height_m": r.life.tall_height_m,
                 "tall_years": r.life.tall_years,
             })),
+        },
+        // The cover's own numbers, and the sentence that keeps them honest. An agent reading this
+        // over BRP gets the same caveat a person reading the HUD does.
+        "cover": {
+            "on": t.cover,
+            "ground_drawn": t.cover_applied.map(|c| c.0),
+            "vines_drawn": t.cover_applied.map(|c| c.1),
+            "grass_voxels": t.cover_counts.0,
+            "shrub_voxels": t.cover_counts.1,
+            "vine_voxels": t.cover_counts.2,
+            "drivers": {
+                "grass": t.cover_stats.grass,
+                "shrub": t.cover_stats.shrub,
+                "water": t.cover_stats.water,
+                "shade": t.cover_stats.shade,
+                "vine_vigour": t.cover_stats.vigour,
+            },
+            "note": "expression, not simulation: the run owns grass, shrub, moisture and light; the viewer owns only where a blade stands and how far a vine climbs. No vine is an entity in any run and nothing here feeds back into the simulation.",
         },
         "snapshot_chunks": t.last_chunks,
         "snapshot_ms": t.last_ms,

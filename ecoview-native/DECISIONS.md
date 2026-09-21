@@ -385,3 +385,160 @@ target and a second file means editing `.github/workflows/ci.yml`, which belongs
 change in the branching, the height curve, the light sample or the leaf radius fails a test instead of
 quietly changing every screenshot. The four earlier goldens are untouched, which is the evidence that
 this shot changed plants and nothing else.
+
+# Shot V4: ground cover and vines
+
+The row: *"Native viewer: vines and fine ground cover as expression -- climbers on wall voxels driven
+by the simulator's moisture, shade and cover; grass and shrub as fine voxel texture. Expression, not
+simulated competition: say so in every report that shows one."* There is no prompt file for the V
+rows, so the row is the specification (MASTER, step 5).
+
+## V4 what "expression, not simulation" is actually enforced by
+
+The phrase is easy to write in a report and easy for a picture to contradict, so it is worth being
+precise about what holds it up here. Three things do:
+
+1. **Nothing in `src/cover.rs` has state.** `Cover` is built from one snapshot's fields and thrown
+   away. There is no accumulator, no previous tick, no growth and no death. Rebuilding the cover for
+   tick 10000 after visiting tick 20000 gives the same voxels, byte for byte, because the only
+   inputs are that snapshot's four numbers and the run's seed.
+2. **Nothing the viewer computes goes anywhere.** No file is written, no field is fed back, and the
+   simulator is a separate process that has already finished. The run directory is the only
+   interface between the two projects and it is read-only here (CLAUDE.md).
+3. **The words are in the output, not just in the docs.** The HUD, the stdout line a scripted run
+   leaves behind, and `ecoview.stats` over BRP all carry the counts *and* the sentence. A screenshot
+   travels further than a report; the caveat is inside the frame.
+
+What that leaves genuinely driven by the simulator is: how much of a patch is grass and how much is
+shrub, how wet each column is, and how shaded it is. What the viewer adds is which of the patch's
+ground cells show it, how tall a shrub is drawn, and how far up a wall a climber gets. The second
+list is the viewer's and is labelled as such everywhere it appears.
+
+## V4 the four drivers, and why those four
+
+| Driver | File | Grid | Used for |
+|---|---|---|---|
+| grass, shrub | `patches.json` | 8 m patch | which cells carry a blade; gates the vines |
+| moisture | `moisture.bin` | 1 m column | vine vigour |
+| light | `light.bin` at `height[c] + 1` | 1 m column | vine vigour, as `1 - light` |
+
+The row names moisture, shade and cover, and those are exactly the three the run publishes on a grid
+the viewer can resample. The light sample is the same one shot V3 settled on and the same one the
+simulator's own germination and growth curves read — `surface_light`, one voxel above the surface —
+so the shade a vine answers to is the shade the simulator computed, not a number invented here.
+
+`patches.json` already had `grass` and `shrub` in it; `overlay.rs` simply stopped ignoring them, on
+the pass it was already making. No file, field or format version changed, and nothing in `ecosim/`
+was touched.
+
+## V4 a vine grows on the open side of a wall, not on the wall
+
+The obvious implementation puts vine voxels in the building's own columns. Those voxels are never
+drawn: `fill_chunk` writes the terrain and the building first and a plant only fills air. So a vine
+is rooted in the **open ground cell beside** a wall and climbs the air column there, which is also
+the physically right answer — a climber is on the outside of a building, not inside it.
+
+One consequence worth stating: the vine is one cell thick and stands a cell away from the wall face,
+so at the Capitol's 0.5 m it reads as a band of foliage against the stone rather than as a skin on
+it. That is the resolution the bundle has, not a stylistic choice.
+
+The climb is capped at the wall's top level, so a garden wall disappears under a vine and the
+Capitol's dome does not. `VINE_REACH_M` is 12 m at full vigour, which is the viewer's number: the
+run says nothing at all about climbers, because the simulator has none.
+
+## V4 sealed ground grows nothing, and that rule is copied rather than shared
+
+A cell of concrete, asphalt, roof or open water carries no grass, no shrub, and no vine on the wall
+beside it. That is the simulator's own `Medium::is_sealed` (`ecosim/src/bundle.rs`) plus open water,
+matched here on the **name** the bundle publishes rather than on a numeric code, and copied into
+`VoxelWorld::grows` rather than shared — the two projects share no code (CLAUDE.md). A medium this
+viewer does not recognise grows things, which is the harmless way to be wrong.
+
+This is the only place the viewer decides *whether* a plant is there rather than where. It earns its
+place twice: it is what makes the Capitol's paths and forecourt read as paths under the cover, and
+it is what makes an edit legible — pave a lawn over BRP and its blades and the climbers on the wall
+beside it both go.
+
+## V4 one uniform per cell, partitioned, not one draw per species
+
+A cell draws a single number in `[0, 1)`. The patch's shrub fraction takes the bottom of the
+interval and grass takes what is left under it. Two independent draws would have let a cell come up
+grass *and* shrub, and a cell cannot hold two plants; picking one at random afterwards would have
+made the realised fractions something other than the run's.
+
+Where a patch's grass and shrub sum past 1 — which happens on this run — it is **grass** that loses
+the cell. That is the same direction as the simulator's own grass suppression, arrived at here for a
+different reason, and it is why the drawn grass fraction can sit below the reported one. The
+measured numbers are in MEASUREMENTS.md.
+
+## V4 a field overlay takes the ground cover off and leaves the vines on
+
+An overlay is a map of the ground. At tick 10000 this run is 64% grass and 28% shrub, so leaving the
+cover on would have painted most of a moisture map green and made it a map of the grass instead.
+Turning it off is not a compromise: the overlay is the picture the user asked for.
+
+The vines stay, for two reasons. No overlay colours a wall, so they cost the map nothing. And the
+moisture and light maps are exactly the two fields that explain where the climbers are — the one
+view where a vine and its cause are on screen together. The HUD says which of the two is happening:
+*"(ground cover hidden under the overlay)"*.
+
+## V4 three voxel ids, in precedence order
+
+`VINE` 13, `SHRUB` 14, `GRASS` 15, so `ID_COUNT` is 16 and `BAND_BASE` moves from 13 to 16 with it.
+The ids are in precedence order on purpose: where two plants want the same voxel the lower id takes
+it, because the buckets sort on `(x, z, y, id)` and `fill_chunk` writes the first entry. So wood
+shows through leaves, leaves through a vine, and a vine through the ground cover it is rooted in —
+V3's rule, extended rather than replaced.
+
+Moving `BAND_BASE` does not move the V2 golden hash. A band's colour is indexed from `ID_COUNT`, so
+the whole ramp shifted with it and the colours a chunk's vertices get are unchanged. The five
+existing goldens are all untouched, which is the evidence that this shot adds a layer and does not
+change the site under it — and `--no-cover` at tick 10000 meshes to 162,966 quads, V3's number
+exactly.
+
+## V4 grass and shrub take the run's colours; a vine takes the viewer's
+
+`meta.json`'s species table names five species and gives each a colour. Two of them are the ground
+covers, so `palette()` substitutes them the same way it already substituted the trunk and canopy —
+matched on `name`, because both have `kind: "cover"` and the kind cannot tell them apart.
+
+There is no climber in that table, because the simulator has no climbers. Dressing a vine in another
+species' colour would let a screenshot imply the run grew it, so it gets a hue of its own,
+`VINE_HEX` `#3d7d2e`, a little yellower than the canopy, named in `palette.rs` as the viewer's with
+the reason beside it. It is the only plant colour in this viewer that is not the simulator's.
+
+## V4 the snapshot's fields are read once, for the cover and the overlay both
+
+Before this shot `apply_overlay_bands` read the snapshot's fields itself. The cover wants the same
+three files, and `light.bin` alone is 2 MB on the Capitol, so a scrub under a field overlay would
+have read it twice. `read_fields` now reads once in `apply_world_state` and hands the result to
+both. The error is carried as a `String` rather than an `io::Error` so one value can go to two
+callers; the overlay's failure behaviour — take the overlay off, put the reason on the screen — is
+unchanged.
+
+## V4 toggling the cover goes down the scrub path
+
+**V** and `--no-cover` rewrite the same voxels a snapshot change does, so `Timeline` gained
+`cover_applied` and `apply_world_state` treats a cover change exactly like a scrub: one
+re-voxelisation, one diff, one remesh of the chunks that actually differ. There is no second code
+path and no third kind of staleness. The cost is that toggling the cover re-voxelises the trees too,
+which MEASUREMENTS.md measures rather than assumes.
+
+## V4 `--eye` and `--look`, so a close-up is re-runnable
+
+The headless screenshot path had one camera pose, computed from the site's size. A picture of a wall
+with a climber on it could therefore only be taken by hand, and a shot report that says "look at
+this" has to be a command someone else can run. Two arguments, `x,y,z` in metres, defaulting to the
+pose `setup` already chose; a pose that does not parse is fatal, for the same reason a mistyped
+overlay is — a screenshot script would otherwise file the overview picture under the close-up's
+name. The exact commands are in MEASUREMENTS.md.
+
+## V4 the new tests live in `mesh_golden.rs`, for the fourth time
+
+Nine more, 38 in all, every one compiling with `--no-default-features`: the CI gate runs exactly one
+target and a second file means editing `.github/workflows/ci.yml`, which belongs to a `ci` row.
+`golden_cover` is a sixth golden hash, on a chunk holding a covered lawn and a wall with climbers on
+it, so a change to the scatter, the climb or the three colours fails a test rather than quietly
+changing every screenshot. No transcendental function appears in the cover model — the draw is
+`tree.rs`'s integer `mix` and the climb is one multiply and a `round` — so that hash is the same on
+Windows and on Linux, the same argument V3 made.

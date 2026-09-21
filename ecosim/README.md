@@ -125,6 +125,23 @@ run as shot G3 made it — what dies of what, how the imported wood gives way to
 fraction, and what building shade and the rain gradient do to a real site — and
 `sweeps/capitolG3-flat/FINDINGS.md` is the reference run as it stands, with the rain ramp off.
 
+`fixtures/capitol-animals-mini/` is the one committed bundle-world run that **keeps its animals**
+(shot S1) — the same site and seed, 2000 ticks, snapshots at 0 and 2000, with only the flat-rainfall
+override:
+
+```sh
+ecosim run --world worlds/capitol --seed 42 --ticks 2000 \
+  --out fixtures/capitol-animals-mini --snapshot-every 2000 --set climate.rain_gradient=0
+```
+
+Every other committed run has `animals.enabled=false`, so before it nothing that reads a grazer or a
+hunter was gated by anything. It is an addition, not a flip: `capitol-mini` still holds no animal,
+and `tests/bundle.rs` asserts both that and what this fixture is for — animals at both snapshots with
+positions written as JSON floats, and a patch holding 95 grazers, three times the crowding scale a
+reader gets from `disease.grazer_threshold`. `ECOSIM_REGEN_MANIFEST=1 cargo test --test bundle
+capitol_animals_mini` re-cuts it, and a plain `cargo test` compares it byte for byte against a fresh
+run. `DECISIONS.md` (shot S1) says why it is 2000 ticks and why nothing is copied to the renderer.
+
 `tools/blend_export.py` writes a bundle from a tagged `.blend`:
 
 ```sh

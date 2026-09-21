@@ -1580,3 +1580,94 @@ list. Three owners: G5 for the fertility and detritus group, the shot that unpar
 the tier and its six `SIG_*` constants, and **nobody** for the legacy non-water moisture path, which
 is retired in place — it exists so that pre-G4 runs still reproduce, and converting it would defeat
 the only reason it is still there.
+
+## Shot S1 — a committed bundle-world run that keeps its animals
+
+**The blind spot this closes, stated once.** Every committed bundle-world run — `runs/capitol-s42`,
+`fixtures/capitol-mini`, and the copy of that fixture the renderer serves — carries
+`--set animals.enabled=false`, because the garden direction parked the animal tier (MASTER.md,
+2026-09-19 evening). So until this shot **no committed run had an animal in it**, and anything that
+reads an animal was ungated: a reader could mishandle grazers and hunters and still pass CI, both
+projects' test suites, every reference screenshot and a human review. That is not hypothetical. Shot
+V1's entity reader declared `entities.json`'s `x` and `y` as `i32` and four independent checks missed
+it; it surfaced only when shot V2 made a throwaway animals-on run by hand. The checks were
+independent in who ran them and not in what they ran on.
+
+**The fix is an added fixture, not a flip of the existing one.** `fixtures/capitol-mini` is read by
+the renderer's pixel tests, so turning its animals on would move every one of them and buy nothing:
+the point is to have a run with animals, not to stop having one without. `capitol-mini` is untouched
+and a test now asserts that it still holds no animal, so the pair stays a pair.
+
+**`fixtures/capitol-animals-mini` is the Capitol at seed 42 with the tier left on**: 2000 ticks,
+snapshots at 0 and 2000, `--set climate.rain_gradient=0` and nothing else. Flat rainfall stays
+because it is about the *site* — a 2.5x west-to-east rain ramp is the noise strip's point and means
+nothing on 256 m of photographed ground (shot G3a) — while `animals.enabled` is left at the file's
+own `true`, which is the whole reason the fixture exists.
+
+**2000 ticks, because that is where the second defect lives.** The tier needs time before it is worth
+gating anything against. At tick 0 the run holds the 300 grazers and 20 hunters the parameters place,
+which is enough to break an integer position reader but not enough to crowd a patch: the busiest of
+the 1024 patches holds 3. By tick 2000 it holds **95 grazers, against the 32 a reader gets from
+`2 x disease.grazer_threshold`** — the scale top shot V2's crowding overlay picked, having no
+committed run to check it against. 2000 is also the length of the private animals-on run the operator
+measured 94 on, so the committed fixture reproduces a number that was already written down.
+
+**Two snapshots, matching `capitol-mini`'s shape.** A snapshot of this world is 8.8 MB, so a third
+costs more than the timeline it would buy; ticks 0 and 2000 are the two states the fixture is for.
+The whole directory is 22 MB, against `capitol-mini`'s 19 — the extra is `entities.json` at tick
+2000, which is 1.7 MB of animals, plus 2000 rows of `series.csv` and `events.csv`.
+
+**The fixture is pinned the way every other one is**, by a fresh run of the documented command
+compared byte for byte (`timing.json` apart), and regenerated through the same
+`ECOSIM_REGEN_MANIFEST=1` switch. A committed picture nobody compares drifts, and this project has
+one of those already.
+
+**A second test asserts what the fixture is for, not just what it is.** Byte-equality would still
+pass if a future regeneration quietly lost the animals — the fixture would simply become another
+animals-off run and the blind spot would reopen silently. So
+`the_animals_fixture_carries_what_an_animals_off_run_cannot` reads the committed bytes and asserts
+the three properties the row was opened about: the tier is on, both snapshots carry animals whose
+positions are JSON *floats*, and the busiest patch is over the crowding scale top. It needs no run,
+so it costs 20 ms and is the test that fails first if anything goes wrong.
+
+**The positions are floats in the file and whole numbers in value, and the test says which matters.**
+`Animal::x` is documented in `src/animals.rs` as integer-valued, and on this run every animal sits on
+a whole metre at both snapshots. So the description of shot V1's bug as "the simulator writes animals
+at continuous positions" is true of the *type* and not of the values: what breaks a reader that
+declares these fields `i32` is the `.0` serde writes, and that is what the test asserts
+(`Value::as_i64` refuses `81.0`). A test written against fractional coordinates would pass today and
+prove nothing.
+
+**`meta.json` cannot say that a run has animals — only that it does not.** Shot G0 writes the
+top-level `animals` key when the tier is off and omits it otherwise, and `params.animals` is skipped
+at its default, so "animals on" is the absence of two things rather than the presence of one. The
+test asserts the absences and then proves the positive fact from `entities.json`, which is the only
+place it is actually recorded. This is the same shape as the omit-at-defaults problem backlog row S2
+describes, met in a different field.
+
+**Nothing is copied into `ecoview/public/`.** The handoff script is not taught about this fixture
+either. `ecoview` is frozen and will grow no test that reads it; `ecoview-native`, the primary
+viewer, opens paths on disk directly and already reads `../ecosim/worlds/capitol` that way, so it
+needs no copy. Adding a line to `scripts/sync-data.sh` without committing its output would leave 22 MB
+untracked in a directory whose siblings are all tracked, which is a trap for the next worker's
+`git add -A`. The shot that actually serves this fixture in a browser can add both halves together.
+
+**What the fixture's run actually does, and one thing it must not be read as saying.** The event log
+over its 2000 ticks: 9545 grazer births against 409 `crowded`, 211 `eaten` and 21 `starved` deaths;
+11 hunter births and 3 `starved`; 307 tree germinations against 353 `drought` and 9 `burnt` deaths;
+and 34 ignitions, 32 spreads, 66 burnouts and 32 storms. So the grazers go 300 -> 9204 in half a year
+with almost nothing removing them, the hunters stay at 20 -> 28, and the tree count peaks at 337
+around tick 1000 and falls to 24 by tick 2000, of thirst rather than of grazing.
+
+An animals-off run of the same seed, site and length ends with 532 trees, 689 germinations, 228
+drought deaths and 51.4 mm of mean soil water, against this run's 24, 307, 353 and 27.1. **That is not
+a controlled comparison and must not be reported as one.** The animal phase draws from the same RNG
+stream, so the two runs get different weather: 32 storms against 41 over the same 2000 ticks. The
+numbers are recorded because they describe the committed fixture, not because they attribute anything
+to the animals — shot V5 found the same limit from the other side, and a site-wide number from a
+single differing run is a reading of the weather.
+
+**Nothing here is tuned, deliberately.** The animal tier is parked by the operator's direction of
+2026-09-19: it stays in the code, and no shot tunes it. An unregulated grazer population is
+therefore reported and left alone. The fixture's value does not depend on the tier being well
+behaved — it depends on there being animals in it at all.

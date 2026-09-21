@@ -360,3 +360,99 @@ fn the_committed_capitol_mini_fixture_matches_a_fresh_run() {
     }
     fs::remove_dir_all(&out).unwrap();
 }
+
+/// The params for the one committed bundle-world run that keeps its animals (shot S1): flat
+/// rainfall like every other bundle run (shot G3a), and `animals.enabled` left at the file's own
+/// `true`, which is the entire point of the fixture and so is not overridden here.
+fn bundle_params_with_animals(b: &Bundle) -> (Params, Vec<String>) {
+    let (mut p, set) = params(&["climate.rain_gradient=0"]);
+    b.apply_to(&mut p).unwrap();
+    (p, set)
+}
+
+/// `fixtures/capitol-animals-mini` is the Capitol at seed 42 with the animal tier left on, 2000
+/// ticks, snapshots at 0 and 2000 (shot S1). A fresh run of the command `README.md` documents
+/// matches it byte for byte, `timing.json` apart — the same pin `capitol-mini` carries.
+#[test]
+#[cfg_attr(coverage, ignore = "a 256x256 world for 2000 ticks; runs in `cargo test` and CI step 3, not under llvm-cov")]
+fn the_committed_capitol_animals_mini_fixture_matches_a_fresh_run() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let b = Bundle::load(&root.join("worlds/capitol")).unwrap();
+    let (p, set) = bundle_params_with_animals(&b);
+    let out = tmp("capitol_animals_mini");
+    let opts = RunOptions { format_version: BUNDLE_FORMAT_VERSION, bundle: Some(&b), ..Default::default() };
+    run_with(p, 42, 2_000, 2_000, &set, &out, opts).unwrap();
+    let fixture = root.join("fixtures/capitol-animals-mini");
+    if !regen_fixture(&fixture, &out) {
+        assert_eq!(ecosim::check::diff_runs(&fixture, &out).unwrap(), Vec::<String>::new());
+    }
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// Read `entities.json` and return, for each animal, whether its position is written as a JSON
+/// float, plus the grazer count of every 8 × 8 patch of a 256-column world.
+fn animals_of(snap: &Path) -> (usize, usize, usize, Vec<u32>) {
+    let v: Vec<Value> = serde_json::from_slice(&fs::read(snap.join("entities.json")).unwrap()).unwrap();
+    let (mut grazers, mut hunters, mut floats) = (0, 0, 0);
+    let mut per_patch = vec![0u32; 32 * 32];
+    for e in &v {
+        match e["kind"].as_str().unwrap() {
+            "grazer" => grazers += 1,
+            "hunter" => hunters += 1,
+            _ => continue,
+        }
+        // `as_i64` refuses `81.0`: serde_json keeps the literal's kind, which is what a reader
+        // that declared these fields `i32` tripped over.
+        if e["x"].as_i64().is_none() && e["y"].as_i64().is_none() {
+            floats += 1;
+        }
+        if e["kind"] == "grazer" {
+            let (x, y) = (e["x"].as_f64().unwrap() as usize, e["y"].as_f64().unwrap() as usize);
+            per_patch[x / 8 + 32 * (y / 8)] += 1;
+        }
+    }
+    (grazers, hunters, floats, per_patch)
+}
+
+/// What the animals fixture is *for*, asserted on the committed bytes. Each of these is a hole the
+/// animals-off reference runs left open, and each has already been fallen into once: a regeneration
+/// that quietly lost the animals has to fail here and not in a viewer six shots later.
+#[test]
+fn the_animals_fixture_carries_what_an_animals_off_run_cannot() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("fixtures/capitol-animals-mini");
+    let m = meta(&fixture);
+
+    // (1) The tier is on — and `meta.json` says so only by omission. Shot G0 writes the `animals`
+    // key when the tier is *off* and leaves it out otherwise, and `params.animals` is skipped at
+    // its default, so there is no positive statement in the header to assert. This is what a
+    // reader has to go on: an absent key, no params section, and the flat-rainfall override alone.
+    assert!(m["animals"].is_null(), "an absent `animals` key is how meta.json says the tier is on");
+    assert!(m["params"]["animals"].is_null());
+    assert_eq!(m["overrides"], serde_json::json!(["climate.rain_gradient=0"]));
+    assert_eq!(m["snapshots"], serde_json::json!([0, 2000]));
+
+    // (2) Animals are in `entities.json` at both snapshots, and their positions are JSON *floats*.
+    // `Animal::x` is documented as integer-valued and on this run every one of them is a whole
+    // number, so the value is not what breaks an integer reader — the `.0` in the file is.
+    let (g0, h0, f0, _) = animals_of(&fixture.join("snap_000000"));
+    assert_eq!((g0, h0), (300, 20), "the tier is populated at the first snapshot, not only later");
+    assert_eq!(f0, g0 + h0, "every animal position at tick 0 is a JSON float");
+    let (g, h, floats, per_patch) = animals_of(&fixture.join("snap_002000"));
+    assert_eq!((g, h), (9204, 28), "the committed run's animals at tick 2000");
+    assert_eq!(floats, g + h, "every animal position at tick 2000 is a JSON float");
+
+    // (3) The crowding an overlay has to survive. A reader that takes the top of its crowding
+    // scale from `disease.grazer_threshold` — twice it, as one has — saturates far below what this
+    // run reaches, and the saturated patches are exactly the ones such an overlay exists to show.
+    let scale_top = 2 * m["params"]["disease"]["grazer_threshold"].as_u64().unwrap() as u32;
+    let busiest = *per_patch.iter().max().unwrap();
+    assert_eq!((scale_top, busiest), (32, 95));
+    assert_eq!(per_patch.iter().filter(|&&n| n >= scale_top).count(), 5, "patches at or over the scale top");
+
+    // The older fixture is untouched: `capitol-mini` still has no animal in it. This one is an
+    // addition and not a flip, because flipping it would move every pixel test that reads it.
+    let old = root.join("fixtures/capitol-mini");
+    assert_eq!(meta(&old)["animals"], false);
+    assert_eq!(animals_of(&old.join("snap_000100")), (0, 0, 0, vec![0; 32 * 32]));
+}

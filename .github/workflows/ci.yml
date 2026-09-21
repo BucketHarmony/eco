@@ -22,12 +22,96 @@ defaults:
     shell: bash
 
 jobs:
+  # WHICH JOBS RUN, AND WHY THE RELATION IS DIRECTED (shot C1).
+  #
+  # `scripts/sync-data.sh` copies the simulator's output into `ecoview/public/`, so ecoview's
+  # tests and screenshots run against ecosim's data. The affects-relation is therefore one-way,
+  # and a filter keyed naively on the changed directory would be wrong:
+  #
+  #     a change to        must run
+  #     ecosim/            ecosim, ecosim-coverage, ecosim-sims, ecosim-bench AND ecoview
+  #     ecoview/           ecoview
+  #     ecoview-native/    ecoview-native
+  #     anything else      everything
+  #
+  # That last ecosim -> ecoview edge is not decoration. Shots G4b and G4c broke the `ecoview`
+  # job from ecosim-only diffs, and a symmetric filter would have let both through. Do not drop
+  # it, and when a fourth component appears, work out which way the arrow points before adding
+  # a case below.
+  #
+  # THE FULL RUN IS THE DEFAULT. A push that says nothing runs all eight jobs; the narrow run is
+  # opted into by putting `[ci-narrow]` in the head commit's message. A worker who forgets the
+  # marker gets complete coverage rather than partial coverage. Never invert this, and never
+  # declare a shot Done on a narrow run: the push that closes a shot carries no marker and runs
+  # all eight (overnight/MASTER.md, "GitHub CI"; overnight/shots/C1-ci-scope.md).
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: .
+        shell: bash
+    outputs:
+      ecosim: ${{ steps.pick.outputs.ecosim }}
+      ecoview: ${{ steps.pick.outputs.ecoview }}
+      native: ${{ steps.pick.outputs.native }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The push range is diffed, so the whole history is needed, not the default one commit.
+          fetch-depth: 0
+
+      - name: pick the jobs this diff can affect
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Every path out of this script that is not a clean, marked, wholly-understood diff
+          # ends here, running everything. Unknown input must cost time, never coverage.
+          everything() {
+            printf 'ecosim=true\necoview=true\nnative=true\n' >> "$GITHUB_OUTPUT"
+            echo "FULL RUN, all eight jobs: $1"
+            exit 0
+          }
+          [ "$EVENT" = push ] || everything "the event is $EVENT, not a push"
+          # Piping git into grep would make pipefail depend on whether git noticed the early
+          # exit, so the message is captured and matched instead.
+          msg=$(git log -1 --pretty=%B "$HEAD_SHA")
+          case "$msg" in
+            *'[ci-narrow]'*) ;;
+            *) everything "the head commit message carries no [ci-narrow] marker" ;;
+          esac
+          git cat-file -e "${BEFORE}^{commit}" 2>/dev/null \
+            || everything "there is no usable commit before this push to diff against"
+          files=$(git diff --name-only "$BEFORE" "$HEAD_SHA")
+          [ -n "$files" ] || everything "the diff against $BEFORE is empty"
+          echo "changed files:"
+          echo "$files" | sed 's/^/  /'
+          sim=false
+          view=false
+          native=false
+          while IFS= read -r f; do
+            case "$f" in
+              ecosim/*)         sim=true; view=true ;;
+              ecoview/*)        view=true ;;
+              ecoview-native/*) native=true ;;
+              *)                everything "$f is outside the three components" ;;
+            esac
+          done <<<"$files"
+          printf 'ecosim=%s\necoview=%s\nnative=%s\n' "$sim" "$view" "$native" >> "$GITHUB_OUTPUT"
+          echo "NARROW RUN: ecosim=$sim ecoview=$view ecoview-native=$native"
+
   # Since shot 15 the gate is split three ways so it fits 10 minutes on the 256x64 strip
   # (ecosim/DECISIONS.md, shot 15): `ecosim` runs steps 0-3 and 8, `ecosim-coverage` step 4, and
   # `ecosim-sims` steps 5-7, 9 and 10 as a seed matrix (seed 1 also runs the long run, seed 2 the
   # baseline sweep, seed 3 the Capitol run). `just ci` runs the same steps one after another.
   ecosim:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.ecosim == 'true'
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +158,8 @@ jobs:
 
   ecosim-coverage:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.ecosim == 'true'
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -106,6 +192,8 @@ jobs:
 
   ecosim-sims:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.ecosim == 'true'
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -181,6 +269,8 @@ jobs:
   # whose numbers come from this job's bench-tick.json artifact.
   ecosim-bench:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.ecosim == 'true'
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -218,6 +308,8 @@ jobs:
   # on this Linux runner even though the references were rendered on Windows (ecoview/DECISIONS.md, E5).
   ecoview:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.ecoview == 'true'
     timeout-minutes: 30
     defaults:
       run:
@@ -321,18 +413,23 @@ jobs:
             ecoview/shots/diff/*.png
           if-no-files-found: ignore
 
-  # ecoview-native (shot V0): the Bevy spike's CI half. This job is new and independent -- it has no
-  # `needs`, so nothing above waits on it and nothing above can be reddened by it.
+  # ecoview-native (shot V0): the Bevy spike's CI half. This job is independent -- its only `needs`
+  # is `changes`, which decides whether it runs and asserts nothing, so nothing above waits on its
+  # work and nothing above can be reddened by it.
   # The mesh golden is the only gate here. It runs with `--no-default-features`, which leaves the
   # engine out entirely: the loader, the voxel world and the mesher are plain Rust, so the gate needs
   # no GPU, no display and about a minute of compile. Everything after it is measurement for
   # MEASUREMENTS.md and carries `continue-on-error: true`.
   ecoview-native:
     runs-on: ubuntu-latest
-    # The gate itself takes seconds; the budget is for the ten software-rendered screenshots after it,
-    # which cost about 4 minutes each on lavapipe (MEASUREMENTS.md). At 45 the job was cancelled with
-    # nine of ten measured, and a cancelled job is a red run even when every step in it is optional.
-    timeout-minutes: 90
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
+    # The gate itself takes seconds; the budget is for the release build of the viewer (about 8 min
+    # even from a warm cache) and the one software-rendered screenshot after it (about 4 min on
+    # lavapipe). It was 90 when that step rendered ten pictures instead of one, and the comment that
+    # stood here said it should come down with them; shot C1 brought it down. Leave room: a cancelled
+    # job is a red run even when every step in it is optional.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: ecoview-native
@@ -361,7 +458,7 @@ jobs:
           cargo test --release --no-default-features --test mesh_golden
           echo "mesh golden: $((SECONDS - start)) s including compile"
 
-      # Measurement only, never a gate. Ten headless screenshots of the stress world on lavapipe.
+      # Measurement only, never a gate: the software Vulkan stack the screenshot below needs.
       - name: software vulkan
         continue-on-error: true
         run: |
@@ -375,27 +472,30 @@ jobs:
         continue-on-error: true
         run: cargo build --release
 
-      - name: ten headless screenshots on lavapipe
+      # This was ten screenshots; shot C1 cut it to one. It is a measurement, never a gate, and the
+      # measurement has already been made: shot V0 ran ten of them on lavapipe -- 10/10, 136-142 s
+      # each, every PNG 811,550 bytes -- and shot V0a reproduced it. Those numbers are in
+      # MEASUREMENTS.md, and repeating them cost about 40 minutes of every run that reached this
+      # component, the largest single time sink in this pipeline. What is left is a smoke check: the
+      # headless software-rendered path still produces a picture off Windows. A screenshot that stops
+      # working still shows up here; a *timing* regression no longer does, and that is the trade
+      # (.github/DECISIONS.md, shot C1).
+      - name: one headless screenshot on lavapipe (smoke check)
         continue-on-error: true
         env:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
           VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.json
           WGPU_BACKEND: vulkan
         run: |
-          ok=0
-          for i in $(seq 1 10); do
-            start=$SECONDS
-            if timeout 300 xvfb-run -a ./target/release/ecoview-native \
-                 --stress --headless --frames 300 --screenshot "shots/ci-$i.png" > "shots/ci-$i.log" 2>&1 \
-               && [ -s "shots/ci-$i.png" ]; then
-              ok=$((ok + 1))
-              echo "run $i: ok in $((SECONDS - start)) s, $(stat -c%s shots/ci-$i.png) bytes"
-            else
-              echo "run $i: FAILED after $((SECONDS - start)) s"
-              tail -5 "shots/ci-$i.log" || true
-            fi
-          done
-          echo "lavapipe screenshots: $ok/10 succeeded"
+          start=$SECONDS
+          out=shots/ci-1.png
+          log=shots/ci-1.log
+          if timeout 300 xvfb-run -a ./target/release/ecoview-native --stress --headless --frames 300 --screenshot "$out" > "$log" 2>&1 && [ -s "$out" ]; then
+            echo "lavapipe screenshot: ok in $((SECONDS - start)) s, $(stat -c%s "$out") bytes"
+          else
+            echo "lavapipe screenshot: FAILED after $((SECONDS - start)) s"
+            tail -20 "$log" || true
+          fi
 
       - uses: actions/upload-artifact@v4
         if: always()

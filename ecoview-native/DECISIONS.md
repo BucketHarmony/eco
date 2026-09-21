@@ -273,3 +273,115 @@ Nine more, for V1's reason: the CI gate runs exactly one target, and a second fi
 tests compile with `--no-default-features`. `golden_banded` is a fourth golden hash, taken on a chunk
 meshed under an overlay, so a change in the band ids, the resampling or the ramp fails a test rather
 than quietly changing a screenshot.
+
+## V3 the row names five inputs, and the run directory has four
+
+The row asks for geometry "from seed, species, age, biomass and light". Four of those exist; the
+fifth does not, anywhere:
+
+| Input | Where it comes from |
+|---|---|
+| seed | `meta.json`'s `seed`, mixed with the tree's `id` from `entities.json` — so the same tree is the same shape at every tick and in every process, and two trees of the same age differ |
+| species | `params.tree`'s stage ages and the species colours already in `meta.json` |
+| age | `entities.json`'s `age` in ticks over `meta.json`'s `year_len` |
+| light | `light.bin` at the tree's own column |
+| **biomass** | **nowhere.** `entities.json` carries `id`, `x`, `y`, `z`, `age`, `stage` and `lifespan`. The simulator holds no mass, diameter or leaf area for a tree |
+
+So the viewer does not invent one. Age through the simulator's own height curve is the only
+dimensional quantity that is genuinely the simulator's, every derived quantity is a stated fraction of
+it, and the HUD names the source of each number the way V2's overlays do. A worker note in
+`overnight/BACKLOG.md` proposes the `ecosim` row that would publish a real per-tree size — inventing a
+biomass here would have put a number on screen that no invariant in `ecosim check` can contradict.
+
+## V3 height comes from ecosim's own age curve, inverted, with no vigour term
+
+`Life::height_of` is `ecosim/src/plants.rs::import_age` run backwards: linear from 0 to
+`bundle.tree_mature_height` over the sapling and young stages, then to `tree_tall_height` at
+`tree_tall_age_years`, then flat. Inverting the simulator's own function is what makes the tick-0
+picture agree with the bundle's survey to the metre (MEASUREMENTS.md), because that survey is what
+`import_age` consumed in the first place.
+
+It was tempting to scale height by `lifespan / max_age`, so a short-lived tree would look stunted.
+Rejected: that agreement is the one check this model has, and a vigour term would break it for a
+prettier idea the simulator does not hold. `params.bundle` is absent from `meta.json` at the defaults
+(ecosim's `skip_serializing_if`), so on every reference run the curve's breakpoints are this viewer's
+fallback and the HUD says so on its own line.
+
+## V3 the light sample is ecosim's `surface_light`, not the light where the leaves are
+
+Measured and rejected, in that order (MEASUREMENTS.md): sampling `light.bin` at the middle of the
+procedural crown returns 1.00 of full sun for every tree at every tick, because the simulator's canopy
+is one to three voxels tall and the procedural crown's middle is 13.7 m of open sky above it. The
+sample is `light[height[c] + 1]` — V2's surface sample, and the number the simulator's own germination
+and growth curves read. Its doc comment records the rejected alternative so the next shot does not
+re-derive it.
+
+The direction it drives is deliberately one-way: light sets **crown density**, never height or limb
+count. Height is the simulator's (above); a shaded tree in this viewer is a thinner tree, which is
+expression of a number the simulator already acted on, not a second simulation of shading on top of
+it. `CrownLight` falls back to full sun with a named fallback string when `light.bin` or `height.bin`
+does not match `dims`.
+
+## V3 the envelope is an ellipsoid and a tip is pulled along its radius
+
+Crown radius is 0.30 of height and crown base 0.37 of it — the means over the Capitol bundle's 81
+surveyed trees, measured rather than chosen, so the procedural crowns sit where the survey's do.
+
+The first version clamped a branch tip per axis (x and z to the crown radius, y to the height) and
+every tree over 10 m rendered as a bare post: three generations of branch, each rising about three
+quarters of its own length, land all 27 tips at the apex, where the ellipsoid is a point, and the leaf
+clip threw their blobs away. `pull_into_envelope` scales a point along the envelope's own radius to
+`TIP_FRAC` = 0.78 of the wall instead, so a leaf blob centred on a tip is mostly inside the crown, and
+the upward bias dropped from 0.30 to 0.18. The measurement is in MEASUREMENTS.md; the lesson is that a
+clamp in the wrong coordinates is invisible in the test suite and obvious in one close-up, which is
+why this shot has a close-up.
+
+## V3 no transcendental function appears in the tree model
+
+The golden hash is taken on Windows and checked in CI on Linux, so the model uses `f32::sqrt` and
+nothing else: branch directions come from **rejection sampling a cube** rather than from `sin`/`cos`,
+and there is no `powf` or `exp` anywhere. `ecosim` solved the same problem by routing its trig through
+`libm`; this component has no such dependency and does not need one. `golden_procedural_tree` would be
+a cross-platform flake if it did.
+
+## V3 wood beats leaves on a shared voxel, and a small crown gets a floor
+
+Limbs are stamped as capsules of `TRUNK` at half-cell steps and a leaf blob of `CANOPY` at each tip.
+`fill_chunk` writes only into `AIR` and the id buckets are sorted, so `TRUNK` (11) wins over `CANOPY`
+(12) wherever a blob covers a limb — a branch stays visible through its own foliage, which is the
+whole point of replacing the solid ellipsoid. The leaf radius has a floor of `0.9 × cell_m`: without
+it a sapling's three tips are three single voxels, which is both invisible and the worst case for the
+greedy mesher (six unmergeable quads each).
+
+## V3 a run tree gets headroom above the bundle's survey
+
+`VoxelWorld::from_bundle` now delegates to `from_bundle_with_headroom`, and `main.rs` passes
+`life.tall_height_m`. The chunk grid's height used to be the bundle's own tallest feature, so a run
+tree taller than anything surveyed would have been silently beheaded at the top chunk. The Capitol
+still reports 324 chunks and 214 levels, because its dome is taller than 20 m; a flatter bundle would
+have grown a chunk layer, which the test `a_run_tree_gets_room_above_the_bundle` asserts.
+
+## V3 `Stage::shape` is gone, and its test with it
+
+V0 mapped a stage to a shape (a sapling was a stick, a mature tree an ellipsoid). Stage no longer
+decides geometry — age does, continuously — so the function is deleted rather than left unused, and
+`Stage` keeps only `index()`, which the HUD's three counters need.
+`the_three_stages_are_three_sizes` is replaced by `a_stage_is_parsed_or_refused`, which asserts what
+the field still does: name a stage or fail the load. Deleting a test is worth a line here; this one
+asserted a behaviour the row asked to remove.
+
+## V3 `RunMeta` derives `Default` but is not `#[serde(default)]`
+
+`Life::default()` needs a `RunMeta`, so `RunMeta` and `Dims` derive `Default`. A struct-level
+`#[serde(default)]` would have been the easy way to give `year_len` a fallback and would also have made
+a `meta.json` with no `dims` parse as a silent 0 × 0 world. `#[serde(default)]` sits on `year_len`
+alone, and a doc comment says why it is not on the struct.
+
+## V3 the new tests live in `mesh_golden.rs`, for the third time
+
+Nine more, 29 in all, every one compiling with `--no-default-features`: the CI gate runs exactly one
+target and a second file means editing `.github/workflows/ci.yml`, which belongs to a `ci` row.
+`golden_procedural_tree` is a fifth golden hash, on a chunk holding one tree grown from a run, so a
+change in the branching, the height curve, the light sample or the leaf radius fails a test instead of
+quietly changing every screenshot. The four earlier goldens are untouched, which is the evidence that
+this shot changed plants and nothing else.

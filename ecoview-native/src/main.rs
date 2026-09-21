@@ -212,6 +212,16 @@ struct Timeline {
     last_ms: f64,
     trees: usize,
     unknown_stage: usize,
+    /// Shot V3's tree model, as the snapshot reported it: how many trees the simulator calls
+    /// sapling, young and mature, the height span its ages map to, the light their crowns get, and
+    /// how many voxels of wood and leaf that came to. All of it printed, because a procedural tree
+    /// is the one thing on screen a reader cannot check against the run by eye.
+    stages: [usize; 3],
+    height: (f32, f32, f32),
+    light: (f32, f32, f32),
+    light_source: String,
+    wood: usize,
+    leaves: usize,
 }
 
 impl Timeline {
@@ -344,7 +354,10 @@ fn main() {
         timeline.run = Some(run);
     }
     let voxelise = Instant::now();
-    let world = VoxelWorld::from_bundle(&bundle);
+    // The chunk grid is sized once, and a run tree taller than the bundle's own tallest survey
+    // would be cut off at the top of it. The run says how tall its species ever gets, so ask.
+    let headroom = timeline.run.as_ref().map_or(0.0, |r| r.life.tall_height_m);
+    let world = VoxelWorld::from_bundle_with_headroom(&bundle, headroom);
     println!(
         "world {} {}x{} cells at {} m, {} chunks, {} levels; read {:.0} ms, voxelise {:.0} ms",
         bundle.name,
@@ -497,6 +510,11 @@ fn load_snapshot(world: &mut VoxelWorld, t: &mut Timeline) -> Vec<ChunkPos> {
     let stale = world.set_plants(&snap.trees, &[]);
     t.trees = snap.trees.len();
     t.unknown_stage = snap.unknown_stage;
+    t.stages = snap.stages;
+    t.height = snap.height;
+    t.light = snap.light;
+    t.light_source = snap.light_source.clone();
+    (t.wood, t.leaves) = world.plant_counts();
     t.last_chunks = stale.len();
     t.last_ms = start.elapsed().as_secs_f64() * 1000.0;
     t.applied = Some(t.index);
@@ -518,6 +536,30 @@ fn setup(
     // The run's trees and the overlay both go in before the first mesh, so the site is never drawn
     // with the bundle's vegetation under the wrong palette and then corrected a frame later.
     load_snapshot(&mut site.world, &mut timeline);
+    // The tree model on stdout as well as in the HUD: a procedural tree is the one thing in the
+    // picture a reader cannot check against the run by eye, so a scripted run leaves the numbers
+    // behind it (MEASUREMENTS.md, V3).
+    if let Some(run) = &timeline.run {
+        println!(
+            "trees: {} at tick {} ({} sapling, {} young, {} mature), {:.1}..{:.1} m median {:.1};              crown light {:.2}..{:.2} mean {:.2} from {}; {} wood and {} leaf voxels,              voxelised in {:.0} ms; height from age: {}",
+            timeline.trees,
+            run.tick_at(timeline.index),
+            timeline.stages[0],
+            timeline.stages[1],
+            timeline.stages[2],
+            timeline.height.0,
+            timeline.height.2,
+            timeline.height.1,
+            timeline.light.0,
+            timeline.light.2,
+            timeline.light.1,
+            timeline.light_source,
+            timeline.wood,
+            timeline.leaves,
+            timeline.last_ms,
+            run.life.source,
+        );
+    }
     apply_overlay_bands(&mut site.world, &mut overlays, &timeline);
     site.palette = palette(overlays.active, timeline.run.as_ref().map(|r| &r.meta));
     // One line on stdout for a headless or scripted run, so a screenshot is never the only record of
@@ -1117,6 +1159,24 @@ fn hud(
                 timeline.last_chunks,
                 timeline.last_ms,
             ));
+            s.push_str(&format!(
+                "\n{} sapling, {} young, {} mature   {:.1} to {:.1} m, median {:.1}\n\
+                 crown light {:.2} to {:.2}, mean {:.2} of full sun -- {}\n\
+                 {} wood and {} leaf voxels   height from age: {}",
+                timeline.stages[0],
+                timeline.stages[1],
+                timeline.stages[2],
+                timeline.height.0,
+                timeline.height.2,
+                timeline.height.1,
+                timeline.light.0,
+                timeline.light.2,
+                timeline.light.1,
+                timeline.light_source,
+                timeline.wood,
+                timeline.leaves,
+                run.life.source,
+            ));
             if timeline.unknown_stage > 0 {
                 s.push_str(&format!(
                     "\n{} trees have a stage this viewer does not know and are not drawn",
@@ -1369,6 +1429,25 @@ fn stats_method(
         "tick": t.tick(),
         "playing": t.playing,
         "trees": t.trees,
+        "tree_model": {
+            "sapling": t.stages[0],
+            "young": t.stages[1],
+            "mature": t.stages[2],
+            "unknown_stage": t.unknown_stage,
+            "height_m": {"min": t.height.0, "median": t.height.1, "max": t.height.2},
+            "crown_light": {"min": t.light.0, "mean": t.light.1, "max": t.light.2},
+            "crown_light_source": t.light_source,
+            "wood_voxels": t.wood,
+            "leaf_voxels": t.leaves,
+            "height_curve": t.run.as_ref().map(|r| json!({
+                "source": r.life.source,
+                "from_meta": r.life.from_meta,
+                "year_ticks": r.life.year_ticks,
+                "mature_height_m": r.life.mature_height_m,
+                "tall_height_m": r.life.tall_height_m,
+                "tall_years": r.life.tall_years,
+            })),
+        },
         "snapshot_chunks": t.last_chunks,
         "snapshot_ms": t.last_ms,
         "overlay": ov.active.name(),

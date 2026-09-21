@@ -324,7 +324,8 @@ beside it.
 
 # ecoview-native V2: what six overlays cost, and what they actually show
 
-All of it on this machine (Windows 11, Ryzen 9 5950X, RTX 3080), release build, headless, against the
+All of it on this machine (Windows 11, a 12th Gen Intel Core i9-12900KF, RTX 4090 -- see the V3
+section's correction), release build, headless, against the
 committed Capitol bundle (512 × 512 ground cells at 0.5 m) and `ecosim/runs/capitol-s42` at tick
 10000 unless another run is named. Each figure is one `ecoview-native --headless --frames 300` run,
 read off its own stdout.
@@ -422,3 +423,131 @@ colours them; if `moisture.bin` were wrong, this would draw the wrong thing conf
 invariants live in `ecosim check`. What the overlays add is that a wrong field is now *visible* —
 drainage lines that do not follow the terrain, or shade on the sunny side of a building, are the kind
 of error no scalar in `series.csv` reports.
+
+
+# ecoview-native V3: what a procedural tree costs, and the one input the run does not have
+
+All of it on this machine (Windows 11, a 12th Gen Intel Core i9-12900KF with 16 cores and 24 threads,
+RTX 4090, Vulkan), release build, headless, against the committed Capitol bundle (512 × 512 ground
+cells at 0.5 m) and `ecosim/runs/capitol-s42`. Every figure is read off one
+`ecoview-native --headless` run's own stdout.
+
+## Correction: the V2 section named the wrong machine
+
+V2's header says "Ryzen 9 5950X, RTX 3080". This machine is the i9-12900KF and RTX 4090 that V0's
+header names — the same clerical slip shot V0a existed to fix, made again one shot after it. The V2
+numbers are not wrong; they were all taken here. Only the name beside them was. Corrected in place,
+with a pointer to this note.
+
+## The model, at three ticks
+
+| Tick | Trees (sapling / young / mature) | Height, median | Crown light | Wood voxels | Leaf voxels | Voxelise | Full-site mesh | Quads |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 79 (0 / 0 / 79) | 4.7–20.0 m, 13.9 | 0.14 flat | 4,940 | 74,319 | 16 ms | 32 ms | 76,513 |
+| 10000 | 998 (321 / 352 / 325) | 0.0–20.0 m, 1.9 | 0.14–1.00, mean 0.50 | 21,830 | 292,966 | 60 ms | 32 ms | 162,966 |
+| 20000 | 4,082 (1117 / 96 / 2869) | 0.2–20.0 m, 10.6 | 0.14–1.00, mean 0.38 | 185,963 | 2,085,047 | 557 ms | 43 ms | 798,340 |
+
+"Voxelise" is stamping every tree's limbs and leaf blobs into the chunk grid; "full-site mesh" is all
+324 chunks, 93 of which hold geometry. The tick-20000 column is the worst case the reference run
+reaches: **2.27 million plant voxels, and 0.6 s to put them there**.
+
+## What the branches cost against V0's trunk-and-ellipsoid
+
+| | V0/V2 solid | V3 branches | Ratio |
+|---|---|---|---|
+| Surface quads, tick 10000 | 79,504 | 162,966 | 2.05× |
+| Light-overlay quads, tick 10000 | 78,044 | 161,501 | 2.07× |
+| Snapshot change (162 of 324 chunks) | 2.1–2.9 ms | 13.5 ms at tick 0, 62.3 ms at 10000, **537.2 ms at 20000** | up to 200× |
+
+Two quads for one, and the snapshot-change path is the one that moved: V2 could scrub the timeline
+inside a frame, and V3 cannot at the dense end. 537 ms is still inside V0's "a full remesh under 1 s"
+gate, the scrub stays usable because the bar keeps drawing, and no optimisation was added for it —
+this shot's job is the geometry, and a measured 0.5 s is a better thing to hand the next shot than an
+unmeasured cache.
+
+## Fuller crowns cost *fewer* quads
+
+The rejected light sample (below) is also the clearest measurement of the greedy mesher's shape
+sensitivity, because it produced thinner crowns on the same skeletons:
+
+| | Leaf voxels at tick 20000 | Quads |
+|---|---|---|
+| Thin crowns (crown-centre light) | ~1.47 million | 1,017,523 |
+| Full crowns (surface light) | 2,085,047 | **798,340** |
+
+**42% more leaf voxels, 22% fewer quads.** An isolated voxel is six quads that cannot merge with
+anything; a solid cluster is a box. V0 measured this on noise terrain and it holds for foliage: the
+expensive crown is the sparse one, so making trees leafier is close to free and thinning them is what
+costs.
+
+## Age is the only size the simulator owns, and at tick 0 it agrees with the survey
+
+The bundle's survey of the Capitol's trees and the viewer's age-to-height curve are independent paths
+to the same 79 trees: the survey height goes into `entities.json` as an age (ecosim's `import_age`),
+and the viewer inverts that curve to get a height back.
+
+| | Trees | Height span | Median |
+|---|---|---|---|
+| `worlds/capitol/trees.json` (surveyed) | 81 | 4.675–23.59 m | 13.77 m |
+| Viewer at tick 0, from `age` | 79 | 4.7–20.0 m | 13.9 m |
+
+The round trip is exact below the curve's ceiling and saturates above it: `params.bundle`'s
+`tree_tall_height` is 20 m, so the one surveyed 23.6 m tree comes back 20 m and cannot do otherwise —
+the simulator stores no height, only an age, and every age above the tall breakpoint maps to 20 m.
+Two of the 81 are not in the run at all (they stand outside the ecology grid). A unit test round-trips
+the curve to within 0.02 m.
+
+## Measured and rejected: light sampled at the middle of the crown
+
+The obvious sample is `light.bin` where the leaves are — the centre of the procedural crown, 13.7 m up
+on a 20 m tree. Measured over the reference run, that reads **1.00 of full sun for every tree at every
+tick**, in all 21 snapshots. The cause is not a bug in either project: the simulator's canopy is one
+to three voxels of `CANOPY` above the surface, so 13.7 m is sky, and the light field is only
+interesting in the voxel the simulator itself reads. The sample is therefore ecosim's own
+`surface_light` — `light[height[c] + 1]` — which is the number its germination and growth curves use.
+That gives the 0.14–1.00 spread in the table, and the flat 0.14 at tick 0 is itself a reading: every
+surveyed tree stands in its own shade.
+
+## Measured and rejected: the crown clamped per axis
+
+The first envelope clamp was per axis — x and z to the crown radius, y to the tree's height — and
+every tree over 10 m rendered as a bare post. Three generations of branch, each rising about
+three quarters of its own length, land all 27 tips at the apex, where the ellipsoid is a point, so the
+leaf-clip test threw their blobs away. Pulling a tip back along the envelope's own radius instead, to
+`TIP_FRAC` = 0.78 of the wall, and lowering the upward bias from 0.30 to 0.18, took tick-0 leaf fill
+from **25,853 to 74,319 voxels — 2.9×** with no change to the skeleton.
+
+## The screenshots
+
+Five, all 1280 × 800, all on the committed Capitol. One line each, written after looking at them:
+
+| File | Verdict |
+|---|---|
+| `v3-capitol-t0.png` | The 79 surveyed trees as recognisable trees — brown trunks, limbs, rounded crowns at their surveyed heights — scattered over the lawn and along the paths, with the Capitol and its dome untouched behind them. |
+| `v3-capitol-t10000.png` | The mixed-age stand reads as one: 325 mature crowns, 352 young ones half their size, and 321 saplings as bare poles a metre or two high, which is exactly what the stage counts say. |
+| `v3-capitol-t20000.png` | A closed woodland over two thirds of the site — crowns merging into canopy, trunks visible underneath, the lawn surviving only where the paths and the building are. |
+| `v3-light.png` | Shows what the crowns are doing to the ground rather than what the ground is doing: white lawn at 0.83 mean, a black wedge north of the building, and a grey square under every tree. |
+| `v3-tree-closeup.png` | The point of the shot, at eye level: separate trunks with visible limb structure holding crowns overhead, the ground-cover mottling underfoot, and one legitimately bare 8 m trunk in the middle distance whose crown starts at 0.37 of its height. |
+
+## The stress smoke check's PNG changed again, on purpose
+
+`shots/stress-headless.png` is **839,136 bytes** against V2's 835,546, and its scene now meshes to
+**335,544 quads** against V2's 363,806. The stress world's 200 trees are branching now, so unlike V2's
+change (a HUD line) this is a real geometry change — and it is the "fuller crowns cost fewer quads"
+result again, on a world with no run over it and at 0.25 m cells.
+
+`shots/agent-loop.png`, the agent gate's own capture at tick 1000, changed the same way and for the
+same reason: **1,043,886 bytes** against V1's 888,371, with 334 trees (115 sapling, 140 young, 79
+mature), 8,858 wood and 152,664 leaf voxels. The gate itself is unmoved — 14 calls, 0 retries, PASS,
+3.5 s to the first screenshot, and the scrub it does mid-run remeshes 150 chunks in 46 ms.
+
+## What this shot does not tell you
+
+**Nothing here says a tree is the right size.** The row asks for geometry from "seed, species, age,
+biomass and light", and biomass does not exist: no per-tree mass, diameter, leaf area or height is
+written anywhere in the run directory — `entities.json` carries `id`, `x`, `y`, `z`, `age`, `stage`
+and `lifespan`. Age through the simulator's own curve is the only dimensional quantity that is really
+the simulator's, and everything else about a tree's shape here — how many limbs, how far they spread,
+how big a leaf blob is — is expression, tuned by eye at these three ticks and held in place by a test
+that only asserts leaves stay inside the envelope. A BACKLOG note proposes the ecosim row that would
+publish a real per-tree size; until it exists, the HUD says whose numbers these are.

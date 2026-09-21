@@ -7,6 +7,7 @@
 use ecoview_native::bundle::{Bundle, Tree};
 use ecoview_native::mesh::{mesh_chunk, Scratch};
 use ecoview_native::palette::surface_palette;
+use ecoview_native::tree::{Life, TreeForm, CROWN_BASE_FRACTION};
 use ecoview_native::voxel::{ChunkPos, VoxelWorld};
 
 /// A bare bundle of `n` x `n` cells at `cell_m`, all lawn, all at `h` metres.
@@ -186,8 +187,21 @@ fn a_run_directory_is_read_and_checked_against_the_bundle() {
     let snap = run.trees_at(0).unwrap();
     assert_eq!(snap.trees.len(), 1);
     assert_eq!(snap.unknown_stage, 0);
+    assert_eq!(
+        snap.stages,
+        [0, 0, 1],
+        "one tree, and the run calls it mature"
+    );
     // The column's centre, in metres, not its south-west corner.
     assert_eq!((snap.trees[0].x, snap.trees[0].y), (2.5, 3.5));
+    // This run has no field files at all, so the crown light is the named fallback and every crown
+    // is in full sun -- said out loud rather than drawn as shade.
+    assert_eq!(snap.light, (1.0, 1.0, 1.0));
+    assert!(
+        snap.light_source.contains("this viewer's fallback"),
+        "{}",
+        snap.light_source
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -244,17 +258,19 @@ fn an_unknown_stage_is_counted_and_not_drawn() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// The three stages are three different sizes, biggest last, and a sapling has no crown.
+/// The stage is read and ordered, and that is now all it does.
+///
+/// V1 had a `Stage::shape()` here and this test asserted that the three stages were three sizes.
+/// Shot V3 took size away from the stage and gave it to `age` through the run's own curve, so the
+/// size half of the claim moved to `age_is_where_a_tree_size_comes_from` and this one keeps the
+/// parsing, which is still the part that must not guess.
 #[test]
-fn the_three_stages_are_three_sizes() {
-    let (sh, _, sr) = Stage::Sapling.shape();
-    let (yh, _, yr) = Stage::Young.shape();
-    let (mh, _, mr) = Stage::Mature.shape();
-    assert!(sh < yh && yh < mh, "{sh} {yh} {mh}");
-    assert_eq!(sr, 0.0, "a sapling is a bare trunk");
-    assert!(yr < mr);
+fn a_stage_is_parsed_or_refused() {
     assert_eq!(Stage::parse("mature"), Some(Stage::Mature));
     assert_eq!(Stage::parse("seedling"), None);
+    assert_eq!(Stage::Sapling.index(), 0);
+    assert!(Stage::Sapling.index() < Stage::Young.index());
+    assert!(Stage::Young.index() < Stage::Mature.index());
 }
 
 /// Swapping a snapshot's trees changes the world's geometry, and the chunks reported stale are the
@@ -272,13 +288,7 @@ fn set_plants_reports_exactly_the_chunks_whose_mesh_changed() {
         .map(|&c| mesh_chunk(&w, c, &palette, &mut scratch).hash())
         .collect();
 
-    let tree = Tree {
-        x: 8.5,
-        y: 8.5,
-        height: 3.0,
-        crown_radius: 1.5,
-        crown_base: 1.0,
-    };
+    let tree = TreeForm::grown(8.5, 8.5, 3.0, 1.0, 0x51ce);
     let stale = w.set_plants(std::slice::from_ref(&tree), &[]);
     assert!(!stale.is_empty(), "one tree has to make some chunk stale");
     assert!(
@@ -768,4 +778,344 @@ fn golden_banded() {
         (m.hash(), m.positions.len(), m.indices.len()),
         (0x2461_2572_2ee5_86ae, 52, 78)
     );
+}
+
+// ---- shot V3: procedural trees ----
+//
+// In this file for the reason the V1 and V2 tests are: the CI gate runs exactly one test target.
+
+/// A bundle with room over it for a run's trees, since the chunk grid is sized once at load.
+fn tall(n: usize, cell_m: f32, h: f32) -> VoxelWorld {
+    VoxelWorld::from_bundle_with_headroom(&flat(n, cell_m, h), 25.0)
+}
+
+/// The run that the V3 tree model reads: a real `year_len`, the three tree ages, and the two
+/// height breakpoints, so `Life` is the simulator's curve and not this viewer's fallback.
+///
+/// `light.bin` is deliberately **inverted** between the surface and the sky: the western half of the
+/// site is lit at the surface and dark above 10 m, the eastern half the other way round. A reader
+/// that sampled the sky over a crown instead of the simulator's own surface voxel would get exactly
+/// the opposite answer on both halves, which is what `crown_light_is_the_simulator_own_sample` uses.
+fn write_tree_run(dir: &std::path::Path, trees: &[(i32, i32, u32)]) {
+    let (n, z) = (16usize, 32usize);
+    let cols = n * n;
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("meta.json"),
+        format!(
+            r#"{{"format_version":4,"dims":{{"x":{n},"y":{n},"z":{z},"patch":8}},
+               "seed":42,"ticks":100,"snapshot_every":100,"snapshots":[0],"year_len":4000,
+               "world":{{"name":"test","bundle":true,"ground_cell_m":0.5,
+                         "ground_width":{},"ground_depth":{}}},
+               "params":{{"tree":{{"young_age_years":0.125,"mature_age_years":0.25,
+                                   "max_age_years":1.5}},
+                          "bundle":{{"tree_mature_height":3.0,"tree_tall_height":20.0,
+                                     "tree_tall_age_years":0.75}}}}}}"#,
+            n * 2,
+            n * 2,
+        ),
+    )
+    .unwrap();
+    let sd = dir.join("snap_000000");
+    std::fs::create_dir_all(&sd).unwrap();
+    std::fs::write(sd.join("height.bin"), vec![2u8; cols]).unwrap();
+    let mut light = vec![0u8; cols * z];
+    for c in 0..cols {
+        let west = c % n < n / 2;
+        // The surface is at level 2, so the first voxel of air over it is 3.
+        light[c + cols * 3] = if west { 255 } else { 0 };
+        for zi in 10..z {
+            light[c + cols * zi] = if west { 0 } else { 255 };
+        }
+    }
+    std::fs::write(sd.join("light.bin"), light).unwrap();
+    let ents: Vec<String> = trees
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y, age))| {
+            format!(
+                r#"{{"id":{i},"kind":"tree","x":{x},"y":{y},"z":3,"age":{age},
+                     "stage":"mature","lifespan":6000}}"#
+            )
+        })
+        .collect();
+    std::fs::write(sd.join("entities.json"), format!("[{}]", ents.join(","))).unwrap();
+}
+
+/// The golden: one procedural tree over flat ground, meshed. A change to the branching model, the
+/// rasteriser or the lattice moves this hash, and it is taken on Windows and asserted on Linux CI,
+/// which is what the model's "no transcendental function" rule is for (`tree.rs`).
+#[test]
+fn golden_procedural_tree() {
+    let mut w = tall(32, 0.5, 4.0);
+    w.set_plants(&[TreeForm::grown(8.0, 8.0, 12.0, 0.8, 0x5eed)], &[]);
+    let m = mesh_chunk(
+        &w,
+        ChunkPos { x: 0, y: 0, z: 0 },
+        &surface_palette(),
+        &mut Scratch::new(),
+    );
+    assert_eq!(
+        (m.hash(), m.positions.len(), m.indices.len()),
+        (GOLDEN_TREE, GOLDEN_TREE_VERTS, GOLDEN_TREE_INDICES)
+    );
+}
+
+const GOLDEN_TREE: u64 = 0x193f_685c_694d_8b75;
+const GOLDEN_TREE_VERTS: usize = 1784;
+const GOLDEN_TREE_INDICES: usize = 2676;
+
+/// Two trees with the same seed are the same wood, voxel for voxel; two with different seeds are
+/// different wood inside the same silhouette. Without the first half, scrubbing the timeline would
+/// reshuffle every tree on the site; without the second, a wood would be one tree stamped out.
+#[test]
+fn the_same_seed_grows_the_same_tree() {
+    let one = |seed: u64| {
+        let mut w = tall(32, 0.5, 4.0);
+        w.set_plants(&[TreeForm::grown(8.0, 8.0, 12.0, 1.0, seed)], &[]);
+        let mut v = w.plant_voxels();
+        v.sort_unstable();
+        v
+    };
+    let a = one(7);
+    let b = one(7);
+    let c = one(8);
+    assert_eq!(a, b, "the same seed has to give the same tree");
+    assert_ne!(a, c, "and a different seed a different one");
+
+    // The seed moves the wood inside the crown; it cannot change how big the tree reads, because
+    // the envelope is the allometry's. So both trees fit the same bound: a 12 m tree on 4 m of
+    // ground at 0.5 m cells stands on level 9 and is 24 levels tall, and its crown radius is
+    // 0.30 x 12 m = 7.2 cells, plus the half cell a leaf cluster is rounded out to.
+    let bound = |v: &Vec<(usize, usize, usize, u16)>| {
+        let hi = v.iter().map(|t| t.2).max().unwrap() as i64;
+        let far = v
+            .iter()
+            .map(|t| (t.0 as i64 - 16).abs().max((t.1 as i64 - 16).abs()))
+            .max()
+            .unwrap();
+        (hi, far)
+    };
+    for v in [&a, &c] {
+        let (hi, far) = bound(v);
+        assert!(hi <= 9 + 24, "a 12 m tree reached level {hi}");
+        assert!(far <= 8, "its crown reached {far} cells from the trunk");
+    }
+}
+
+/// Size comes from `age` through the run's own curve, and the curve is the one the simulator plants
+/// scene trees with (`ecosim/src/plants.rs`, `import_age`) read backwards. The round trip below is
+/// that claim: a height turned into an age by the simulator's formula comes back as the same height.
+#[test]
+fn age_is_where_a_tree_size_comes_from() {
+    let dir = tmp("tree-age");
+    write_tree_run(&dir, &[(4, 4, 3000)]);
+    let run = Run::load(&dir).unwrap();
+    let life = &run.life;
+    assert!(
+        life.from_meta,
+        "this run states every number: {}",
+        life.source
+    );
+    assert_eq!((life.year_ticks, life.tall_height_m), (4000.0, 20.0));
+
+    // Monotone, through the two breakpoints, flat above the last.
+    assert_eq!(life.height_of(0), 0.0);
+    assert!(
+        (life.height_of(1000) - 3.0).abs() < 1e-4,
+        "mature at 0.25 y"
+    );
+    assert!((life.height_of(3000) - 20.0).abs() < 1e-4, "tall at 0.75 y");
+    assert_eq!(
+        life.height_of(9999),
+        life.height_of(3000),
+        "flat above tall"
+    );
+    let mut last = -1.0;
+    for age in (0..6000).step_by(37) {
+        let h = life.height_of(age);
+        assert!(h >= last, "height fell at age {age}: {h} after {last}");
+        last = h;
+    }
+
+    // `import_age`, transcribed from its own doc comment, in ticks.
+    let import_age = |h: f32| -> u32 {
+        let (hm, ht) = (3.0f32, 20.0f32);
+        let (mature, tall) = (0.25 * 4000.0, 0.75 * 4000.0);
+        let age = if h <= 0.0 {
+            0.0
+        } else if h < hm {
+            mature * h / hm
+        } else if h < ht {
+            mature + (tall - mature) * (h - hm) / (ht - hm)
+        } else {
+            tall
+        };
+        age.round() as u32
+    };
+    for h in [0.4f32, 1.5, 2.9, 3.0, 7.25, 13.766, 19.9, 20.0] {
+        let back = life.height_of(import_age(h));
+        assert!(
+            (back - h).abs() < 0.02,
+            "{h} m became age {} and came back {back} m",
+            import_age(h)
+        );
+    }
+
+    // And the tree the snapshot actually built is that height.
+    let snap = run.trees_at(0).unwrap();
+    assert_eq!(snap.trees.len(), 1);
+    assert!((snap.trees[0].height - 20.0).abs() < 1e-4);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A run that states none of the curve gets `ecosim`'s defaults and **says so**, naming each number
+/// it had to stand in for. The reference Capitol run is this case: `params.bundle` is left out of
+/// `meta.json` whenever it is at its defaults, so the heights are always the fallback there.
+#[test]
+fn a_life_with_no_curve_names_its_fallback() {
+    let life = Life::default();
+    assert!(!life.from_meta);
+    for want in ["this viewer's fallback", "year_len", "params.bundle"] {
+        assert!(life.source.contains(want), "{}", life.source);
+    }
+    // The fallback is still `ecosim/params.toml`'s own numbers, not invented ones.
+    assert_eq!(
+        (life.year_ticks, life.mature_height_m, life.tall_height_m),
+        (4000.0, 3.0, 20.0)
+    );
+    assert_eq!(life.stage_years(), (0.125, 0.25, 1.5));
+}
+
+/// A tree's light is the number the **simulator** computed for it: `light.bin` at the first voxel
+/// above its own column, which is `ecosim`'s `surface_light` and what its growth curves read.
+///
+/// Both trees below are 20 m, so both crowns are up in the sky layer; the run's light is inverted
+/// between surface and sky, so a viewer that sampled the sky over the crown -- which is what this
+/// shot tried first, and measured as 1.00 for every tree on the reference run -- would swap these
+/// two answers.
+#[test]
+fn crown_light_is_the_simulator_own_sample() {
+    let dir = tmp("tree-light");
+    write_tree_run(&dir, &[(4, 4, 3000), (12, 12, 3000)]);
+    let snap = Run::load(&dir).unwrap().trees_at(0).unwrap();
+    assert_eq!(snap.trees.len(), 2);
+    assert!(
+        snap.light_source.contains("light.bin"),
+        "{}",
+        snap.light_source
+    );
+    let west = snap.trees.iter().find(|t| t.x < 8.0).unwrap();
+    let east = snap.trees.iter().find(|t| t.x > 8.0).unwrap();
+    assert!((west.height - 20.0).abs() < 1e-4 && (east.height - 20.0).abs() < 1e-4);
+    assert_eq!(west.light, 1.0, "its own column is lit at the surface");
+    assert_eq!(east.light, 0.0, "and this one is shaded at the surface");
+    assert!(
+        west.blob_radius() > east.blob_radius(),
+        "light fills a crown"
+    );
+
+    // With the light file gone the crowns are drawn in full sun and the fallback is named.
+    std::fs::remove_file(dir.join("snap_000000/light.bin")).unwrap();
+    let snap = Run::load(&dir).unwrap().trees_at(0).unwrap();
+    assert_eq!(snap.light, (1.0, 1.0, 1.0));
+    assert!(
+        snap.light_source.contains("full sun"),
+        "{}",
+        snap.light_source
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Light fills the crown and leaves the wood alone. A shaded tree has the same skeleton as a sunlit
+/// one -- same seed, same branches -- and fewer leaves on it.
+#[test]
+fn light_fills_the_crown_and_leaves_the_wood_alone() {
+    let shade = TreeForm::grown(8.0, 8.0, 12.0, 0.0, 99);
+    let sun = TreeForm::grown(8.0, 8.0, 12.0, 1.0, 99);
+    assert_eq!(shade.skeleton(0.5), sun.skeleton(0.5), "same wood");
+    assert!(shade.blob_radius() < sun.blob_radius());
+
+    let counts = |t: TreeForm| {
+        let mut w = tall(32, 0.5, 4.0);
+        w.set_plants(&[t], &[]);
+        w.plant_counts()
+    };
+    let (wood_a, leaf_a) = counts(shade);
+    let (wood_b, leaf_b) = counts(sun);
+    assert_eq!(wood_a, wood_b, "the light did not move a branch");
+    assert!(
+        leaf_b > leaf_a,
+        "a sunlit crown is fuller: {leaf_b} leaves against {leaf_a}"
+    );
+}
+
+/// A sapling is a stick and a big tree has branches. The model shows more of itself on a bigger
+/// tree, which is how the same code draws both without a stage table.
+#[test]
+fn a_sapling_is_a_stick_and_a_big_tree_has_branches() {
+    let sapling = TreeForm::grown(4.0, 4.0, 0.6, 1.0, 3);
+    assert_eq!(sapling.levels(0.5), 0);
+    assert_eq!(sapling.skeleton(0.5).len(), 1, "a stick is one segment");
+
+    let big = TreeForm::grown(4.0, 4.0, 18.0, 1.0, 3);
+    assert_eq!(big.levels(0.5), 3);
+    assert!(
+        big.skeleton(0.5).len() > 10,
+        "{} limbs",
+        big.skeleton(0.5).len()
+    );
+    // Wood thins outwards: the trunk is the thickest limb and it is the first one.
+    let limbs = big.skeleton(0.5);
+    assert!(limbs[0].r >= limbs.iter().map(|l| l.r).fold(0.0, f32::max));
+    assert!(limbs.iter().all(|l| l.b[1] <= big.height + 1e-4));
+}
+
+/// No leaf voxel leaves the crown envelope, and the envelope is the allometry's. This is what keeps
+/// a procedural crown honest: however the branches scatter, the silhouette is still the size the
+/// simulator's curve says the tree is.
+#[test]
+fn every_leaf_voxel_is_inside_the_crown_envelope() {
+    let cell_m = 0.5;
+    let t = TreeForm::grown(8.0, 8.0, 14.0, 1.0, 0xbeef);
+    let mut w = tall(32, cell_m, 4.0);
+    w.set_plants(&[t], &[]);
+    // `flat` is 4 m of ground on a 0.5 m lattice, so the first air level is 9.
+    let base = w.ground_level(16, 16) + 1;
+    let leaves = w.plant_voxels();
+    let mut n = 0;
+    for (x, y, z, id) in leaves {
+        if id != ecoview_native::voxel::CANOPY {
+            continue;
+        }
+        n += 1;
+        let p = [
+            (x as i64 - 16) as f32 * cell_m,
+            (z as i64 - base as i64) as f32 * cell_m,
+            (y as i64 - 16) as f32 * cell_m,
+        ];
+        assert!(t.in_envelope(p), "leaf at {p:?} is outside the crown");
+    }
+    assert!(n > 100, "only {n} leaf voxels");
+    // And the crown starts where the allometry says, not at the ground.
+    assert!((t.crown_base - 14.0 * CROWN_BASE_FRACTION).abs() < 1e-4);
+}
+
+/// A run tree taller than the bundle's own tallest survey is not quietly beheaded. The chunk grid is
+/// sized once at load, so the viewer passes the run's ceiling in; without it the top of every mature
+/// tree on a site of young ones would simply not exist.
+#[test]
+fn a_run_tree_gets_room_above_the_bundle() {
+    let t = TreeForm::grown(8.0, 8.0, 18.0, 1.0, 5);
+    let top = |mut w: VoxelWorld| {
+        w.set_plants(std::slice::from_ref(&t), &[]);
+        let base = w.ground_level(16, 16) + 1;
+        let hi = w.plant_voxels().iter().map(|v| v.2).max().unwrap();
+        (hi as i32 - base) as f32 * 0.5
+    };
+    // No headroom: `flat` has no trees, so the grid stops two levels over the ground.
+    let clipped = top(VoxelWorld::from_bundle(&flat(32, 0.5, 4.0)));
+    let whole = top(tall(32, 0.5, 4.0));
+    assert!(clipped < 2.0, "clipped to {clipped} m");
+    assert!(whole > 17.0, "kept to {whole} m");
 }

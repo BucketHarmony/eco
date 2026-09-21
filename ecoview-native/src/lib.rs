@@ -14,6 +14,7 @@ pub mod mesh;
 pub mod overlay;
 pub mod palette;
 pub mod run;
+pub mod tree;
 pub mod voxel;
 
 pub use bundle::Bundle;
@@ -21,6 +22,7 @@ pub use mesh::{mesh_chunk, ChunkMesh, Scratch};
 pub use overlay::{Fields, Scale};
 pub use palette::Overlay;
 pub use run::Run;
+pub use tree::{Life, TreeForm};
 pub use voxel::{ChunkPos, EditAction, VoxelWorld};
 
 /// One ecology column is one metre across, whatever the bundle's ground cell is (CLAUDE.md: "the

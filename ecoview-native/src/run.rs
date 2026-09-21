@@ -9,7 +9,8 @@
 //! Like the rest of the library half this module never mentions Bevy, so the CI gate exercises it
 //! with `--no-default-features` and no engine.
 
-use crate::bundle::{Bundle, Tree};
+use crate::bundle::Bundle;
+use crate::tree::{mix, Life, TreeForm};
 use serde::Deserialize;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ pub const FORMAT_VERSION: u32 = 4;
 
 /// The ecology grid, from `meta.json`. Not the ground grid: the ecology grid is 1 m columns and the
 /// bundle's ground grid is finer (CLAUDE.md, "The run directory contract").
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
 pub struct Dims {
     pub x: usize,
     pub y: usize,
@@ -41,7 +42,10 @@ pub struct RunWorld {
     pub ground_depth: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// `Default` exists so [`crate::tree::Life`] has something to read when no run is loaded; it is not
+/// a serde default. Every field below is still required in the file unless it says otherwise, so a
+/// `meta.json` with no `dims` is a parse error rather than a 0x0 world drawn silently.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RunMeta {
     pub format_version: u32,
     pub dims: Dims,
@@ -49,6 +53,11 @@ pub struct RunMeta {
     pub ticks: u64,
     pub snapshot_every: u64,
     pub snapshots: Vec<u64>,
+    /// Ticks in one simulated year. The tree model needs it to read an `age` in ticks against the
+    /// species' age thresholds, which shot G4c converted to years (`tree.rs`, `Life`). 0 means the
+    /// run did not state one.
+    #[serde(default)]
+    pub year_len: u64,
     pub world: Option<RunWorld>,
     /// The species table. The simulator owns the species colours (CLAUDE.md) and this is where it
     /// says so; `palette` reads the tree's trunk and canopy colours out of it.
@@ -92,27 +101,49 @@ pub struct FireParams {
     pub duration: Option<u32>,
 }
 
+/// `params.tree`: the tolerance curve the temperature overlay reads, plus the three age thresholds
+/// the tree model reads (shot V3). All in **years** since shot G4c converted them.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TreeParams {
+    pub temp: Option<Vec<f32>>,
+    pub young_age_years: Option<f32>,
+    pub mature_age_years: Option<f32>,
+    pub max_age_years: Option<f32>,
+}
+
+/// `params.bundle`: the two breakpoints of the simulator's own age-to-height map (shot V3).
+///
+/// `ecosim` writes this object to `meta.json` **only when it is not at its defaults**, so a run at
+/// the defaults carries none of it and [`crate::tree::Life`] falls back with the fallback named on
+/// screen. Every field is therefore optional twice over.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct BundleParams {
+    pub tree_mature_height: Option<f32>,
+    pub tree_tall_height: Option<f32>,
+    pub tree_tall_age_years: Option<f32>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Params {
     pub grass: Curves,
     pub shrub: Curves,
-    pub tree: Curves,
+    pub tree: TreeParams,
+    pub bundle: BundleParams,
     pub disease: DiseaseParams,
     pub fire: FireParams,
 }
 
-/// The three tree stages `ecosim` writes, and the shape each one draws as.
+/// The three tree stages `ecosim` writes.
 ///
-/// The simulator gives a tree no height: `entities.json` carries `stage` and `age` and nothing
-/// dimensional, because ecology happens on a 1 m grid where a tree is one to three voxels tall. The
-/// sizes below are that same shape expressed in **metres**, so the viewer's own lattice -- whatever
-/// the bundle's cell size is -- draws it at the scale the simulator means. They match what `ecoview`
-/// draws (`ecoview/src/entities.ts`, `canopyVoxels`): a sapling is a bare trunk voxel, a young tree
-/// is a trunk with one canopy voxel over it, a mature tree is a trunk under a 3x3x2 crown.
-///
-/// Shot V3 replaces all of this with procedural branching geometry. Until then the viewer draws the
-/// simulator's own blocks, and does not invent a size the simulator never computed.
+/// V1 also kept a `shape()` here, mapping each stage onto the trunk-and-blob solid `ecoview` draws
+/// on its 1 m voxels, and said in its own doc comment that shot V3 would replace it. It did:
+/// **size now comes from `age`, continuously**, through the simulator's own age-to-height curve
+/// (`tree.rs`, `Life::height_of`), so three discrete sizes no longer exist and the function is
+/// gone rather than left behind unused. The stage is still read, because it is still what the
+/// simulator calls the tree and an unknown one has to be visible rather than guessed at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Sapling,
@@ -130,12 +161,12 @@ impl Stage {
         }
     }
 
-    /// `(height, crown_base, crown_radius)` in metres. A zero crown radius means no crown at all.
-    pub fn shape(self) -> (f32, f32, f32) {
+    /// Index into [`SnapshotTrees::stages`], oldest last.
+    pub fn index(self) -> usize {
         match self {
-            Stage::Sapling => (1.0, 0.0, 0.0),
-            Stage::Young => (2.0, 1.0, 0.5),
-            Stage::Mature => (3.0, 1.0, 1.5),
+            Stage::Sapling => 0,
+            Stage::Young => 1,
+            Stage::Mature => 2,
         }
     }
 }
@@ -153,17 +184,35 @@ struct EntityJson {
     y: f32,
     #[serde(default)]
     stage: String,
+    /// The simulator's own tree id, which is what makes one tree's wood its own and keeps it that
+    /// way as the tree ages: the seed is this mixed with the run's seed, so scrubbing the timeline
+    /// grows the same tree older rather than a different tree (shot V3).
+    #[serde(default)]
+    id: u64,
+    /// Age in **ticks**. The only dimensional thing the simulator knows about a tree, through its
+    /// own age-to-height curve (`tree.rs`, `Life::height_of`).
+    #[serde(default)]
+    age: u32,
 }
 
 /// One snapshot's vegetation, already in the bundle's metre frame.
 #[derive(Debug, Default, Clone)]
 pub struct SnapshotTrees {
-    pub trees: Vec<Tree>,
+    pub trees: Vec<TreeForm>,
     /// Entities whose `kind` is a tree but whose `stage` this viewer does not know. Counted rather
     /// than guessed at, and reported: a new stage in the simulator should be visible, not silent.
     pub unknown_stage: usize,
     /// Entities of every other kind (animals). V1 draws none of them.
     pub other_kinds: usize,
+    /// How many trees the simulator calls sapling, young and mature, in [`Stage::index`] order.
+    pub stages: [usize; 3],
+    /// Tree height in metres over this snapshot: `(min, median, max)`. Zeroes when there are none.
+    pub height: (f32, f32, f32),
+    /// Crown light as a fraction of full sun: `(min, mean, max)`.
+    pub light: (f32, f32, f32),
+    /// Where that light came from, in words, for the HUD to print. When `light.bin` could not be
+    /// read this names the fallback instead of hiding it.
+    pub light_source: String,
 }
 
 /// A run directory on disk, plus the snapshot list from its `meta.json`.
@@ -177,6 +226,10 @@ pub struct Run {
     /// 600 in the 1.6 MB `events.csv` of the 20,000-tick Capitol run -- and filtering once at load
     /// is cheaper than re-reading the file at every scrub.
     pub burnouts: Vec<(u64, u32, u32)>,
+    /// The species' age-to-height curve, read from `meta.json`'s `params` at load with every
+    /// missing number named in [`Life::source`]. Held on the run because it is the run that says
+    /// it: two runs of the same site with different parameters grow different trees.
+    pub life: Life,
 }
 
 fn bad(msg: String) -> io::Error {
@@ -201,10 +254,12 @@ impl Run {
             return Err(bad(format!("{}: the run has no snapshots", dir.display())));
         }
         let burnouts = crate::overlay::read_burnouts(&dir.join("events.csv"));
+        let life = Life::of(&meta);
         Ok(Run {
             dir: dir.to_path_buf(),
             meta,
             burnouts,
+            life,
         })
     }
 
@@ -279,7 +334,7 @@ impl Run {
         self.dir.join(format!("snap_{:06}", self.tick_at(i)))
     }
 
-    /// Reads snapshot `i`'s `entities.json` and turns its trees into metre-frame [`Tree`]s.
+    /// Reads snapshot `i`'s `entities.json` and turns its trees into metre-frame [`TreeForm`]s.
     ///
     /// The simulator's `x` and `y` are ecology columns, so a tree goes at the **centre** of its
     /// column. Its `z` is deliberately not used: that is the ecology grid's surface level at 1 m,
@@ -287,15 +342,24 @@ impl Run {
     /// level would float or sink by up to a metre against the ground the user can see. The base
     /// comes from the viewer's own column instead, which is what [`crate::VoxelWorld`] does for
     /// bundle trees already.
+    ///
+    /// Every other number in the form comes from the run too: the height from `age` through the
+    /// run's own curve, the light from `light.bin` at the crown's level, the seed from the run's
+    /// seed mixed with the simulator's tree id. Nothing here is drawn from a size the simulator
+    /// never computed -- see `tree.rs` for the one input (biomass) the run does not carry.
     pub fn trees_at(&self, i: usize) -> io::Result<SnapshotTrees> {
         let path = self.snapshot_dir(i).join("entities.json");
         let raw = std::fs::read_to_string(&path)?;
         let list: Vec<EntityJson> =
             serde_json::from_str(&raw).map_err(|e| bad(format!("{}: {e}", path.display())))?;
+        let sun = CrownLight::of(self, i);
         // One ecology column is 1 m wide whatever the ground cell is (CLAUDE.md: "the ecology grid
         // stays at 1 m columns"), so the half-metre offset puts the trunk at the column's centre
         // rather than at its south-west corner.
-        let mut out = SnapshotTrees::default();
+        let mut out = SnapshotTrees {
+            light_source: sun.source.clone(),
+            ..SnapshotTrees::default()
+        };
         for e in list {
             if e.kind != "tree" {
                 out.other_kinds += 1;
@@ -305,15 +369,21 @@ impl Run {
                 out.unknown_stage += 1;
                 continue;
             };
-            let (height, crown_base, crown_radius) = stage.shape();
-            out.trees.push(Tree {
-                x: e.x.floor() + 0.5,
-                y: e.y.floor() + 0.5,
-                height,
-                crown_radius,
-                crown_base,
-            });
+            out.stages[stage.index()] += 1;
+            let (col_x, col_y) = (e.x.floor(), e.y.floor());
+            let mut t = TreeForm::grown(
+                col_x + 0.5,
+                col_y + 0.5,
+                self.life.height_of(e.age),
+                1.0,
+                mix(self.meta.seed, e.id),
+            );
+            // The simulator's own reading of this tree's light. See `CrownLight` for the sample
+            // this shot measured first and rejected.
+            t.light = sun.at(col_x, col_y);
+            out.trees.push(t);
         }
+        out.summarise();
         Ok(out)
     }
 
@@ -330,5 +400,109 @@ impl Run {
             }
         }
         best
+    }
+}
+
+impl SnapshotTrees {
+    /// Fills in the height and light spans. Kept out of the read loop so the numbers the HUD prints
+    /// are measured over the trees that were actually built, not accumulated as they were guessed.
+    fn summarise(&mut self) {
+        if self.trees.is_empty() {
+            return;
+        }
+        let mut h: Vec<f32> = self.trees.iter().map(|t| t.height).collect();
+        h.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.height = (h[0], h[h.len() / 2], h[h.len() - 1]);
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        let mut sum = 0.0f32;
+        for t in &self.trees {
+            lo = lo.min(t.light);
+            hi = hi.max(t.light);
+            sum += t.light;
+        }
+        self.light = (lo, sum / self.trees.len() as f32, hi);
+    }
+}
+
+/// `light.bin` and `height.bin` of one snapshot, read so a tree can be asked how much sun it gets.
+///
+/// **Where the sample is taken, and why it is not the crown's centre.** This shot first sampled
+/// `light.bin` at the middle of the procedural crown, 13.7 m up on a 20 m tree, which is where the
+/// leaves are. Measured over the reference run that returns 1.00 of full sun for every tree at every
+/// tick (MEASUREMENTS.md, V3): the simulator's light field is computed for a canopy one to three
+/// voxels tall, so everything above about 3 m is sky. Sampling there makes the light input dead.
+///
+/// So the sample is the one the **simulator itself** calls this tree's light: `light.bin` at the
+/// first voxel above the column's surface, which is `ecosim`'s `World::surface_light` -- the number
+/// its own germination and growth curves read (`ecosim/src/world.rs`). The viewer expresses a number
+/// the simulator computed rather than inventing a better place to measure it
+/// (`overnight/DIRECTION-native-viewer.md`).
+///
+/// The light overlay reads the same two files the same way (`overlay.rs`, `fields_at`), so a tree
+/// with a sparse crown stands on ground the overlay draws dark. Read separately because the tree
+/// model is wanted with or without an overlay loaded.
+pub struct CrownLight {
+    dims: Dims,
+    height: Vec<u8>,
+    light: Vec<u8>,
+    /// What the light is, in words, or the named fallback when the files could not be read.
+    pub source: String,
+    /// False when the numbers below are this viewer's fallback rather than the run's.
+    pub from_file: bool,
+}
+
+impl CrownLight {
+    pub fn of(run: &Run, i: usize) -> CrownLight {
+        let d = run.meta.dims;
+        let cols = d.columns();
+        let dir = run.snapshot_dir(i);
+        let h = std::fs::read(dir.join("height.bin"));
+        let l = std::fs::read(dir.join("light.bin"));
+        match (h, l) {
+            (Ok(h), Ok(l)) if cols > 0 && d.z > 0 && h.len() == cols && l.len() == cols * d.z => {
+                CrownLight {
+                    dims: d,
+                    height: h,
+                    light: l,
+                    source: "light.bin at the tree's own column, the simulator's surface sample"
+                        .into(),
+                    from_file: true,
+                }
+            }
+            // A snapshot with no readable light is drawn in full sun rather than in the dark, and
+            // says so: a viewer that silently drew every crown shaded would look like an ecology
+            // result. The file is checked against `dims` for the same reason `fields_at` does it.
+            _ => CrownLight {
+                dims: d,
+                height: Vec::new(),
+                light: Vec::new(),
+                source: format!(
+                    "this viewer's fallback: {} has no light.bin and height.bin pair matching \
+                     dims, so every crown is drawn in full sun",
+                    dir.display()
+                ),
+                from_file: false,
+            },
+        }
+    }
+
+    /// The light at column `(x, y)`, as a fraction of full sun. Out of bounds, or with no file,
+    /// this is full sun.
+    pub fn at(&self, x: f32, y: f32) -> f32 {
+        if !self.from_file || x < 0.0 || y < 0.0 {
+            return 1.0;
+        }
+        let d = self.dims;
+        let (xi, yi) = (x as usize, y as usize);
+        if xi >= d.x || yi >= d.y {
+            return 1.0;
+        }
+        let c = xi + d.x * yi;
+        // `height` is the surface level and the light of a solid voxel is zero, so the sample is the
+        // first voxel of air above it -- the same index `ecosim`'s `surface_light` uses.
+        let z = (self.height[c] as usize + 1).min(d.z - 1);
+        // x-fastest, z slowest, as everywhere in the contract.
+        self.light[c + d.columns() * z] as f32 / crate::overlay::FULL_SUN
     }
 }

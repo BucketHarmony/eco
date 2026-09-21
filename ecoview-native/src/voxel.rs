@@ -5,8 +5,9 @@
 //! world would be 16.7 M voxels; the columns are 0.26 M. An edit changes a column and the chunks that
 //! read it are re-filled and re-meshed.
 
-use crate::bundle::{Bundle, Shrub, Tree};
+use crate::bundle::{Bundle, Shrub};
 use crate::palette::BAND_BASE;
+use crate::tree::TreeForm;
 use crate::ECO_CELL_M;
 
 /// The mesher's chunk size. 62 voxels padded to 64 is the layout `binary-greedy-meshing` requires.
@@ -96,6 +97,17 @@ pub struct ColumnBands {
 impl VoxelWorld {
     /// Builds the chunk grid and voxelises the bundle's trees and shrubs into it.
     pub fn from_bundle(b: &Bundle) -> VoxelWorld {
+        VoxelWorld::from_bundle_with_headroom(b, 0.0)
+    }
+
+    /// The same, with room above the bundle's own tallest plant for trees a **run** will put here.
+    ///
+    /// The chunk grid is sized once, at load, and `set_plant` drops anything above it. V1 sized it
+    /// from the bundle alone, so a run tree taller than the scene's tallest survey was quietly
+    /// beheaded; a caller that knows the run's height ceiling passes it here instead. The Capitol's
+    /// tallest survey (23.6 m) already clears the simulator's 20 m curve, so its 324 chunks do not
+    /// change -- the headroom is what keeps that from being luck (DECISIONS.md, V3).
+    pub fn from_bundle_with_headroom(b: &Bundle, extra_m: f32) -> VoxelWorld {
         let cell_m = b.ground_cell_m;
         let top = b
             .ground_h
@@ -108,7 +120,7 @@ impl VoxelWorld {
             .iter()
             .map(|t| t.height)
             .chain(b.shrubs.iter().map(|s| s.height))
-            .fold(0.0f32, f32::max);
+            .fold(extra_m.max(0.0), f32::max);
         let levels = (level_of(top + tallest, cell_m) + 2).max(1) as usize;
         let chunks = ChunkPos {
             x: b.width.div_ceil(CS),
@@ -127,41 +139,44 @@ impl VoxelWorld {
             chunks,
             levels,
         };
-        w.voxelise_plants(&b.trees, &b.shrubs);
+        let trees: Vec<TreeForm> = b.trees.iter().map(TreeForm::measured).collect();
+        w.voxelise_plants(&trees, &b.shrubs);
         w
     }
 
     /// Turns trees and shrubs into plant voxels, into whatever the buckets already hold.
-    fn voxelise_plants(&mut self, trees: &[Tree], shrubs: &[Shrub]) {
+    ///
+    /// V0 drew a tree as a trunk column under one solid ellipsoid, which is what `ecoview` draws on
+    /// its 1 m voxels. Shot V3 replaced the inside of that ellipsoid: the wood is now a branching
+    /// skeleton (`tree.rs`, `TreeForm::skeleton`) rasterised segment by segment, and the leaves are
+    /// solid clusters at the branch tips. The silhouette is unchanged -- the envelope is still the
+    /// allometry's -- so what the viewer says about a tree's size is still exactly what the
+    /// simulator's own age-to-height curve says.
+    fn voxelise_plants(&mut self, trees: &[TreeForm], shrubs: &[Shrub]) {
         let w = self;
         let cell_m = w.cell_m;
         for t in trees {
             let cx = (t.x / cell_m) as i32;
             let cy = (t.y / cell_m) as i32;
             let base = w.ground_level(cx, cy) + 1;
-            let top = base + level_of(t.height.max(0.0), cell_m);
-            let crown_lo = base + level_of(t.crown_base.max(0.0), cell_m);
-            let r = (t.crown_radius / cell_m).max(0.5);
-            for z in base..=top {
-                w.set_plant(cx, cy, z, TRUNK);
-            }
-            // The same trunk-and-blob solid `ecoview` draws: an ellipsoid from the crown base to the
-            // tip. A zero crown radius means no crown at all, which is how a sapling from a run
-            // directory is a bare trunk (run.rs, `Stage::shape`).
-            if t.crown_radius > 0.0 {
-                let mid = (crown_lo + top) as f32 * 0.5;
-                let half = ((top - crown_lo) as f32 * 0.5).max(1.0);
-                let ri = r.ceil() as i32;
-                for z in crown_lo..=top {
-                    for dy in -ri..=ri {
-                        for dx in -ri..=ri {
-                            let fz = (z as f32 - mid) / half;
-                            let fr = (((dx * dx + dy * dy) as f32).sqrt()) / r;
-                            if fr * fr + fz * fz <= 1.0 {
-                                w.set_plant(cx + dx, cy + dy, z, CANOPY);
-                            }
-                        }
-                    }
+            // One leaf cluster is never thinner than the lattice it is drawn on. Without this floor
+            // a small tree's crown is three single voxels on the end of three twigs, which reads as
+            // a fence post rather than a tree (MEASUREMENTS.md, V3: the first close-up).
+            let leaf_r = t.blob_radius().max(0.9 * cell_m);
+            for l in t.skeleton(cell_m) {
+                // Half a cell a step: a coarser walk leaves gaps in a limb that runs diagonally,
+                // and a finer one only writes the same voxels again.
+                let d = [l.b[0] - l.a[0], l.b[1] - l.a[1], l.b[2] - l.a[2]];
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let steps = (len / (0.5 * cell_m)).ceil().max(1.0);
+                let n = steps as i32;
+                for i in 0..=n {
+                    let f = i as f32 / steps;
+                    let p = [l.a[0] + d[0] * f, l.a[1] + d[1] * f, l.a[2] + d[2] * f];
+                    w.stamp((cx, cy, base), p, l.r, TRUNK, None);
+                }
+                if l.tip {
+                    w.stamp((cx, cy, base), l.b, leaf_r, CANOPY, Some(t));
                 }
             }
         }
@@ -199,7 +214,7 @@ impl VoxelWorld {
     /// only the buckets that actually differ, and the neighbours that see them through the one-voxel
     /// pad, are remeshed. A site whose trees all sit near the ground therefore remeshes the ground
     /// chunk layer and nothing above it.
-    pub fn set_plants(&mut self, trees: &[Tree], shrubs: &[Shrub]) -> Vec<ChunkPos> {
+    pub fn set_plants(&mut self, trees: &[TreeForm], shrubs: &[Shrub]) -> Vec<ChunkPos> {
         let empty = vec![Vec::new(); self.chunk_count()];
         let before = std::mem::replace(&mut self.plants, empty);
         self.voxelise_plants(trees, shrubs);
@@ -240,6 +255,44 @@ impl VoxelWorld {
             .collect()
     }
 
+    /// Every plant voxel in the world, as `(x, y, level, id)` on the ground lattice.
+    ///
+    /// The buckets hold chunk-local coordinates because that is what a fill needs; this is the only
+    /// place that undoes it. Shot V3's tests use it to check that no leaf leaves its tree's crown
+    /// envelope, which is the claim that keeps a procedural crown honest about the tree's size.
+    pub fn plant_voxels(&self) -> Vec<(usize, usize, usize, u16)> {
+        let mut out = Vec::new();
+        for (i, bucket) in self.plants.iter().enumerate() {
+            let c = self.chunk_pos(i);
+            for &(lx, lz, ly, id) in bucket {
+                out.push((
+                    c.x * CS + lx as usize,
+                    c.y * CS + ly as usize,
+                    c.z * CS + lz as usize,
+                    id,
+                ));
+            }
+        }
+        out
+    }
+
+    /// How many plant voxels are wood and how many are leaves. What a snapshot's trees cost, for
+    /// the HUD and for `MEASUREMENTS.md`, without building the list above.
+    pub fn plant_counts(&self) -> (usize, usize) {
+        let mut wood = 0;
+        let mut leaves = 0;
+        for bucket in &self.plants {
+            for &(_, _, _, id) in bucket {
+                match id {
+                    TRUNK => wood += 1,
+                    CANOPY => leaves += 1,
+                    _ => {}
+                }
+            }
+        }
+        (wood, leaves)
+    }
+
     /// The inverse of [`VoxelWorld::chunk_index`].
     #[inline]
     pub fn chunk_pos(&self, i: usize) -> ChunkPos {
@@ -247,6 +300,49 @@ impl VoxelWorld {
             x: i % self.chunks.x,
             y: (i / self.chunks.x) % self.chunks.y,
             z: i / (self.chunks.x * self.chunks.y),
+        }
+    }
+
+    /// Fills the ball of radius `r_m` metres at `p`, a point in metres relative to the trunk base,
+    /// in the plant frame `[east, up, north]`. `at` is that base: ground cell `(x, y)` and the first
+    /// level above the terrain.
+    ///
+    /// `clip` is the tree whose crown envelope a leaf cluster may not leave. Wood passes `None`: a
+    /// branch is already pulled back to the envelope wall by the skeleton, and clipping its radius
+    /// as well would shave the outer limbs.
+    fn stamp(
+        &mut self,
+        at: (i32, i32, i32),
+        p: [f32; 3],
+        r_m: f32,
+        id: u16,
+        clip: Option<&TreeForm>,
+    ) {
+        let (cx, cy, base) = at;
+        let cell_m = self.cell_m;
+        // Half a cell is the floor, so a twig thinner than the lattice is still one voxel wide
+        // rather than a dotted line.
+        let rc = (r_m / cell_m).max(0.5);
+        let (fx, fy, fz) = (p[0] / cell_m, p[2] / cell_m, p[1] / cell_m);
+        let (ix, iy, iz) = (fx.round() as i32, fy.round() as i32, fz.round() as i32);
+        let ri = rc.ceil() as i32;
+        for oz in -ri..=ri {
+            for oy in -ri..=ri {
+                for ox in -ri..=ri {
+                    let (gx, gy, gz) = (ix + ox, iy + oy, iz + oz);
+                    let (ex, ey, ez) = (gx as f32 - fx, gy as f32 - fy, gz as f32 - fz);
+                    if ex * ex + ey * ey + ez * ez > rc * rc {
+                        continue;
+                    }
+                    if let Some(t) = clip {
+                        let q = [gx as f32 * cell_m, gz as f32 * cell_m, gy as f32 * cell_m];
+                        if !t.in_envelope(q) {
+                            continue;
+                        }
+                    }
+                    self.set_plant(cx + gx, cy + gy, base + gz, id);
+                }
+            }
         }
     }
 

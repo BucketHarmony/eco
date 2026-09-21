@@ -102,6 +102,10 @@ fn viewer_fallback(what: &str) -> String {
     format!("this viewer's fallback: meta.json has no {what}")
 }
 
+/// The byte `light.bin` uses for full sun (ecosim/UNITS.md, 3.6). Named because shot V3 reads the
+/// same file at a crown's level (`run.rs`, `CrownLight`) and the two must divide by the same number.
+pub const FULL_SUN: f32 = 255.0;
+
 impl Scale {
     /// The scale for an overlay, read from the run's `meta.json`.
     pub fn of(o: Overlay, meta: &RunMeta) -> Scale {
@@ -195,12 +199,13 @@ impl Scale {
 fn temp_span(p: &Params) -> Option<(f32, f32)> {
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
-    for c in [&p.grass, &p.shrub, &p.tree] {
-        if let Some(t) = &c.temp {
-            if let (Some(a), Some(b)) = (t.first(), t.last()) {
-                lo = lo.min(*a);
-                hi = hi.max(*b);
-            }
+    for t in [&p.grass.temp, &p.shrub.temp, &p.tree.temp]
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(a), Some(b)) = (t.first(), t.last()) {
+            lo = lo.min(*a);
+            hi = hi.max(*b);
         }
     }
     (lo.is_finite() && hi > lo).then_some((lo, hi))
@@ -344,7 +349,7 @@ impl Fields {
         let c = x + d.x * y;
         let p = d.patch_of(x, y);
         match o {
-            Overlay::Light => self.light.get(c).map_or(0.0, |v| *v as f32 / 255.0),
+            Overlay::Light => self.light.get(c).map_or(0.0, |v| *v as f32 / FULL_SUN),
             Overlay::Moisture => self.moisture.get(c).map_or(0.0, |v| *v as f32 / 255.0),
             Overlay::Fertility => self.fertility.get(c).map_or(0.0, |v| *v as f32),
             Overlay::Temperature => self.temperature.get(p).copied().unwrap_or(0.0),

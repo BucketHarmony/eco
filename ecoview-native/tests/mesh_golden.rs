@@ -353,6 +353,7 @@ use ecoview_native::palette::{
     linear_rgba, palette, Overlay, BANDS, BAND_BASE, FIRE_BURNT, FIRE_QUIET,
 };
 use ecoview_native::voxel::{ColumnBands, CANOPY, ID_COUNT, SOIL, TRUNK};
+use ecoview_native::ECO_CELL_M;
 
 /// A run directory carrying every field an overlay reads, on an `n` x `n` ecology grid with
 /// `patch` x `patch` patches.
@@ -434,6 +435,21 @@ fn write_overlay_run(dir: &std::path::Path, n: usize, patch: usize, with_params:
         )
         .unwrap();
         std::fs::write(sd.join("height.bin"), vec![2u8; cols]).unwrap();
+        // Shot S5: `water.bin`, ponded depth on the **ground** grid in tenths of a millimetre. The
+        // first snapshot is dry, as tick 0 of every run is, and the second holds four cells: one
+        // film far too thin to draw, one puddle, one pond a metre deep and one five metres deep.
+        // 0.1 mm is deliberately the smallest a u16 can carry, so a reader that rounds it away or
+        // treats it as dry is caught.
+        let gcells = (n * 2) * (n * 2);
+        let mut water = vec![0u16; gcells];
+        if i == 1 {
+            water[1] = 3; // 0.3 mm: wet ground, not standing water
+            water[2] = 500; // 50 mm: a puddle, one voxel on a 0.5 m lattice
+            water[3] = 10_000; // 1000 mm
+            water[4] = 50_000; // 5000 mm, the corner that never drains
+        }
+        let raw: Vec<u8> = water.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(sd.join("water.bin"), raw).unwrap();
         // Light is sampled one voxel above the surface, so the value that matters is at z = 3.
         let mut light = vec![0u8; cols * z];
         for c in 0..cols {
@@ -503,10 +519,22 @@ fn the_scale_and_the_species_colours_come_from_meta_json() {
     assert_eq!(Scale::of(Overlay::Light, m).hi, 1.0);
     assert_eq!(Scale::of(Overlay::Moisture, m).hi, 1.0);
     assert_eq!(Scale::of(Overlay::Fertility, m).hi, 255.0);
-    for o in Overlay::ALL.into_iter().filter(|o| o.is_field()) {
+    // Every ecology overlay's scale is the run's. **Water is the exception, and it is the
+    // simulator's to close, not this viewer's**: `meta.json` carries no scale for ponded depth --
+    // there is no parameter in the run that says how deep a deep puddle is -- so shot S5 draws it
+    // on a ramp of its own and says on screen that it did. That is the fallback machinery working,
+    // not a hole in it, and the test asserts the fallback rather than skipping the overlay.
+    for o in Overlay::ALL
+        .into_iter()
+        .filter(|o| o.is_field() && *o != Overlay::Water)
+    {
         let s = Scale::of(o, m);
         assert!(s.from_meta(), "{}: {}", o.name(), s.source);
     }
+    let w = Scale::of(Overlay::Water, m);
+    assert!(!w.from_meta(), "{}", w.source);
+    assert!(w.source.contains("ponded depth"), "{}", w.source);
+    assert_eq!((w.lo, w.hi), ecoview_native::overlay::WATER_RAMP_MM);
 
     let p = palette(Overlay::Surface, Some(m));
     assert_eq!(p[TRUNK as usize], linear_rgba("#112233"));
@@ -541,7 +569,10 @@ fn the_overlay_ramp_hues_come_from_meta_json() {
     let r = Overlay::Light.ramp(Some(m));
     assert_eq!((r.lo.as_str(), r.hi.as_str()), ("#010203", "#fdfeff"));
     assert!(r.from_meta(), "{}", r.source);
-    for o in Overlay::ALL.into_iter().filter(|o| o.is_field()) {
+    for o in Overlay::ALL
+        .into_iter()
+        .filter(|o| o.is_field() && *o != Overlay::Water)
+    {
         assert!(
             o.ramp(Some(m)).from_meta(),
             "{}: {}",
@@ -549,6 +580,12 @@ fn the_overlay_ramp_hues_come_from_meta_json() {
             o.ramp(Some(m)).source
         );
     }
+    // And the same exception, for the same reason: `ecosim` shot S2 published seven rows and none of
+    // them is water, because at the time nothing drew water. Shot S5 draws it in hues of its own and
+    // names them as its own; publishing an eighth row is a row for the simulator.
+    let w = Overlay::Water.ramp(Some(m));
+    assert!(!w.from_meta(), "{}", w.source);
+    assert!(w.source.contains("overlays.water"), "{}", w.source);
     // The bottom and the top band of the drawn palette are those two colours, linearised.
     let p = palette(Overlay::Light, Some(m));
     assert_eq!(p[ID_COUNT], linear_rgba("#010203"));
@@ -766,7 +803,12 @@ fn one_ecology_column_covers_its_ground_cells() {
     let mut w = VoxelWorld::from_bundle(&flat(16, 0.5, 4.0));
     let mut bands = vec![0u8; 64];
     bands[1] = 7; // the column from x = 1 m to x = 2 m
-    let stale = w.set_overlay(Some(&ColumnBands { x: 8, y: 8, bands }));
+    let stale = w.set_overlay(Some(&ColumnBands {
+        x: 8,
+        y: 8,
+        cell_m: ECO_CELL_M,
+        bands,
+    }));
     assert!(!stale.is_empty());
     assert!(w.has_overlay());
     let g = w.ground_level(0, 0);
@@ -806,6 +848,7 @@ fn set_overlay_reports_exactly_the_chunks_whose_mesh_changed() {
     let flat_field = ColumnBands {
         x: 64,
         y: 64,
+        cell_m: ECO_CELL_M,
         bands: vec![0u8; 64 * 64],
     };
     assert_eq!(
@@ -859,7 +902,12 @@ fn golden_banded() {
     // Four-metre stripes of two bands: 13 quads rather than the flat site's 10, because the two
     // band ids do not merge across the stripe.
     let bands: Vec<u8> = (0..64).map(|c| if c % 8 < 4 { 5 } else { 9 }).collect();
-    w.set_overlay(Some(&ColumnBands { x: 8, y: 8, bands }));
+    w.set_overlay(Some(&ColumnBands {
+        x: 8,
+        y: 8,
+        cell_m: ECO_CELL_M,
+        bands,
+    }));
     let m = mesh_chunk(
         &w,
         ChunkPos { x: 0, y: 0, z: 0 },
@@ -2182,4 +2230,304 @@ fn the_sky_dome_faces_the_camera_inside_it() {
     // Remeshing hangs on the season step and on nothing else the sun does.
     assert_eq!(noon.mesh_key(), noon.season.step());
     assert_eq!(night.mesh_key(), noon.mesh_key(), "an hour is not a season");
+}
+
+// ---- shot S5: standing water ----
+//
+// In this file for the reason every block above it is: the CI gate runs exactly one target, and
+// adding a second one means editing the workflow, which belongs to a `ci` row rather than a viewer
+// shot. All of these are engine-free.
+//
+// **Nothing here models water.** `water.bin` is ponded depth on the ground grid, written by `ecosim`
+// every snapshot since shot G4, and the simulator decided every millimetre in it. What these tests
+// pin is the reading of it (the unit, the grid, the refusal of a file of the wrong length), the map
+// (dry ground is a band of its own, and the ramp above it is logarithmic) and the drawing (which
+// cells stand up as voxels, how many, and that taking the water off gives back the site that was
+// under it).
+
+use ecoview_native::overlay::{water_band, PondLevels, POND_MIN_MM, WATER_RAMP_MM};
+use ecoview_native::palette::{id_name, POND, POND_HEX, WATER_DRY};
+use ecoview_native::voxel::AIR;
+
+/// `water.bin`, read back as ponded depth on the grid it was written on.
+#[test]
+fn water_bin_is_ponded_depth_in_tenths_of_a_millimetre() {
+    let dir = tmp("ponds");
+    write_overlay_run(&dir, 8, 4, true);
+    let run = Run::load(&dir).unwrap();
+
+    // The grid is the **ground** grid out of `meta.json`'s `world` -- 16 x 16 here -- and not the
+    // 8 x 8 ecology grid every other field is on. Reading it as an ecology field would have drawn a
+    // quarter of the site and called it the whole.
+    let p = run.ponds_at(1).unwrap();
+    assert_eq!((p.width, p.depth), (16, 16));
+    assert_eq!(p.cells(), 256);
+    assert_eq!(p.mm[0], 0.0);
+    assert_eq!(p.mm[1], 0.3);
+    assert_eq!(p.mm[2], 50.0);
+    assert_eq!(p.mm[3], 1000.0);
+    assert_eq!(p.mm[4], 5000.0);
+
+    // Four cells hold water and three are deep enough to draw. The mean is over the wet cells, not
+    // over the site: a site that is 98% dry has a mean of nearly nothing, which says something
+    // about the site and nothing at all about its water.
+    let s = p.stats(0.5);
+    assert_eq!((s.wet, s.drawn), (4, 3));
+    assert_eq!(s.max_mm, 5000.0);
+    assert!((s.mean_mm - 6050.3 / 4.0).abs() < 1e-2, "{}", s.mean_mm);
+    // 6050.3 mm spread over cells of 0.25 m2 is 1.5126 m3.
+    assert!((s.volume_m3 - 1.512_575).abs() < 1e-6, "{}", s.volume_m3);
+
+    // Tick 0 is dry, as tick 0 of every run is: no storm has fallen yet.
+    let dry = run.ponds_at(0).unwrap();
+    assert_eq!(dry.stats(0.5).wet, 0);
+    assert!(dry.mm.iter().all(|d| *d == 0.0));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A `water.bin` of the wrong length is refused by name, the way every other field file is.
+#[test]
+fn a_short_water_file_is_refused() {
+    let dir = tmp("shortwater");
+    write_overlay_run(&dir, 8, 4, true);
+    std::fs::write(dir.join("snap_000100").join("water.bin"), vec![0u8; 64]).unwrap();
+    let run = Run::load(&dir).unwrap();
+    let e = run.ponds_at(1).unwrap_err().to_string();
+    assert!(e.contains("water.bin"), "{e}");
+    assert!(e.contains("512"), "the length it expected: {e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Dry ground is a band of its own, and every depth above it sits on a log10 ramp.
+///
+/// The measurement behind that shape is in MEASUREMENTS.md: on `runs/capitol-s42` at tick 10000 the
+/// median wet cell holds 10 mm and the deepest holds 5,074, so a linear ramp to the maximum puts
+/// 99% of the standing water in the bottom band and paints a flooded site as a dry one.
+#[test]
+fn the_water_overlay_has_a_dry_band_and_a_logarithmic_ramp() {
+    let dir = tmp("waterscale");
+    write_overlay_run(&dir, 8, 4, true);
+    let run = Run::load(&dir).unwrap();
+    let s = Scale::of(Overlay::Water, &run.meta);
+    assert_eq!((s.lo, s.hi), WATER_RAMP_MM);
+
+    // Dry is exactly zero, not "below the bottom of the ramp": a tenth of a millimetre is water the
+    // simulator put there, and the map says so.
+    assert_eq!(water_band(0.0, &s), WATER_DRY);
+    assert_eq!(water_band(-1.0, &s), WATER_DRY);
+    assert_eq!(water_band(0.1, &s), WATER_DRY + 1);
+    assert_eq!(water_band(1.0, &s), WATER_DRY + 1);
+    assert_eq!(water_band(10_000.0, &s), BANDS as u8 - 1);
+    assert_eq!(
+        water_band(99_999.0, &s),
+        BANDS as u8 - 1,
+        "clamped at the top"
+    );
+
+    // Monotone, and a decade of depth is a fixed height on the ramp -- which is what logarithmic
+    // means, and what a linear ramp could not give: 1 mm, 10 mm, 100 mm and 1 m are equally far
+    // apart. 30 bands over four decades is 7.5 each, so consecutive steps are 7 or 8.
+    let b = |mm: f32| water_band(mm, &s) as i32;
+    let steps = [b(10.0) - b(1.0), b(100.0) - b(10.0), b(1000.0) - b(100.0)];
+    for d in steps {
+        assert!((7..=8).contains(&d), "{steps:?}");
+    }
+    assert_eq!(
+        b(10_000.0) - b(1.0),
+        30,
+        "the whole ramp above the dry band"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The map covers every wet cell; the geometry covers the ones deep enough to stand up.
+///
+/// This is the one number in the shot that is the **viewer's** rather than the run's, so it is
+/// tested rather than only written down: 0.3 mm of water is drawn nowhere and mapped somewhere.
+#[test]
+fn a_film_of_water_is_mapped_but_not_drawn() {
+    let dir = tmp("film");
+    write_overlay_run(&dir, 8, 4, true);
+    let run = Run::load(&dir).unwrap();
+    let p = run.ponds_at(1).unwrap();
+    let s = Scale::of(Overlay::Water, &run.meta);
+    let (bands, stats) = p.bands(&s);
+
+    assert!(p.mm[1] > 0.0 && p.mm[1] < POND_MIN_MM);
+    assert!(bands[1] > WATER_DRY, "the film is on the map");
+    assert_eq!(bands[0], WATER_DRY, "and dry ground is not");
+    assert!(
+        bands[4] > bands[3] && bands[3] > bands[2],
+        "deeper is further up"
+    );
+    // The field's own numbers, over the whole site rather than over the wet cells: this is what the
+    // overlay legend reports, and a site with one deep corner has a mean of almost nothing.
+    assert_eq!((stats.min, stats.max), (0.0, 5000.0));
+    assert!((stats.mean - 6050.3 / 256.0).abs() < 1e-3, "{}", stats.mean);
+
+    let levels = p.levels(0.5);
+    assert_eq!(levels.levels[1], 0, "a film is not drawn");
+    assert_eq!(
+        levels.levels[2], 1,
+        "50 mm is one voxel, which is 0.5 m: see the HUD line"
+    );
+    assert_eq!(levels.levels[3], 2, "1000 mm on a 0.5 m lattice");
+    assert_eq!(levels.levels[4], 10, "5000 mm");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Standing water stands on the ground, where the run put it and nowhere else.
+#[test]
+fn standing_water_stands_on_the_ground_the_run_wetted() {
+    // 20 m of headroom so the deepest pond is not clipped by the chunk grid's ceiling.
+    let mut w = VoxelWorld::from_bundle_with_headroom(&flat(16, 0.5, 4.0), 20.0);
+    let g = w.ground_level(0, 0);
+    assert!(!w.has_ponds());
+
+    let mut levels = vec![0u8; 16 * 16];
+    levels[2] = 1;
+    levels[4] = 10;
+    let stale = w.set_ponds(Some(&PondLevels {
+        width: 16,
+        depth: 16,
+        levels,
+    }));
+    assert!(!stale.is_empty());
+    assert!(w.has_ponds());
+    assert_eq!(w.pond_counts(), (2, 11));
+
+    // The water sits **on** the ground rather than in it: the column's own top voxel is still the
+    // medium that was surveyed there.
+    assert_eq!(w.voxel(2, 0, g), 2, "lawn is medium 1, id 2");
+    assert_eq!(w.voxel(2, 0, g + 1), POND);
+    assert_eq!(w.voxel(2, 0, g + 2), AIR, "one voxel of water, not two");
+    assert_eq!(w.voxel(4, 0, g + 10), POND, "ten of them");
+    assert_eq!(w.voxel(4, 0, g + 11), AIR);
+    // And a dry cell is dry, however wet its neighbour is.
+    assert_eq!(w.voxel(3, 0, g + 1), AIR);
+    assert_eq!(w.voxel(0, 0, g + 1), AIR);
+
+    // The pond's colour is not the `water` medium's: a reader has to be able to tell water this run
+    // ponded from water somebody surveyed (palette.rs, `POND_HEX`).
+    let pal = palette(Overlay::Surface, None);
+    assert_eq!(pal[POND as usize], linear_rgba(POND_HEX));
+    assert_ne!(pal[POND as usize], pal[9], "medium 8, `water`, is id 9");
+}
+
+/// Taking the water off gives back exactly the site that was under it, and a change remeshes what
+/// the water changed rather than the site.
+#[test]
+fn set_ponds_reports_exactly_the_chunks_whose_mesh_changed() {
+    // 128 cells at 0.5 m is a 64 m site; 20 m of headroom leaves room above the ground for a pond.
+    let mut w = VoxelWorld::from_bundle_with_headroom(&flat(128, 0.5, 4.0), 20.0);
+    let pal = palette(Overlay::Water, None);
+    let mut scratch = Scratch::new();
+    let all = w.all_chunks();
+    let hashes = |w: &VoxelWorld, s: &mut Scratch| -> Vec<u64> {
+        all.iter()
+            .map(|&c| mesh_chunk(w, c, &pal, s).hash())
+            .collect()
+    };
+    let dry = hashes(&w, &mut scratch);
+
+    // A dry snapshot is not the same thing as no snapshot, and it draws the same site.
+    let none = PondLevels {
+        width: 128,
+        depth: 128,
+        levels: vec![0u8; 128 * 128],
+    };
+    assert!(
+        w.set_ponds(Some(&none)).is_empty(),
+        "a dry run changes no voxel"
+    );
+    assert!(w.has_ponds());
+    assert_eq!(hashes(&w, &mut scratch), dry);
+
+    // One puddle, inside the first chunk: one chunk is stale and no other.
+    let mut one = none.clone();
+    one.levels[10 + 128 * 10] = 1;
+    let stale = w.set_ponds(Some(&one));
+    assert_eq!(stale.len(), 1, "{stale:?}");
+    assert_eq!(stale[0], ChunkPos { x: 0, y: 0, z: 0 });
+    assert_ne!(hashes(&w, &mut scratch), dry, "a puddle has to show");
+
+    // And off again, to the bit. This is the claim the shot rests on: water is a layer over the
+    // site rather than a change to it.
+    assert_eq!(w.set_ponds(None).len(), 1);
+    assert!(!w.has_ponds());
+    assert_eq!(hashes(&w, &mut scratch), dry);
+    assert_eq!(w.pond_counts(), (0, 0));
+}
+
+/// The water map is drawn on the **ground** grid, at the resolution of the file it came from.
+///
+/// The other six overlays are read on the simulator's 1 m columns, and on the Capitol each of those
+/// covers 2 x 2 ground cells. Water is not one of them: `water.bin` is per ground cell, because the
+/// ground grid is what the water ran over. Before this shot `ColumnBands` had no way to say which
+/// grid it was on, so a water field handed to it would have been stretched to twice its size in
+/// silence.
+#[test]
+fn the_water_map_is_not_stretched_from_the_ecology_grid() {
+    let mut w = VoxelWorld::from_bundle(&flat(16, 0.5, 4.0));
+    let g = w.ground_level(0, 0);
+    let mut bands = vec![0u8; 16 * 16];
+    bands[1] = 7;
+    w.set_overlay(Some(&ColumnBands {
+        x: 16,
+        y: 16,
+        cell_m: 0.5,
+        bands,
+    }));
+    let band = |w: &VoxelWorld, x: i32| w.voxel(x, 0, g) - BAND_BASE;
+    assert_eq!(
+        (band(&w, 0), band(&w, 1), band(&w, 2)),
+        (0, 7, 0),
+        "one ground cell, not the two an ecology column covers"
+    );
+
+    // The same numbers on the ecology grid cover two cells each, which is what
+    // `one_ecology_column_covers_its_ground_cells` pins from the other side.
+    let mut bands = vec![0u8; 64];
+    bands[1] = 7;
+    w.set_overlay(Some(&ColumnBands {
+        x: 8,
+        y: 8,
+        cell_m: ECO_CELL_M,
+        bands,
+    }));
+    assert_eq!((band(&w, 1), band(&w, 2), band(&w, 3)), (0, 7, 7));
+}
+
+/// Standing water has an id of its own, past the bands, and that is why every mesh golden hash
+/// above still stands.
+///
+/// The palette is the surface ids, then the 32 bands, then the pond. Putting the pond among the
+/// media -- where a new surface id would naturally go -- would have moved `BAND_BASE` by one and
+/// changed the colour of every overlay band, and with it the goldens from V0 through V6.
+#[test]
+fn the_pond_id_sits_past_the_bands() {
+    assert_eq!(POND as usize, ID_COUNT + BANDS);
+    assert_eq!(PALETTE_LEN, ID_COUNT + BANDS + 1);
+    assert_eq!(BAND_BASE as usize, ID_COUNT, "the bands did not move");
+    for o in [Overlay::Surface, Overlay::Water, Overlay::Fire] {
+        let p = palette(o, None);
+        assert_eq!(p.len(), PALETTE_LEN);
+        assert_eq!(p[..ID_COUNT], surface_palette()[..], "{}", o.name());
+        assert_eq!(p[POND as usize], linear_rgba(POND_HEX));
+    }
+    // The water overlay's own bands: dry ground is categorical and off the ramp, the way fire's
+    // quiet band is, and the ramp above it runs between the two hues the legend names.
+    let p = palette(Overlay::Water, None);
+    let r = Overlay::Water.ramp(None);
+    // The top band is the ramp's far end reached by interpolation, so it is compared as a colour
+    // rather than as four bit patterns.
+    let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+    assert_eq!(p[ID_COUNT + WATER_DRY as usize + 1], linear_rgba(&r.lo));
+    assert!(close(p[ID_COUNT + BANDS - 1], linear_rgba(&r.hi)));
+    assert_ne!(
+        p[ID_COUNT + WATER_DRY as usize],
+        linear_rgba(&r.lo),
+        "dry ground is off the ramp"
+    );
+    assert_eq!(id_name(POND), "standing water");
 }

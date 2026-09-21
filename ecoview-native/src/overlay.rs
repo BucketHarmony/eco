@@ -8,7 +8,7 @@
 //!
 //! Like the rest of the library half this module never mentions Bevy.
 
-use crate::palette::{Overlay, BANDS, FIRE_BURNT, FIRE_QUIET};
+use crate::palette::{Overlay, BANDS, FIRE_BURNT, FIRE_QUIET, WATER_DRY};
 use crate::run::{Dims, Params, Run, RunMeta};
 use serde::Deserialize;
 use std::io;
@@ -102,6 +102,29 @@ fn viewer_fallback(what: &str) -> String {
     format!("this viewer's fallback: meta.json has no {what}")
 }
 
+/// `water.bin` is ponded depth in tenths of a millimetre (CLAUDE.md, the run directory contract).
+pub const WATER_TENTHS_MM: f32 = 10.0;
+
+/// The two ends of the water overlay's ramp, in mm, and they are **logarithmic**.
+///
+/// Measured on `runs/capitol-s42` at tick 10000, over the 13,206 ground cells holding any water at
+/// all: the median is 10 mm, the ninetieth percentile 48 mm and the maximum 5,074 mm, which is one
+/// corner of the site that never drains. A linear ramp to that maximum puts 99% of the standing
+/// water in the bottom band and draws the site as though it were dry; a linear ramp to the ninetieth
+/// percentile throws away the two decades above it. Four decades of log10, 1 mm to 10 m, carries the
+/// whole span at about 1.35x a band and is the same scale in every snapshot of every run, which a
+/// scale taken from each snapshot's own maximum would not be (MEASUREMENTS.md, S5).
+pub const WATER_RAMP_MM: (f32, f32) = (1.0, 10_000.0);
+
+/// The shallowest standing water drawn as a **voxel**, in mm.
+///
+/// The overlay maps every wet cell, including a film a tenth of a millimetre deep. Geometry cannot:
+/// the thinnest voxel this viewer can draw is one ground cell, 0.5 m on the Capitol, so anything it
+/// draws at all it draws far too deep. 5 mm is where a wet pavement becomes a puddle, and it is the
+/// line this viewer draws between the two -- the viewer's, not the run's, and the HUD prints both
+/// counts so the difference is never hidden (DECISIONS.md, S5).
+pub const POND_MIN_MM: f32 = 5.0;
+
 /// The byte `light.bin` uses for full sun (ecosim/UNITS.md, 3.6). Named because shot V3 reads the
 /// same file at a crown's level (`run.rs`, `CrownLight`) and the two must divide by the same number.
 pub const FULL_SUN: f32 = 255.0;
@@ -177,6 +200,16 @@ impl Scale {
                     unit: "ticks left",
                     source: viewer_fallback("fire.duration"),
                 },
+            },
+            // Ponded depth, on a **logarithmic** ramp: see `WATER_RAMP_MM` for the measurement
+            // that rules a linear one out. Neither end is the run's -- `meta.json` carries no scale
+            // for standing water and no `overlays.water` row either -- so both say so, in the words
+            // every other guessed number here uses.
+            Overlay::Water => Scale {
+                lo: WATER_RAMP_MM.0,
+                hi: WATER_RAMP_MM.1,
+                unit: "mm standing, log10",
+                source: viewer_fallback("scale for ponded depth (water.bin is in 0.1 mm)"),
             },
             Overlay::Surface => Scale {
                 lo: 0.0,
@@ -370,7 +403,10 @@ impl Fields {
             Overlay::Temperature => self.temperature.get(p).copied().unwrap_or(0.0),
             Overlay::Crowding => self.grazers.get(p).map_or(0.0, |v| *v as f32),
             Overlay::Fire => self.burning.get(p).map_or(0.0, |v| *v as f32),
-            Overlay::Surface => 0.0,
+            // Standing water is not in `Fields` and never can be: it is per **ground cell**, on the
+            // bundle's finer grid, and every field here is per ecology column. [`Ponds`] reads it,
+            // and `apply_world_state` routes the water overlay there instead of here.
+            Overlay::Water | Overlay::Surface => 0.0,
         }
     }
 
@@ -434,4 +470,183 @@ impl Fields {
             self.burnt.iter().filter(|b| **b).count(),
         )
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// Shot S5: standing water.
+//
+// `water.bin` is ponded depth on the **ground grid**, in tenths of a millimetre, written every
+// snapshot since shot G4. Until this shot nothing in this viewer read it, so a column holding
+// 215 mm of standing water was drawn as the driest ground on the site: the moisture overlay reads
+// `moisture.bin`, which is soil water in the ecology columns, and a paved column has none. Both
+// readings were honest and the picture was still wrong.
+//
+// Nothing here models water. The simulator decides where it stands and how deep; this reads the
+// file, bands it for the overlay and quantises it to the lattice for the geometry, and says on
+// screen which of those two numbers is the file's and which is the lattice's.
+// -------------------------------------------------------------------------------------------
+
+/// One snapshot's ponded depth, per ground cell, in mm.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Ponds {
+    pub width: usize,
+    pub depth: usize,
+    /// Ponded depth in mm, one per ground cell, x-fastest.
+    pub mm: Vec<f32>,
+}
+
+/// What a snapshot's standing water came to, for the HUD, the stdout line and `ecoview.stats`.
+///
+/// `wet` counts every cell with any water at all and `drawn` only the ones deep enough to become a
+/// voxel ([`POND_MIN_MM`]), because those two numbers differ by a factor of four on the Capitol and
+/// a picture that showed the second while reporting the first would be overstating itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PondStats {
+    pub wet: usize,
+    pub drawn: usize,
+    pub max_mm: f32,
+    /// Mean depth over the wet cells only. The mean over the whole site is in [`FieldStats`], which
+    /// is what the overlay's own legend reports.
+    pub mean_mm: f32,
+    /// Everything standing on the site, in cubic metres.
+    pub volume_m3: f64,
+}
+
+/// One pond depth per ground cell, quantised to the drawing lattice: how many voxels of water stand
+/// on each cell. Zero everywhere the run left the ground dry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PondLevels {
+    pub width: usize,
+    pub depth: usize,
+    pub levels: Vec<u8>,
+}
+
+impl Run {
+    /// Reads snapshot `i`'s `water.bin`.
+    ///
+    /// The length is checked against `meta.json`'s **ground** grid, not its ecology grid, for the
+    /// reason [`Run::fields_at`] checks every file it reads: a short file read as a field draws the
+    /// wrong half of the site in silence. A run with no `world` object is a version 1-3 run and
+    /// [`Run::load`] has already refused it, so the absence here is a corrupt file, not an old one.
+    pub fn ponds_at(&self, i: usize) -> io::Result<Ponds> {
+        let Some(w) = &self.meta.world else {
+            return Err(bad(format!(
+                "{}: meta.json has no `world`, so there is no ground grid for water.bin",
+                self.dir.display()
+            )));
+        };
+        let (width, depth) = (w.ground_width, w.ground_depth);
+        let path = self.snapshot_dir(i).join("water.bin");
+        let raw = read_exact_len(&path, width * depth * 2)?;
+        let mm = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes(*b) as f32 / WATER_TENTHS_MM)
+            .collect();
+        Ok(Ponds { width, depth, mm })
+    }
+}
+
+impl Ponds {
+    pub fn cells(&self) -> usize {
+        self.width * self.depth
+    }
+
+    /// What this snapshot's standing water came to. `cell_m` is the ground cell's side in metres,
+    /// which is what turns a heap of depths into a volume; it comes from the bundle, because the
+    /// run's own `meta.json` states it only for the grid it computed on.
+    pub fn stats(&self, cell_m: f32) -> PondStats {
+        let (mut wet, mut drawn, mut max, mut sum) = (0usize, 0usize, 0.0f32, 0.0f64);
+        for &d in &self.mm {
+            if d > 0.0 {
+                wet += 1;
+                sum += d as f64;
+                max = max.max(d);
+            }
+            if d >= POND_MIN_MM {
+                drawn += 1;
+            }
+        }
+        PondStats {
+            wet,
+            drawn,
+            max_mm: max,
+            mean_mm: if wet > 0 {
+                (sum / wet as f64) as f32
+            } else {
+                0.0
+            },
+            // mm of depth over one cell is a millimetre-metre-metre; the thousand takes it to m3.
+            volume_m3: sum * (cell_m * cell_m) as f64 / 1000.0,
+        }
+    }
+
+    /// The overlay's bands, one per ground cell, and what the field held over the whole site.
+    ///
+    /// Band 0 is dry ground -- categorical, off the ramp -- and every wet cell is at least band 1,
+    /// however thin the film. Above that the ramp is log10 over [`WATER_RAMP_MM`].
+    pub fn bands(&self, s: &Scale) -> (Vec<u8>, FieldStats) {
+        let mut out = vec![0u8; self.cells()];
+        let (mut min, mut max, mut sum) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f64);
+        for (i, &d) in self.mm.iter().enumerate() {
+            min = min.min(d);
+            max = max.max(d);
+            sum += d as f64;
+            out[i] = water_band(d, s);
+        }
+        let n = self.cells().max(1);
+        (
+            out,
+            FieldStats {
+                min: if min.is_finite() { min } else { 0.0 },
+                max: if max.is_finite() { max } else { 0.0 },
+                mean: (sum / n as f64) as f32,
+            },
+        )
+    }
+
+    /// How many voxels of water stand on each ground cell, on a lattice of `cell_m` metre cubes.
+    ///
+    /// **A cell shallower than [`POND_MIN_MM`] gets none**, and everything above it gets at least
+    /// one, which is where this stops being a measurement and starts being a drawing: 50 mm of
+    /// water on a 0.5 m lattice is a tenth of a voxel, and the two honest choices are one voxel or
+    /// nothing. One voxel it is, and every report that shows it says so in millimetres.
+    pub fn levels(&self, cell_m: f32) -> PondLevels {
+        let cell_m = if cell_m > 0.0 { cell_m } else { 1.0 };
+        let levels = self
+            .mm
+            .iter()
+            .map(|&d| {
+                if d < POND_MIN_MM {
+                    return 0;
+                }
+                ((d / 1000.0 / cell_m).round() as i64).clamp(1, u8::MAX as i64) as u8
+            })
+            .collect();
+        PondLevels {
+            width: self.width,
+            depth: self.depth,
+            levels,
+        }
+    }
+}
+
+/// The band one ponded depth falls in: 0 for dry ground, and a log10 ramp above it.
+///
+/// Dry is exactly zero, not "less than the bottom of the ramp": the simulator either put water here
+/// or it did not, and that distinction is the whole point of the map.
+pub fn water_band(mm: f32, s: &Scale) -> u8 {
+    if mm <= 0.0 {
+        return WATER_DRY;
+    }
+    let first = WATER_DRY as usize + 1;
+    let span = (BANDS - first - 1) as f32;
+    let (lo, hi) = (s.lo.max(f32::MIN_POSITIVE), s.hi);
+    let t = if hi > lo {
+        (mm.max(lo).log10() - lo.log10()) / (hi.log10() - lo.log10())
+    } else {
+        1.0
+    };
+    (first + (t.clamp(0.0, 1.0) * span).round() as usize).min(BANDS - 1) as u8
 }

@@ -985,3 +985,100 @@ against the one written before the shot gives `ecosim diff` -> `differs: meta.js
 `cargo test --release --no-default-features --test mesh_golden` is **60 pass**, V6's 58 plus the two
 this shot adds; every one of the 50 mesh golden hashes is untouched, because a palette colours a mesh
 and does not shape one.
+
+# S5 -- standing water
+
+Backlog row S5, no prompt file: the row is the specification. Everything below is
+`runs/capitol-s42`, the committed 20,000-tick Capitol run, read through
+`ecoview-native --world ../ecosim/worlds/capitol --run ../ecosim/runs/capitol-s42`.
+
+## What was in the file the viewer was not reading
+
+`water.bin` is 512 x 512 u16 in tenths of a millimetre, half a megabyte a snapshot, written every
+snapshot since `ecosim` shot G4. At tick 10000:
+
+| | |
+| --- | --- |
+| wet ground cells | **13,206 of 262,144** (5.0% of the site) |
+| deep enough to draw (>= 5 mm) | 10,469 |
+| depth: median / q0.90 / q0.99 / max | **10.0 / 47.7 / 480.3 / 5,074.1 mm** |
+| standing volume | 166.2 m3 |
+| mean over the whole site | 2.54 mm |
+
+The median-to-maximum spread of 500x is the whole argument for a log ramp. A linear ramp to 5,074 mm
+gives the median wet cell band 0 of 31 -- the same band as dry ground.
+
+It is not a still picture, either. Wet cells and volume over the run:
+
+| tick | 0 | 2000 | 5000 | 8000 | 10000 | 12000 | 16000 | 20000 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| wet cells | 0 | 6,571 | 6,662 | 5,316 | 13,206 | 8,529 | 10,804 | 14,273 |
+| m3 standing | 0.0 | 90.0 | 170.2 | 192.7 | 166.2 | 224.5 | 256.2 | 287.0 |
+
+## Where it stands, which is the answer to part (b)
+
+Ponded cells at tick 10000, by the bundle's own medium:
+
+| medium | site cells | wet | share of that medium |
+| --- | --- | --- | --- |
+| lawn | 169,876 | 523 | **0.3%** |
+| concrete | 22,684 | 2,664 | **11.7%** |
+| asphalt | 44,879 | 10,019 | **22.3%** |
+| roof | 24,705 | 0 | **0.0%** |
+
+Ponded cells sit at a mean ground height of **3.90 m** against the site's **4.95 m**, so the water
+is in the low ground -- the depressions are real. But which low ground keeps it is decided by the
+medium: `params.toml` gives concrete and asphalt `field_capacity_mm = 0.0`, so `settle_water` finds
+no room to drain into and only evaporation removes it, while lawn drinks 15 mm/h. Both halves of
+CLAUDE.md's reworded clause are in this table.
+
+## What it costs to draw
+
+| | quads | mesh |
+| --- | --- | --- |
+| Capitol at tick 10000, water off | 452,385 | 41 ms, 324 chunks, 93 drawn |
+| the same frame, water on | **478,601** | 43 ms |
+
+**26,216 quads, 5.8%**, for 11,035 water voxels -- greedy meshing merges a pond into a slab, which is
+why a fifth of the site's wet cells costs a twentieth of its geometry. The water overlay is cheaper
+still (238,850 quads) because an overlay flattens the ground cover it replaces.
+
+Scrubbing is unchanged in shape: `set_ponds` diffs the previous snapshot's levels and returns only
+the columns that moved, and `set_ponds_reports_exactly_the_chunks_whose_mesh_changed` holds it to
+that -- a dry snapshot stales nothing, one puddle stales one chunk, and taking the water off
+restores every chunk hash to the bit.
+
+## The screenshots
+
+Four, all `--tick 10000 --headless --frames 300`. None of the committed reference PNGs from V0-V6
+was re-accepted, and none needed to be: no existing voxel id moved (see the line budget below).
+
+| File | Arguments beyond the run | What it shows |
+| --- | --- | --- |
+| `s5-water-on.png` | `--overlay surface` | The site as the run left it: pale blue sheets in the gutters along all four streets, across the car park at the south-west corner and in the low paths between the lawns, and none at all on the lawn or on the Capitol's roof. This is the picture the shot exists to make. |
+| `s5-water-off.png` | `--overlay surface --no-water` | The same frame with `[F]` off -- dry grey asphalt everywhere the water was. The HUD still reads `13206 of 262144 ground cells wet ... not drawn`, which is the difference between a dry-looking picture and a dry site. |
+| `s5-water-overlay.png` | `--overlay water` | The map: grey ground for dry, and the log ramp from `#9fe8ff` to `#08246b` above it. The legend reads `1.00 to 10000.00 mm standing, log10` and the two provenance lines both carry `(!)` -- `meta.json` has neither a scale nor an `overlays.water` row, and the viewer says so rather than implying the numbers are the run's. |
+| `s5-pond-close.png` | `--eye 80,42,224 --look 90,4,186` | The largest single pond, on the asphalt at the south edge: a flat sheet a voxel deep filling the crown of the car park, with the crosshair on it reading `asphalt ground 4.11 m`. Beside it, dry lawn at the same height. |
+
+A private pass on the home scene is owed for this shot and is the operator's, not this worker's:
+the pictures change, and nothing under `eco-private/` was read or referenced here.
+
+## The gates
+
+`cargo test --release --no-default-features --test mesh_golden` is **68 pass**, S2's 60 plus the
+eight this shot adds; `cargo test --release` the same; `cargo fmt --check` clean; `cargo clippy
+--all-targets` back to V1's three pre-existing `src/bundle.rs` findings, with the one this shot
+introduced (`chunks_exact_to_as_chunks` in the `water.bin` reader) fixed rather than left.
+
+**Every mesh golden hash is unchanged.** `POND` sits past the 32 bands, so no existing voxel id and
+no palette slot moved; the only test edits to existing code are three `ColumnBands` initialisers
+that gained the new `cell_m` field, and the two from-the-file loops that now assert water reports a
+fallback rather than quietly skipping it.
+
+## Line budget
+
+`git diff --stat 8cacae2 -- ecoview-native/` is **1,191 insertions and 72 deletions, 1,119 net,
+against the row's 1,500** -- 381 to spare, with both write-ups in it. The gate is 352 of the
+insertions, `src/main.rs` 218, `src/overlay.rs` 217, `src/voxel.rs` 162, `src/palette.rs` 56, and
+the two write-ups 186. The split is **653 non-test and 352 test** before the write-ups. The reworded
+CLAUDE.md clause is outside the component and outside the budget.

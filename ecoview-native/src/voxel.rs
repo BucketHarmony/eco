@@ -7,7 +7,8 @@
 
 use crate::bundle::{Bundle, Shrub};
 use crate::cover::{CellPlant, Cover, SHRUB_HEIGHT_M};
-use crate::palette::BAND_BASE;
+use crate::overlay::PondLevels;
+use crate::palette::{BAND_BASE, POND};
 use crate::tree::TreeForm;
 use crate::ECO_CELL_M;
 
@@ -94,6 +95,12 @@ pub struct VoxelWorld {
     /// (palette.rs, `BANDS`). The bands are resampled from the run's 1 m ecology columns onto the
     /// bundle's finer ground grid once, when the overlay or the snapshot changes.
     bands: Option<Vec<u8>>,
+    /// How many voxels of standing water sit on each **ground cell**, or `None` for a dry site.
+    ///
+    /// Shot S5. The run's `water.bin` is on this same grid -- it is the grid the water ran over --
+    /// so unlike [`VoxelWorld::bands`] nothing is resampled on the way in. `None` and an all-zero
+    /// grid draw the same site; they differ only in what the HUD says about why.
+    ponds: Option<Vec<u8>>,
     /// Can ground cover root in each medium code? Indexed by `medium`, not by voxel id.
     ///
     /// This is the simulator's own `Medium::is_sealed` (`ecosim/src/bundle.rs`) plus open water,
@@ -112,11 +119,19 @@ pub struct VoxelWorld {
     pub levels: usize,
 }
 
-/// One overlay band per ecology column, as [`crate::overlay::Fields::bands`] produces them.
+/// One overlay band per column of the grid the field was read on, as
+/// [`crate::overlay::Fields::bands`] produces them.
+///
+/// `cell_m` says **which grid**: [`crate::ECO_CELL_M`] for the six ecology overlays, which the
+/// simulator computes on 1 m columns, and the bundle's own ground cell for shot S5's water, whose
+/// file is on the finer grid. Before S5 there was only one answer and it was a constant in
+/// [`VoxelWorld::to_col`]; a field on the other grid would have been stretched to twice its size
+/// with nothing to say so.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnBands {
     pub x: usize,
     pub y: usize,
+    pub cell_m: f32,
     pub bands: Vec<u8>,
 }
 
@@ -162,6 +177,7 @@ impl VoxelWorld {
             building_h: b.building_h.clone(),
             plants: vec![Vec::new(); chunks.x * chunks.y * chunks.z],
             bands: None,
+            ponds: None,
             grows: b
                 .media
                 .iter()
@@ -326,7 +342,17 @@ impl VoxelWorld {
     /// the simulator does not have.
     #[inline]
     fn to_col(&self, g: usize, n: usize) -> usize {
-        ((((g as f32 + 0.5) * self.cell_m) / ECO_CELL_M) as usize).min(n.saturating_sub(1))
+        self.to_grid(g, n, ECO_CELL_M)
+    }
+
+    /// The cell of a `cell_m`-metre grid that this ground cell's centre falls in, clamped to it.
+    /// With `cell_m` equal to this world's own the map is the identity, which is what shot S5's
+    /// water needs: `water.bin` is already on the ground grid and resampling it would be a lie in
+    /// either direction.
+    #[inline]
+    fn to_grid(&self, g: usize, n: usize, cell_m: f32) -> usize {
+        let cell_m = if cell_m > 0.0 { cell_m } else { ECO_CELL_M };
+        ((((g as f32 + 0.5) * self.cell_m) / cell_m) as usize).min(n.saturating_sub(1))
     }
 
     /// Replaces every plant voxel in the world with the ones these trees and shrubs make, and returns
@@ -561,9 +587,18 @@ impl VoxelWorld {
         let i = x as usize + self.width * y as usize;
         let g = level_of(self.ground_h[i], self.cell_m);
         if z > g {
-            let bh = self.building_h[i];
-            if bh > 0.0 && z <= level_of(self.ground_h[i] + bh, self.cell_m) {
+            let top = self.top_solid_at(i);
+            if top > g && z <= top {
                 return BUILDING;
+            }
+            // Standing water stands on whatever the column's top solid is, so a pond on a paved
+            // yard sits on the paving and one on a roof -- which the simulator does not make, since
+            // a roof's depression storage is zero -- would sit on the roof rather than inside it.
+            if let Some(p) = &self.ponds {
+                let n = p[i] as i32;
+                if n > 0 && z <= top + n {
+                    return POND;
+                }
             }
             return AIR;
         }
@@ -591,9 +626,9 @@ impl VoxelWorld {
         let next: Option<Vec<u8>> = field.map(|f| {
             let mut v = vec![0u8; self.width * self.depth];
             for gy in 0..self.depth {
-                let ey = self.to_col(gy, f.y);
+                let ey = self.to_grid(gy, f.y, f.cell_m);
                 for gx in 0..self.width {
-                    let ex = self.to_col(gx, f.x);
+                    let ex = self.to_grid(gx, f.x, f.cell_m);
                     v[gx + self.width * gy] = f.bands.get(ex + f.x * ey).copied().unwrap_or(0);
                 }
             }
@@ -614,41 +649,134 @@ impl VoxelWorld {
                 continue;
             }
             let z = g as usize;
-            // A voxel reaches into a neighbouring chunk's one-voxel pad only when it sits on its own
-            // chunk's boundary layer, so the 26-neighbour sweep is only needed there.
-            let span = |v: usize, n: usize| -> (usize, usize) {
-                let c = v / CS;
-                let lo = if v.is_multiple_of(CS) {
-                    c.saturating_sub(1)
-                } else {
-                    c
-                };
-                let hi = if v % CS == CS - 1 {
-                    (c + 1).min(n - 1)
-                } else {
-                    c
-                };
-                (lo, hi)
+            self.mark_stale(&mut stale, x, y, z, z);
+        }
+        self.stale_list(&stale)
+    }
+
+    /// Marks every chunk whose mesh a change to column `(x, y)` over levels `z0..=z1` leaves stale.
+    ///
+    /// A voxel reaches into a neighbouring chunk's one-voxel pad only when it sits on its own
+    /// chunk's boundary layer, so the 26-neighbour sweep is only needed there. Lifted out of
+    /// `set_overlay` by shot S5, which needs the same arithmetic over a **range** of levels: a pond
+    /// is one voxel deep on a puddle and ten in the corner of the site that never drains.
+    fn mark_stale(&self, stale: &mut [bool], x: usize, y: usize, z0: usize, z1: usize) {
+        let span = |v: usize, n: usize| -> (usize, usize) {
+            let c = v / CS;
+            let lo = if v.is_multiple_of(CS) {
+                c.saturating_sub(1)
+            } else {
+                c
             };
-            let (x0, x1) = span(x, self.chunks.x);
-            let (y0, y1) = span(y, self.chunks.y);
-            let (z0, z1) = span(z, self.chunks.z);
-            for cz in z0..=z1 {
-                for cy in y0..=y1 {
-                    for cx in x0..=x1 {
-                        stale[self.chunk_index(ChunkPos {
-                            x: cx,
-                            y: cy,
-                            z: cz,
-                        })] = true;
-                    }
+            let hi = if v % CS == CS - 1 {
+                (c + 1).min(n - 1)
+            } else {
+                c
+            };
+            (lo, hi)
+        };
+        let (x0, x1) = span(x, self.chunks.x);
+        let (y0, y1) = span(y, self.chunks.y);
+        let lo = z0.min(self.levels - 1);
+        let hi = z1.clamp(lo, self.levels - 1);
+        let (z0, _) = span(lo, self.chunks.z);
+        let (_, z1) = span(hi, self.chunks.z);
+        for cz in z0..=z1 {
+            for cy in y0..=y1 {
+                for cx in x0..=x1 {
+                    stale[self.chunk_index(ChunkPos {
+                        x: cx,
+                        y: cy,
+                        z: cz,
+                    })] = true;
                 }
             }
         }
+    }
+
+    fn stale_list(&self, stale: &[bool]) -> Vec<ChunkPos> {
         (0..self.chunk_count())
             .filter(|&i| stale[i])
             .map(|i| self.chunk_pos(i))
             .collect()
+    }
+
+    /// Puts one snapshot's standing water on the world, or takes it off with `None`, and returns the
+    /// chunks whose mesh is now stale (shot S5).
+    ///
+    /// The levels arrive on the **ground grid**, which is the grid `water.bin` is written on and the
+    /// grid this world's columns are, so nothing is resampled: [`VoxelWorld::to_grid`] is the
+    /// identity here. It is used anyway, so a run whose grid somehow disagreed is clamped rather
+    /// than read off the end of its own file.
+    pub fn set_ponds(&mut self, ponds: Option<&PondLevels>) -> Vec<ChunkPos> {
+        let next: Option<Vec<u8>> = ponds.map(|p| {
+            (0..self.width * self.depth)
+                .map(|i| {
+                    let gx = self.to_grid(i % self.width, p.width, self.cell_m);
+                    let gy = self.to_grid(i / self.width, p.depth, self.cell_m);
+                    let n = p.levels.get(gx + p.width * gy).copied().unwrap_or(0) as usize;
+                    let top = self.top_solid_at(i);
+                    if n == 0 || top < 0 {
+                        return 0;
+                    }
+                    // The chunk grid is sized once, at load, and a voxel above its ceiling is
+                    // dropped rather than drawn in the wrong chunk -- the same rule `set_plant`
+                    // keeps for a tree taller than the grid.
+                    let room = self.levels.saturating_sub(top as usize + 1);
+                    n.min(room).min(u8::MAX as usize) as u8
+                })
+                .collect()
+        });
+        if next == self.ponds {
+            return Vec::new();
+        }
+        let mut stale = vec![false; self.chunk_count()];
+        for i in 0..self.width * self.depth {
+            let was = self.ponds.as_ref().map_or(0, |v| v[i]);
+            let is = next.as_ref().map_or(0, |v| v[i]);
+            if was == is {
+                continue;
+            }
+            let top = self.top_solid_at(i);
+            if top < 0 || top as usize + 1 >= self.levels {
+                continue;
+            }
+            let (x, y) = (i % self.width, i / self.width);
+            let deepest = top as usize + was.max(is) as usize;
+            self.mark_stale(&mut stale, x, y, top as usize + 1, deepest);
+        }
+        self.ponds = next;
+        self.stale_list(&stale)
+    }
+
+    /// The top solid level of a column: the building's roof if it has one, otherwise the ground.
+    #[inline]
+    fn top_solid_at(&self, i: usize) -> i32 {
+        let g = level_of(self.ground_h[i], self.cell_m);
+        if self.building_h[i] > 0.0 {
+            level_of(self.ground_h[i] + self.building_h[i], self.cell_m).max(g)
+        } else {
+            g
+        }
+    }
+
+    /// Is standing water on the world, and how much: cells with water on them, and voxels of water.
+    ///
+    /// The cells are the run's answer quantised to the lattice and the voxels are what is drawn;
+    /// neither is a depth, which is why the HUD prints the millimetres beside them
+    /// ([`crate::overlay::PondStats`]).
+    pub fn pond_counts(&self) -> (usize, usize) {
+        match &self.ponds {
+            Some(p) => (
+                p.iter().filter(|n| **n > 0).count(),
+                p.iter().map(|n| *n as usize).sum(),
+            ),
+            None => (0, 0),
+        }
+    }
+
+    pub fn has_ponds(&self) -> bool {
+        self.ponds.is_some()
     }
 
     /// Is a field overlay on?

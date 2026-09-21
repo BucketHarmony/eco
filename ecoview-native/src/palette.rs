@@ -26,8 +26,16 @@ use crate::voxel::{BUILDING, CANOPY, GRASS, ID_COUNT, SHRUB, TRUNK, VINE};
 pub const BANDS: usize = 32;
 /// The first band's voxel id. Bands occupy `BAND_BASE .. BAND_BASE + BANDS`.
 pub const BAND_BASE: u16 = ID_COUNT as u16;
-/// Palette length: the surface ids, then the bands.
-pub const PALETTE_LEN: usize = ID_COUNT + BANDS;
+/// Standing water: ponded depth from the run's `water.bin`, drawn as voxels on top of the ground
+/// (shot S5, `crate::overlay::Ponds`).
+///
+/// **Its id is past the bands, not among the media.** A pond is not a surface the bundle surveyed
+/// and it is not an overlay band, so it needs an id of its own; putting it at the end is what keeps
+/// every existing id -- and therefore every mesh golden hash from V0 through V6 -- exactly where it
+/// was. It is also why [`PALETTE_LEN`] is `+ 1` rather than the round number it used to be.
+pub const POND: u16 = BAND_BASE + BANDS as u16;
+/// Palette length: the surface ids, then the bands, then standing water.
+pub const PALETTE_LEN: usize = ID_COUNT + BANDS + 1;
 
 /// sRGB hex, in the scene contract's medium order, offset by one so id 0 stays air.
 const HEX: [&str; ID_COUNT] = [
@@ -58,8 +66,31 @@ const HEX: [&str; ID_COUNT] = [
 /// from (DECISIONS.md, V4).
 pub const VINE_HEX: &str = "#3d7d2e";
 
-/// The seven things the viewer can colour the ground by. `Surface` is V0's surface-type map; the
-/// other six are the ecological overlays shot V2 was asked for.
+/// Standing water's colour, and it is **not** the `water` medium's.
+///
+/// The bundle's `water` medium (`#3a6fd8`) is open water somebody surveyed -- a pool that is part of
+/// the site. Ponded water is what this run did to the site since tick 0, and a reader has to be able
+/// to tell the two apart at a glance, so the pond is the paler, greener blue and the legend below
+/// names both. Like the vine hue it is the viewer's own: `meta.json` carries no `water` overlay row
+/// for the simulator to own it with (DECISIONS.md, S5).
+pub const POND_HEX: &str = "#5fc8e8";
+
+/// The water overlay's dry band: ground with no standing water at all.
+///
+/// Categorical, like fire's quiet band and for the same reason -- "no water here" is not a depth, and
+/// putting it on the bottom of a depth ramp would make dry ground and a one-millimetre film the same
+/// colour. This viewer's, for the same reason `FIRE_QUIET_HEX` is.
+const WATER_DRY_HEX: &str = "#6d6f66";
+/// The water overlay's first drawn band: dry ground is band 0 and depth starts at band 1.
+pub const WATER_DRY: u8 = 0;
+
+/// The eight things the viewer can colour the ground by. `Surface` is V0's surface-type map, six are
+/// the ecological overlays shot V2 was asked for, and `Water` is shot S5's: ponded depth, the one
+/// field the simulator writes every snapshot that had no picture at all.
+///
+/// `Water` is the only one that is **not** read on the ecology grid. Its file, `water.bin`, is on the
+/// bundle's finer ground grid, which is the grid the water actually ran over
+/// (`crate::overlay::Ponds`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
     Surface,
@@ -69,11 +100,12 @@ pub enum Overlay {
     Temperature,
     Crowding,
     Fire,
+    Water,
 }
 
 impl Overlay {
     /// In the order the number keys select them, `Surface` first.
-    pub const ALL: [Overlay; 7] = [
+    pub const ALL: [Overlay; 8] = [
         Overlay::Surface,
         Overlay::Light,
         Overlay::Moisture,
@@ -81,6 +113,7 @@ impl Overlay {
         Overlay::Temperature,
         Overlay::Crowding,
         Overlay::Fire,
+        Overlay::Water,
     ];
 
     pub fn name(self) -> &'static str {
@@ -92,6 +125,7 @@ impl Overlay {
             Overlay::Temperature => "temperature",
             Overlay::Crowding => "crowding",
             Overlay::Fire => "fire",
+            Overlay::Water => "water",
         }
     }
 
@@ -120,6 +154,11 @@ impl Overlay {
             // Fire's band 0 is quiet ground and band 1 is burnt, both off this ramp; the ramp runs
             // over the burning bands only (`Fields::bands`).
             Overlay::Fire | Overlay::Surface => ("#b3300a", "#ffb020"),
+            // Water's band 0 is dry ground, off this ramp, and the ramp above it runs from a film
+            // to a metre-deep pond. Deliberately not the moisture ramp's white-to-blue: one map is
+            // water in the soil and the other is water standing on top of it, and a screenshot of
+            // either has to be recognisable as which (`Fields` against `Ponds`).
+            Overlay::Water => ("#9fe8ff", "#08246b"),
         }
     }
 
@@ -268,6 +307,17 @@ pub fn palette(overlay: Overlay, meta: Option<&RunMeta>) -> Vec<[f32; 4]> {
     for b in 0..BANDS {
         out[ID_COUNT + b] = lerp(lo, hi, b as f32 / (BANDS - 1) as f32);
     }
+    out[POND as usize] = linear_rgba(POND_HEX);
+    if overlay == Overlay::Water {
+        // The same shape as fire's: band 0 is a categorical "none here" and the ramp starts above
+        // it, so a film of water is already the palest blue rather than a third of the way up a
+        // ramp whose bottom means dry.
+        let first = WATER_DRY as usize + 1;
+        for b in first..BANDS {
+            out[ID_COUNT + b] = lerp(lo, hi, (b - first) as f32 / (BANDS - first - 1) as f32);
+        }
+        out[ID_COUNT + WATER_DRY as usize] = linear_rgba(WATER_DRY_HEX);
+    }
     if overlay == Overlay::Fire {
         // Fire's ramp covers the burning bands only, so a patch with one tick left is already dull
         // orange rather than a third of the way up a ramp whose bottom means "not on fire".
@@ -296,6 +346,7 @@ pub fn id_name(id: u16) -> &'static str {
         TRUNK => "trunk",
         CANOPY => "canopy",
         VINE => "vine",
+        POND => "standing water",
         SHRUB => "shrub",
         GRASS => "grass",
         n if (n as usize) < ID_COUNT => "medium",

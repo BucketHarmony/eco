@@ -743,3 +743,92 @@ the scale's two numbers (V2), the field itself, and now the two colours.
 - **No picture changes.** The seven ramps the simulator publishes are the values this file already held,
   so this is a provenance change and not a visual one. Measured rather than asserted: MEASUREMENTS.md,
   "S2".
+
+## S5 standing water is drawn, and the decision the row asked for
+
+Backlog row S5, which has no prompt file: the row itself is the specification, and it asked for two
+things. **(a)** draw ponded water, so the wettest ground stops being painted as the driest.
+**(b)** decide whether the simulator should pond in soil depressions at all, or whether CLAUDE.md's
+"pond in depressions" should be reworded. (a) is below; (b) is the last entry, and it changed a
+sentence rather than a model.
+
+Every run since `ecosim` shot G4 has written `water.bin` -- ponded depth per **ground** cell, u16 in
+tenths of a millimetre -- and until this shot no viewer read it. On `runs/capitol-s42` at tick 10000
+that was 13,206 wet cells and 166 m3 of water the picture did not have.
+
+## S5 the pond id sits past the 32 bands, not among the media
+
+A new drawable thing needs a voxel id, and the obvious place for one is beside the other surfaces,
+after `WATER` at the end of the media. That would have moved `BAND_BASE` by one, which moves every
+overlay band, which recolours every banded mesh: four of this file's golden hashes, and every
+committed PNG. So `POND` is `BAND_BASE + BANDS`, one past the last band, and `PALETTE_LEN` is one
+longer. Every id from V0 through V6 is exactly where it was and no golden moved -- `the_pond_id_sits_past_the_bands`
+asserts that directly, so the next person to add an id finds out why before they find out how.
+
+The colour is **not** the `water` medium's `#3a6fd8`. A surveyed pond in the bundle and water this
+run ponded this tick are different claims about the site, and a viewer that painted them the same
+colour would be answering "is there water here" when the question is "did the run put it there".
+
+## S5 the depth ramp is logarithmic, over a fixed 1 mm to 10 m
+
+The distribution is the argument. On `runs/capitol-s42` at tick 10000 the median wet cell holds
+10.0 mm, the ninetieth percentile 47.7, the ninety-ninth 480, and the deepest 5,074. A linear ramp
+to the maximum puts 99% of the standing water in the bottom two bands and draws a wet site as a dry
+one. So: log10, four decades, 1 mm to 10 m.
+
+- **Fixed ends, not the snapshot's own range.** A per-snapshot maximum would make two ticks of the
+  same run incomparable -- the same puddle would change colour because a different corner filled --
+  and scrubbing the timeline is what this overlay is for.
+- **Dry ground is a band of its own, off the ramp.** The same shape fire's quiet band has. A tenth
+  of a millimetre is water the simulator decided to put there; "none at all" is not the bottom of a
+  depth scale, it is a different answer. Band 0 is grey, band 1 is the palest blue.
+- **The ends are this viewer's, and the HUD says so.** `meta.json`'s `overlays` array has seven rows
+  and none of them is `water`, and `params.hydro` carries no ramp either, so `Scale::of` and
+  `Overlay::ramp` both report the viewer's fallback and the HUD prints `(!)`. That is a row for the
+  simulator -- publish an `overlays.water` row, and these two constants come from the run like the
+  other seven. Two tests in `mesh_golden.rs` assert the fallback **is** reported rather than
+  excluding water from the from-the-file loops silently.
+
+## S5 anything drawn at all is at least one voxel deep
+
+The lattice is 0.5 m and the median pond is 10 mm: quantising honestly would draw nothing at all.
+So `POND_MIN_MM` is 5 mm -- below it nothing is drawn, at or above it at least one voxel stands --
+and the HUD prints both counts and the millimetres beside them: `13206 of 262144 ground cells wet,
+10469 over 5 mm; max 5074 mm, mean over wet 50 mm, 166.2 m3 ... 11035 voxels drawn, the run's depth
+on a 0.50 m lattice`. The quantity is the run's and the lattice is the viewer's, and the line names
+which is which. 5 mm is where a wet surface becomes a puddle; nothing in any file could supply it.
+
+## S5 water is read every snapshot, and drawn on the ground grid
+
+Two smaller calls, both of which went the other way first.
+
+- **Read whether or not it is drawn.** `read_ponds` first skipped the file when the layer was off
+  and no water overlay was up, which saved half a megabyte a snapshot and cost the HUD its numbers:
+  a site with the water switched off reported `0 of 0 cells wet`, which is a picture of a dry site
+  rather than a dry-looking picture. It now reads every snapshot. `water.bin` is a quarter of
+  `material.bin` on the Capitol and is read once per snapshot, not per frame.
+- **The ground grid, at its own resolution.** The other six overlays are per 1 m ecology column and
+  each covers 2 x 2 Capitol ground cells. `water.bin` is per ground cell, because the ground grid is
+  what the water ran over. `ColumnBands` had no way to say which grid it was on, so a water field
+  handed to it would have been stretched to twice its size in silence; it now carries `cell_m`, and
+  `the_water_map_is_not_stretched_from_the_ecology_grid` pins both directions.
+
+## S5 the simulator ponds in depressions; the sentence describing it was wrong
+
+Part (b) of the row. Read `ecosim/src/hydro.rs` and measured the output; **no simulator change, and
+none is recommended.**
+
+The mechanism is right. `flow.pond_cap[i]` is `filled[i] - elev[i]` from a priority flood, so every
+cell that sits in a depression has storage, and `route_storm` fills it on every cell after
+infiltration takes its share. What decides whether water is *still there* at the next snapshot is
+`settle_water`, which drains ponded water into the soil at the medium's own rate and against the
+column's remaining room: concrete and asphalt have `field_capacity_mm = 0.0`, so there is no room,
+so nothing soaks in and only evaporation touches it. Roofs get no depression storage at all.
+
+So the observable behaviour is "ponds on sealed ground", and the measurement agrees: 22.3% of
+asphalt cells and 11.7% of concrete are ponded at tick 10000, against 0.3% of lawn and 0.0% of roof.
+That is the model being right about a paved site, not a defect. **CLAUDE.md's clause is the thing
+that was misleading** -- "pond in depressions" describes the mechanism and leaves a reader expecting
+puddles in the lawn -- so it now says both: depression storage is filled everywhere, and only a
+surface the soil cannot drink from still holds it. The four screenshots are the evidence a reader
+can check without running anything: the water is in the gutters, the car park and the paths.

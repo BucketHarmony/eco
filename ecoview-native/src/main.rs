@@ -5,7 +5,8 @@
 //! Usage:
 //! ```text
 //! ecoview-native [--world DIR | --stress] [--run DIR] [--tick N] [--overlay NAME] [--no-cover]
-//!                [--eye X,Y,Z] [--look X,Y,Z] [--headless] [--frames N] [--screenshot PATH]
+//!                [--no-water] [--eye X,Y,Z] [--look X,Y,Z] [--headless] [--frames N]
+//!                [--screenshot PATH]
 //!                [--bench SECS] [--port N] [--no-ao] [--no-sky] [--hour H] [--lat DEG]
 //!                [--edit X0,Y0,X1,Y1,ACTION[,MEDIUM]]... [--sim] [--sim-ticks N] [--sim-seed N]
 //!                [--sim-root DIR]
@@ -13,8 +14,9 @@
 //!
 //! Keys: WASD, Space and Shift to fly; right mouse to look; wheel for speed; **R** to reset the view;
 //! **P** to play or pause; **,** and **.** to step a snapshot; **Home** and **End** for the ends of
-//! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**7** for
-//! the overlay; **V** for the ground cover and vines; **K** and **L** move the hour of the day
+//! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**8** for
+//! the overlay; **V** for the ground cover and vines; **F** for the standing water; **K** and **L**
+//! move the hour of the day
 //! and **O** turns the beauty pass -- ambient occlusion, sky, sun and seasonal colour -- off.
 //!
 //! Editing, under the crosshair: **Q** and **Z** raise and lower the ground, **T** and **G** raise
@@ -31,6 +33,13 @@
 //! The ground cover and the vines are **expression, not simulation** (`src/cover.rs`): the run says
 //! how much grass and shrub a patch holds and how wet and shaded its columns are, and the viewer
 //! decides only where the blades stand and how far a climber gets. No vine is an entity in any run.
+//!
+//! **Standing water is the run's**, all of it (shot S5). `water.bin` is ponded depth on the ground
+//! grid and the simulator writes it every snapshot; the viewer reads it, maps it and stands it up as
+//! voxels, and the one thing it decides is the lattice -- water shallower than
+//! [`ecoview_native::overlay::POND_MIN_MM`] is mapped but not drawn, and anything drawn at all is
+//! drawn at least one 0.5 m voxel deep. The HUD prints the millimetres beside the voxel count, every
+//! frame, for that reason.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -53,7 +62,7 @@ use serde_json::{json, Value};
 
 use ecoview_native::cover::{Cover, CoverStats};
 use ecoview_native::mesh::{mesh_chunk, ChunkMesh, Scratch};
-use ecoview_native::overlay::{FieldStats, Fields, Scale};
+use ecoview_native::overlay::{self, FieldStats, Fields, PondStats, Ponds, Scale};
 use ecoview_native::palette::{palette, Overlay, Ramp, BANDS};
 use ecoview_native::run::Run;
 use ecoview_native::sim::{self, SimJob, SimState};
@@ -109,6 +118,8 @@ struct Args {
     port: u16,
     overlay: Overlay,
     cover: bool,
+    /// Shot S5's standing water, drawn as voxels from the run's `water.bin`. `--no-water`, or **F**.
+    water: bool,
     /// Where the camera stands and what it looks at, in metres. Both default to the overview pose
     /// `setup` computes from the site's size.
     ///
@@ -181,6 +192,7 @@ fn args() -> Args {
         port: brp::PORT,
         overlay: Overlay::Surface,
         cover: true,
+        water: true,
         eye: None,
         look: None,
         edits: Vec::new(),
@@ -241,6 +253,7 @@ fn args() -> Args {
                 i += 1;
             }
             "--no-cover" => a.cover = false,
+            "--no-water" => a.water = false,
             "--eye" => {
                 a.eye = Some(vec3(&next()));
                 i += 1;
@@ -422,6 +435,19 @@ struct Timeline {
     /// Printed wherever the cover is, so no picture of it stands on its own.
     cover_counts: (usize, usize, usize),
     cover_stats: CoverStats,
+    /// Shot S5's standing water, on the same pattern as the cover above: `water` is what the user
+    /// asked for, **F** or `--no-water`, and `water_applied` is the `(on, snapshot)` the drawn world
+    /// actually has.
+    water: bool,
+    water_applied: Option<(bool, usize)>,
+    /// What the run's `water.bin` held at this snapshot, and what was drawn from it: cells with any
+    /// water at all against cells deep enough to become a voxel, and the depths in millimetres.
+    pond_stats: PondStats,
+    pond_counts: (usize, usize),
+    /// The ground cells `water.bin` covers, which is what the wet count is a fraction of.
+    pond_site_cells: usize,
+    /// Why the water could not be drawn, if it could not.
+    water_error: Option<String>,
 }
 
 impl Timeline {
@@ -501,7 +527,9 @@ fn apply_overlay_bands(
     ov: &mut OverlayState,
     t: &Timeline,
     fields: Option<&Result<Fields, String>>,
+    ponds: Option<&Result<Ponds, String>>,
 ) -> Vec<ChunkPos> {
+    let cell_m = world.cell_m;
     ov.scale = None;
     ov.ramp = None;
     ov.stats = None;
@@ -510,26 +538,54 @@ fn apply_overlay_bands(
     let stale = match (&t.run, ov.active.is_field()) {
         (Some(run), true) => {
             let scale = Scale::of(ov.active, &run.meta);
-            let out = match fields {
-                Some(Ok(f)) => {
-                    let d = run.meta.dims;
-                    let (bands, stats) = f.bands(ov.active, &d, &scale);
-                    ov.stats = Some(stats);
-                    ov.fire = f.fire_counts();
-                    world.set_overlay(Some(&ColumnBands {
-                        x: d.x,
-                        y: d.y,
-                        bands,
-                    }))
+            // Standing water is the one field not on the ecology grid: `water.bin` is per ground
+            // cell, because that is the grid the water ran over. `ColumnBands` carries the cell
+            // size for exactly this reason, so the map is drawn at the resolution of its own file
+            // and no other.
+            let banded = if ov.active == Overlay::Water {
+                match ponds {
+                    Some(Ok(p)) => {
+                        let (bands, stats) = p.bands(&scale);
+                        ov.stats = Some(stats);
+                        Some(ColumnBands {
+                            x: p.width,
+                            y: p.depth,
+                            cell_m,
+                            bands,
+                        })
+                    }
+                    other => {
+                        ov.error = Some(match other {
+                            Some(Err(e)) => e.clone(),
+                            _ => "the snapshot's water.bin was not read".into(),
+                        });
+                        None
+                    }
                 }
-                other => {
-                    ov.error = Some(match other {
-                        Some(Err(e)) => e.clone(),
-                        _ => "the snapshot's fields were not read".into(),
-                    });
-                    world.set_overlay(None)
+            } else {
+                match fields {
+                    Some(Ok(f)) => {
+                        let d = run.meta.dims;
+                        let (bands, stats) = f.bands(ov.active, &d, &scale);
+                        ov.stats = Some(stats);
+                        ov.fire = f.fire_counts();
+                        Some(ColumnBands {
+                            x: d.x,
+                            y: d.y,
+                            cell_m: ecoview_native::ECO_CELL_M,
+                            bands,
+                        })
+                    }
+                    other => {
+                        ov.error = Some(match other {
+                            Some(Err(e)) => e.clone(),
+                            _ => "the snapshot's fields were not read".into(),
+                        });
+                        None
+                    }
                 }
             };
+            let out = world.set_overlay(banded.as_ref());
             ov.scale = Some(scale);
             ov.ramp = Some(ov.active.ramp(Some(&run.meta)));
             out
@@ -641,6 +697,7 @@ fn main() {
     let mut timeline = Timeline {
         secs: PLAY_SECS,
         cover: a.cover,
+        water: a.water,
         ..default()
     };
     if let Some(run) = open_run(&a, &bundle) {
@@ -831,6 +888,18 @@ fn read_fields(t: &Timeline) -> Option<Result<Fields, String>> {
         .map(|r| r.fields_at(t.index).map_err(|e| e.to_string()))
 }
 
+/// Reads snapshot `t.index`'s `water.bin`.
+///
+/// **Every snapshot, whichever way the switches are set**, because the report is worth more than the
+/// read: with the layer off the HUD still says how much water the run put on the site, which is the
+/// difference between a dry-looking picture and a picture of a dry site. The file is a quarter of
+/// `material.bin` on the Capitol, and it is read once per snapshot rather than per frame.
+fn read_ponds(t: &Timeline) -> Option<Result<Ponds, String>> {
+    t.run
+        .as_ref()
+        .map(|r| r.ponds_at(t.index).map_err(|e| e.to_string()))
+}
+
 /// What the drawn world should hold: the ground cover, and the vines.
 ///
 /// A **field overlay takes the ground cover off**, because an overlay is a map of the ground and a
@@ -839,6 +908,37 @@ fn read_fields(t: &Timeline) -> Option<Result<Fields, String>> {
 /// (DECISIONS.md, V4).
 fn want_cover(t: &Timeline, ov: &OverlayState) -> (bool, bool) {
     (t.cover && !ov.active.is_field(), t.cover)
+}
+
+/// Puts snapshot `t.index`'s standing water into the world, or takes it off. Returns the stale
+/// chunks.
+///
+/// The stats are read off the file whether or not anything is drawn from it, the way the cover's
+/// means are: a picture with the water switched off still says how much water there was.
+fn apply_ponds(
+    world: &mut VoxelWorld,
+    t: &mut Timeline,
+    ponds: Option<&Result<Ponds, String>>,
+) -> Vec<ChunkPos> {
+    t.water_error = None;
+    t.pond_stats = PondStats::default();
+    let cell_m = world.cell_m;
+    let levels = match (t.run.is_some(), ponds) {
+        (true, Some(Ok(p))) => {
+            t.pond_stats = p.stats(cell_m);
+            t.pond_site_cells = p.cells();
+            t.water.then(|| p.levels(cell_m))
+        }
+        (true, Some(Err(e))) => {
+            t.water_error = Some(e.clone());
+            None
+        }
+        _ => None,
+    };
+    let stale = world.set_ponds(levels.as_ref());
+    t.pond_counts = world.pond_counts();
+    t.water_applied = Some((t.water, t.index));
+    stale
 }
 
 /// Puts snapshot `t.index`'s trees and its ground cover into the world. Returns the stale chunks.
@@ -917,7 +1017,9 @@ fn setup(
     // The run's trees and the overlay both go in before the first mesh, so the site is never drawn
     // with the bundle's vegetation under the wrong palette and then corrected a frame later.
     let fields = read_fields(&timeline);
+    let ponds = read_ponds(&timeline);
     let want = want_cover(&timeline, &overlays);
+    apply_ponds(&mut site.world, &mut timeline, ponds.as_ref());
     load_snapshot(
         &mut site.world,
         &mut timeline,
@@ -961,8 +1063,23 @@ fn setup(
             c.shade,
             c.vigour,
         );
+        // And the standing water, on the same terms. This is the line shot S5 exists for: before
+        // it, the one field that says where the water is had no number and no picture anywhere in
+        // this viewer.
+        println!(
+            "water: {}",
+            water_line(&timeline, site.world.cell_m)
+                .replace('\n', " ")
+                .trim()
+        );
     }
-    apply_overlay_bands(&mut site.world, &mut overlays, &timeline, fields.as_ref());
+    apply_overlay_bands(
+        &mut site.world,
+        &mut overlays,
+        &timeline,
+        fields.as_ref(),
+        ponds.as_ref(),
+    );
     sky.recompute(&timeline);
     site.palette = sky.palette(overlays.active, &timeline);
     sky.applied = Some(sky.key());
@@ -1665,16 +1782,19 @@ fn apply_world_state(
     // Toggling **V**, or turning a field overlay on over a covered site, rewrites the same voxels a
     // scrub does, so it goes down the same path rather than getting one of its own.
     let cover_moved = timeline.run.is_some() && timeline.cover_applied != Some(want);
+    let water_moved =
+        timeline.run.is_some() && timeline.water_applied != Some((timeline.water, timeline.index));
     let overlay_moved = overlays.applied != Some((overlays.active, timeline.index));
     // The season and the two switches, quantised: a colour that moved less than one step of the
     // year is not worth rebuilding 1,900 chunk meshes for (`sky::SEASON_STEPS`).
     let sky_moved = sky.applied != Some(sky.key());
-    if !snapshot_moved && !cover_moved && !overlay_moved && !sky_moved {
+    if !snapshot_moved && !cover_moved && !overlay_moved && !water_moved && !sky_moved {
         return;
     }
     let start = Instant::now();
     let repalette = overlays.applied.map(|(o, _)| o) != Some(overlays.active) || sky_moved;
     let fields = read_fields(&timeline);
+    let ponds = read_ponds(&timeline);
     let mut stale = if snapshot_moved || cover_moved {
         load_snapshot(
             &mut site.world,
@@ -1685,7 +1805,20 @@ fn apply_world_state(
     } else {
         Vec::new()
     };
-    for c in apply_overlay_bands(&mut site.world, &mut overlays, &timeline, fields.as_ref()) {
+    if water_moved || snapshot_moved {
+        for c in apply_ponds(&mut site.world, &mut timeline, ponds.as_ref()) {
+            if !stale.contains(&c) {
+                stale.push(c);
+            }
+        }
+    }
+    for c in apply_overlay_bands(
+        &mut site.world,
+        &mut overlays,
+        &timeline,
+        fields.as_ref(),
+        ponds.as_ref(),
+    ) {
         if !stale.contains(&c) {
             stale.push(c);
         }
@@ -1719,7 +1852,8 @@ fn apply_world_state(
     }
 }
 
-/// **1**-**7** pick the overlay, in `Overlay::ALL` order; **V** turns the cover and vines on and off.
+/// **1**-**8** pick the overlay, in `Overlay::ALL` order; **V** turns the cover and vines on and
+/// off, and **F** the standing water.
 fn overlay_keys(
     keys: Res<ButtonInput<KeyCode>>,
     mut ov: ResMut<OverlayState>,
@@ -1728,7 +1862,10 @@ fn overlay_keys(
     if keys.just_pressed(KeyCode::KeyV) {
         t.cover = !t.cover;
     }
-    const DIGITS: [KeyCode; 7] = [
+    if keys.just_pressed(KeyCode::KeyF) {
+        t.water = !t.water;
+    }
+    const DIGITS: [KeyCode; 8] = [
         KeyCode::Digit1,
         KeyCode::Digit2,
         KeyCode::Digit3,
@@ -1736,6 +1873,7 @@ fn overlay_keys(
         KeyCode::Digit5,
         KeyCode::Digit6,
         KeyCode::Digit7,
+        KeyCode::Digit8,
     ];
     for (i, k) in DIGITS.iter().enumerate() {
         if keys.just_pressed(*k) {
@@ -1961,7 +2099,7 @@ fn hud(
     }
     let mut s = format!("fly {speed:.1} m/s   [wheel] speed  [R] reset view\n");
     s.push_str(&format!(
-        "overlay {} ({} of {})   [1-7] switch\n",
+        "overlay {} ({} of {})   [1-8] switch\n",
         overlays.active.name(),
         Overlay::ALL
             .iter()
@@ -2026,6 +2164,12 @@ fn hud(
                 c.vigour,
             ),
         });
+    }
+    // Standing water, and the one number in it that is this viewer's: the lattice. Printed with the
+    // millimetres beside it so a screenshot of a site under 50 mm of water cannot be read as a site
+    // under half a metre of it.
+    if timeline.run.is_some() {
+        s.push_str(&water_line(&timeline, site.world.cell_m));
     }
     // The sky says whose each of its numbers is, on the screen and not only in the write-up, for
     // the same reason the cover does: a screenshot travels further than a report.
@@ -2101,6 +2245,37 @@ fn hud(
         if t.0 != s {
             t.0 = s.clone();
         }
+    }
+}
+
+/// What the run's `water.bin` held at this snapshot, and what of it is on the screen.
+///
+/// Every number here is the run's except the last two, which are the drawing: how many voxels stand
+/// on the site and how deep one of them is. The line says which is which, because the difference is
+/// large -- the Capitol's mean standing depth is a tenth of a voxel -- and a picture that did not
+/// say so would be claiming half a metre of water on a wet pavement.
+fn water_line(t: &Timeline, cell_m: f32) -> String {
+    if let Some(e) = &t.water_error {
+        return format!("standing water: not read -- {e}\n");
+    }
+    let p = t.pond_stats;
+    let head = format!(
+        "standing water: {} of {} ground cells wet, {} over {:.0} mm; max {:.0} mm, mean over wet {:.0} mm, {:.1} m3",
+        p.wet,
+        t.pond_site_cells,
+        p.drawn,
+        overlay::POND_MIN_MM,
+        p.max_mm,
+        p.mean_mm,
+        p.volume_m3,
+    );
+    match t.water_applied {
+        Some((true, _)) => format!(
+            "{head}\n  {} voxels drawn, the run's depth on a {:.2} m lattice -- anything drawn at \
+             all is at least one voxel deep   [F] off\n",
+            t.pond_counts.1, cell_m,
+        ),
+        _ => format!("{head}\n  not drawn   [F] on\n"),
     }
 }
 
@@ -2505,6 +2680,22 @@ fn stats_method(
                 "vine_vigour": t.cover_stats.vigour,
             },
             "note": "expression, not simulation: the run owns grass, shrub, moisture and light; the viewer owns only where a blade stands and how far a vine climbs. No vine is an entity in any run and nothing here feeds back into the simulation.",
+        },
+        // Shot S5's standing water. Every number is the run's except `voxels` and `min_drawn_mm`,
+        // which are this viewer's lattice, and the note says so.
+        "water": {
+            "on": t.water,
+            "drawn": t.water_applied.map(|w| w.0),
+            "ground_cells": t.pond_site_cells,
+            "wet_cells": t.pond_stats.wet,
+            "drawable_cells": t.pond_stats.drawn,
+            "max_mm": t.pond_stats.max_mm,
+            "mean_wet_mm": t.pond_stats.mean_mm,
+            "volume_m3": t.pond_stats.volume_m3,
+            "voxels": t.pond_counts.1,
+            "min_drawn_mm": overlay::POND_MIN_MM,
+            "error": t.water_error,
+            "note": "the run owns every depth here: water.bin is ponded depth on the ground grid, written by ecosim every snapshot. The viewer owns only the lattice -- water under min_drawn_mm is mapped but not drawn, and anything drawn is at least one ground cell deep.",
         },
         // Shot V6's beauty pass. `day` is the run's and everything beside it is the viewer's, so
         // an agent reading this gets the provenance the HUD line carries.

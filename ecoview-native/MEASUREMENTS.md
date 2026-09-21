@@ -307,3 +307,17 @@ still drawn. A dark strip 1,232 px wide was worth 655 bytes; suppressing it expo
 underneath and the file gets *bigger*. Whatever lavapipe writes next will match neither 811,550 nor
 815,129, and this time the reason is in the diff.
 
+**And it did not, on a third CPU.** V1's own CI run (35612609960, commit 7282cc1) drew the smoke check in
+**182 s at 835,373 bytes** on an **AMD EPYC 9V74** — a machine neither of the runs above drew. It sits
+between the other two in both halves, and in the same order:
+
+| Runner CPU | voxelise | mesh (pure Rust, 405 chunks) | 300 frames on lavapipe |
+|---|---|---|---|
+| Intel Xeon 6973P-C | 174 ms | 251 ms (1.00×) | 136–142 s (1.00×) |
+| AMD EPYC 9V74 | 213 ms | 285 ms (1.14×) | 182 s (1.31×) |
+| AMD EPYC 7763 | 249–258 ms | 337–339 ms (1.35×) | 259–267 s (1.89×) |
+
+Three machines, three times, and rasterisation stretches the CPU's own ratio every time. The lottery has
+at least three tickets, so a per-screenshot time is a reading of the runner unless the CPU is quoted
+beside it.
+

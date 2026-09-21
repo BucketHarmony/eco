@@ -5,8 +5,6 @@ section per shot. The three components have their own DECISIONS.md; this covers 
 
 ## C1: which jobs run, and the lavapipe screenshots
 
-### The problem
-
 Every push ran all eight jobs whatever it changed, and CI was 42%, 45% and 57% of the wall time of the
 three shots before this one. Shot V0a changed one paragraph of markdown and spent about 50 minutes
 rendering pictures of a component it had not touched; G4c was red at `ecoview` by 02:29 and still
@@ -42,8 +40,8 @@ have skipped the job that caught both.
 ### Plain `git diff`, not a marketplace action
 
 `dorny/paths-filter` and friends would do this in fewer lines, but this repo has no third-party actions
-beyond the four GitHub and Rust ones it already trusts. Adding a supply-chain dependency to save fifteen
-lines of shell is a bad trade, and the directed edge needs a hand-written case either way.
+beyond the four it already trusts, the directed edge needs a hand-written case either way, and a
+supply-chain dependency is a bad trade for fifteen lines of shell.
 
 ### The lavapipe screenshots: ten became one
 
@@ -54,12 +52,11 @@ b48e7bd the ten took **43m 41s** of a **52m 46s** run, while the job that did al
 work finished in 17m 45s and then waited half an hour.
 
 **And the repetition was not being read.** Those ten runs on b48e7bd came in at **259–267 s each and
-815,129 bytes every time** — about 1.9× slower than the figure MEASUREMENTS.md still quotes, and a
-different picture. The drift sat in the log of every run for two shots and nobody looked, which is an
-argument for the cut rather than against it: a measurement repeated ten times a push and read zero
-times a week is not a measurement, it is a queue. The one screenshot this shot kept measured 273 s and
-815,129 bytes on run 35565798278, in line with the ten it replaced. Correcting MEASUREMENTS.md belongs
-to `ecoview-native`, not to a `.github/`-only shot; it is flagged in the backlog instead.
+815,129 bytes every time** — 1.9× slower than MEASUREMENTS.md still quotes, and a different picture.
+That drift sat unread in every run's log for two shots, which argues for the cut rather than against
+it: a measurement repeated ten times a push and read zero times a week is not a measurement, it is a
+queue. The screenshot this shot kept measured 273 s and 815,129 bytes on run 35565798278, in line with
+the ten it replaced. Correcting MEASUREMENTS.md is `ecoview-native`'s work, and is flagged in the backlog.
 
 Of the three options the shot prompt offered, this took **one screenshot as a smoke check**. Limiting
 the ten to an `ecoview-native` diff was not enough alone: the closing push of every shot is a full run
@@ -84,14 +81,17 @@ the 13 minutes the job now takes.
 | 35565798278 | 864329f | `.github/`, full | **17.9 min** | 46.2 | 8 of 8 |
 | 35566907615 | e11423e | `ecosim/`, narrow | 24.4 min | 40.6 | 7 of 8 |
 | 35566915166 | 339afc0 | `ecoview-native/`, narrow | **13.3 min** | 13.3 | 1 of 8 |
+| 35568881905 | acf3175 | `.github/`, full (closing) | 24.7 min | 53.0 | 8 of 8 |
 
-**Part (b) is where the wall clock went**: 52.8 minutes to 17.9 on an identical full run, a 35-minute
-saving on every push that closes a shot. Part (a) mostly buys runner minutes. On an ecosim diff it
-saves no wall clock at all — that run's 24.4 minutes is *longer* than the full run's 17.9, because
-`ecoview` must run, is the long pole, and took 24.2 minutes instead of 17.8 on the same code twenty
-minutes later. Runner variance on that job is larger than anything this filter can save there. Where
-(a) pays is an `ecoview-native` diff: 13.3 minutes against 17.9, one job instead of eight, which is
-exactly the V0a case that prompted the row.
+**Part (b) is where the wall clock went.** A full run no longer waits on `ecoview-native`; the long
+pole is now `ecoview`, which took 17.8, 24.2 and 24.5 minutes on three runs of the same suite tonight.
+So the honest figure is a saving of **28–35 minutes on every full run**, not a fixed 35, and the two
+full runs above (17.9 and 24.7) differ from each other only by that job's variance.
+
+Part (a) mostly buys runner minutes. On an ecosim diff it saves no wall clock at all, because `ecoview`
+must run and is the long pole — 24.4 minutes against a full run's 17.9, where the filter skipped a job
+that had been running in parallel anyway. Where (a) pays is an `ecoview-native` diff: 13.3 minutes
+against 17.9, one job instead of eight, which is exactly the V0a case that prompted the row.
 
 ### What this shot did not touch
 

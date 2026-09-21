@@ -654,3 +654,31 @@ lose to that grass now win.
 
 No parameter was retuned in response. **(R)** held at the converted defaults on all five reference
 runs, which is what the shot's override 2 substitutes for the byte-identical anchor.
+
+## Shot G4e — closing the units series
+
+One key, and it is a **unit-only** change with no rule behind it. The acceptance line that forced it
+is `overnight/shots/G4e-units-close.md` (a): "convert `tree.immigration_interval` … to a rate per
+year, following what G4c did to `seed_every`", with "defaults must not move: the derived cadence at
+the shipped params must come out at exactly 500, and every reference run must stay byte-identical".
+
+| Parameter | Before | After | Kind | Why, and the acceptance line that forced it |
+|---|---|---|---|---|
+| `tree.immigration_interval` → `tree.immigrants_per_year` | 500 ticks | 8.0 /yr | unit only | 4000/8 = 500 exactly, so the cadence does not move a tick. It is the last schedule in the tree tier, and a rate per year is what the tier's other schedule (`seeds_per_year`, G4c) already is. Acceptance (a) and (4). |
+| `grazer.immigration_interval`, `hunter.immigration_interval` | 500 ticks | 500 ticks | **not touched** | Deferred with the parked animal tier, on the same decision as its other 45 keys (`UNITS.md` section 6, `DECISIONS.md` shot G4e). Converting a parked tier's cadence is work its unparking shot would re-judge. |
+
+**Nothing moved in any reference run, and that is measured rather than assumed.** A binary built from
+179762d, reading the pre-shot `params.toml`, was compared with this one by `ecosim diff` on seed 42
+on the 256 × 64 strip (20000 ticks, snapshots every 100) and on the Capitol (20000 ticks, animals
+off, flat rain). Both report exactly one line, `differs: meta.json`, and the only difference inside
+`meta.json` is `params.tree.immigration_interval: 500` becoming `params.tree.immigrants_per_year:
+8.0`. `series.csv`, `events.csv` and every snapshot file are byte-identical, so **the event-log cause
+breakdown this project's reporting rule asks for is unchanged from G4c's**, to the byte:
+`sweeps/shotG4c/FINDINGS.md` is still the current one. No sweep was run, and the shot prompt asks for
+none.
+
+The identity is also weaker than it looks, and the shot did not lean on it: `tree.immigration_floor`
+is 0 at the defaults, so no immigration check has ever planted anything in a reference run. The real
+check on the derivation is `animals.rs`'s `a_tree_immigrates_at_its_rate_whatever_the_rate_is`, which
+raises the floor and lands the first arrival on the derived tick at 8, 4, 20, 1 and 4000 checks a
+year, and gets no arrival at all in 20000 ticks at a rate of 0.

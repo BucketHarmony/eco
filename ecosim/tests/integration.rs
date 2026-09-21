@@ -579,9 +579,9 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     for k in ["x", "y", "z"] {
         assert_eq!(a["dims"][k], b["dims"][k], "dims.{k}");
     }
-    // The params keys the units conversion renamed (shots G4b and G4c), as (section, version 1,
+    // The params keys the units conversion renamed (shots G4b, G4c and G4e), as (section, version 1,
     // now). A rename changes the key, not the modelled quantity: the value may be in a new unit.
-    const RENAMED: [(&str, &str, &str); 11] = [
+    const RENAMED: [(&str, &str, &str); 12] = [
         ("hunter", "cooldown", "refractory"),
         ("cover", "moisture_draw", "water_per_growth_mm"),
         ("tree", "moisture_draw", "transpiration_mm_h"),
@@ -593,6 +593,7 @@ fn format_2_and_fire_only_add_to_version_1_files() {
         ("tree", "max_age", "max_age_years"),
         ("tree", "dry_death_ticks", "dry_death_days"),
         ("tree", "seed_every", "seeds_per_year"),
+        ("tree", "immigration_interval", "immigrants_per_year"),
     ];
     for (section, keys) in a["params"].as_object().unwrap() {
         let now = b["params"][section].as_object().unwrap_or_else(|| panic!("params.{section} is gone"));

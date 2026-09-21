@@ -477,8 +477,9 @@ impl Sim {
         Some(d.xy(c))
     }
 
-    /// Open boundaries: on ticks that are a multiple of a species' `immigration_interval`, one
-    /// immigrant of that species arrives at a random edge soil column if fewer than
+    /// Open boundaries: on ticks that are a multiple of a species' immigration cadence — the animals'
+    /// `immigration_interval`, and for the tree the cadence derived from `tree.immigrants_per_year`
+    /// (shot G4e) — one immigrant of that species arrives at a random edge soil column if fewer than
     /// `immigration_floor` are alive. Animal immigrants have the default traits, `start_energy`, age
     /// 0 and cooldown 0, and act from the next tick. A tree immigrant is a sapling (age 0), planted
     /// only if its column keeps `min_spacing`. A floor of 0 never draws, and neither animal
@@ -503,8 +504,9 @@ impl Sim {
                 self.log_at(EventKind::Immigration, "hunter", (x, y), "", id);
             }
         }
+        let tree_every = self.params.tree_immigration_every();
         let tp = &self.params.tree;
-        if t.is_multiple_of(tp.immigration_interval) && self.count_trees() < tp.immigration_floor {
+        if t.is_multiple_of(tree_every) && self.count_trees() < tp.immigration_floor {
             if let Some((x, y)) = self.random_edge_soil_column() {
                 if self.spacing_ok(x as i32, y as i32) {
                     let id = self.plant_tree(x, y, 0);
@@ -1092,7 +1094,7 @@ mod tests {
         prop_assert_eq!(sim.hunter_immigrants, n0 + hunter_due * any_edge);
         let grazer_due = (t.is_multiple_of(sim.params.grazer.immigration_interval) && g0 < grazer_floor) as u32;
         prop_assert_eq!(sim.count_grazers(), g0 + grazer_due * any_edge);
-        let tree_due = (t.is_multiple_of(sim.params.tree.immigration_interval) && tree_floor > 0) as u32;
+        let tree_due = (t.is_multiple_of(sim.params.tree_immigration_every()) && tree_floor > 0) as u32;
         prop_assert_eq!(sim.count_trees(), tree_due * any_edge, "the bare sim has no trees to crowd a sapling");
         if hunter_due + grazer_due + tree_due == 0 {
             prop_assert_eq!(sim.rng.get_word_pos(), w0, "a draw with nothing due");
@@ -1168,8 +1170,39 @@ mod tests {
         }
         let n = sim.count_trees();
         sim.params.tree.immigration_floor = n + 1;
-        sim.immigrate(sim.params.tree.immigration_interval);
+        sim.immigrate(sim.params.tree_immigration_every());
         assert_eq!(sim.count_trees(), n, "every edge column is within min_spacing of a trunk");
+    }
+
+    /// Tree immigration fires on the **world** clock at the cadence `tree.immigrants_per_year`
+    /// derives, for any rate (shot G4e), and the shipped 8 a year is the 500-tick
+    /// `immigration_interval` the key replaced, to the tick. A rate of 0 leaves immigration out.
+    #[test]
+    fn a_tree_immigrates_at_its_rate_whatever_the_rate_is() {
+        let shipped = crate::Params::load_square();
+        assert_eq!(shipped.climate.year_len, 4000);
+        assert_eq!(shipped.tree.immigrants_per_year, 8.0);
+        assert_eq!(shipped.tree_immigration_every(), 500, "the shipped cadence, unmoved by the rename");
+        // The tick of the first arrival in a fresh world whose floor is above the population.
+        let first_arrival = |per_year: f32, until: u32| {
+            let mut sim = Sim::bare(&vec![14u8; COLS]);
+            sim.params.tree.immigrants_per_year = per_year;
+            sim.params.tree.immigration_floor = 1;
+            (1..=until).find(|&t| {
+                sim.immigrate(t);
+                sim.count_trees() > 0
+            })
+        };
+        for (per_year, want) in [(8.0, 500), (4.0, 1000), (20.0, 200), (1.0, 4000), (4000.0, 1)] {
+            let p = {
+                let mut p = crate::Params::load_square();
+                p.tree.immigrants_per_year = per_year;
+                p
+            };
+            assert_eq!(p.tree_immigration_every(), want, "{per_year} a year");
+            assert_eq!(first_arrival(per_year, 2 * want), Some(want), "{per_year} a year arrives at its cadence");
+        }
+        assert_eq!(first_arrival(0.0, 20_000), None, "a rate of 0 leaves immigration out");
     }
 
     #[test]

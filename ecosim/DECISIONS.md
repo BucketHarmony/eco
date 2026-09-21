@@ -1532,3 +1532,51 @@ manifest and no fixture moved: the check only reads, so the run bytes are identi
 
 **The 250-line budget did not hold, and the shot did not trim tests to fit.** See the LOG line and
 `overnight/shots/G11.BLOCKED.md` for the measurement.
+
+## Shot G4e — closing the units series
+
+**`tree.immigration_interval` became `tree.immigrants_per_year` = 8.0, and nothing else converted.**
+Three sibling keys held 500 ticks: `grazer.immigration_interval`, `hunter.immigration_interval` and
+`tree.immigration_interval`. Only the tree's is now a rate per year, the shape `tree.seed_every` took
+in G4c. At the shipped `climate.year_len = 4000`, 8 checks a year derives to exactly 500 ticks, so no
+run moved: `ecosim diff` between a binary built at 179762d with the old `params.toml` and this one
+reports `differs: meta.json` and nothing else, on seed 42 on the strip and on the Capitol, and inside
+`meta.json` the only difference is the key's own name and unit.
+
+**The derivation lives on `Params`, not in `TreeAges`.** `TreeAges` exists because a tree age has to
+be read against a tree's own age counter, and its doc comment says "Nothing else converts a tree age".
+Immigration is not a tree age: `Sim::immigrate` tests the **world** tick counter in its own phase
+right after animals (this file, shot 11). Putting the cadence in `TreeAges` would have meant either
+that comment becoming false or a struct quietly holding two different kinds of thing. So the shot
+added `Params::ticks_between(per_year)` — the one place a rate per year becomes a cadence in ticks,
+`round(year_len / per_year)`, at least 1, and `u32::MAX` at a rate of 0 so the event is simply left
+out — and a named accessor `Params::tree_immigration_every()` on top of it. `TreeAges::seed_every`
+now calls the same function instead of repeating the arithmetic, which is how the two stay one rule.
+
+**The tree and the two animals are now deliberately inconsistent, and that is the decision.** After
+this shot a tree immigrates at a rate per year and a grazer or a hunter still immigrates every N
+ticks. The animal tier is parked by the operator's direction of 2026-09-19; converting its parameters
+is work that the shot which unparks it would have to re-judge anyway, and `[grazer]` and `[hunter]`
+hold 45 keys on an undeclared energy index that no conversion of one cadence would make physical.
+The two keys are deferred **with the tier**, not overlooked. `UNITS.md` section 6 says so under its
+own heading, with the same owner as the rest of the tier, so a reader who meets the asymmetry in six
+months finds a reason rather than an oversight.
+
+**`tree.death_detritus` is deferred with the fertility group, not with the tree tier.** It is the one
+other `deferred` row left in `[tree]`. It is a quantity on the detritus scale, which is the fertility
+index in another coat, and G5 deletes that field; converting it here would be converting a number
+about to be removed. Recorded because `[tree]` read "2 deferred" with only one of the two explained.
+
+**Two fixtures' `meta.json` were regenerated and nothing else was.** `fixtures/capitol-mini` and
+`fixtures/s42-mini-v2` embed the params block, so the rename shows up in them: `git diff --stat` over
+`fixtures/` is 2 files, 2 insertions, 2 deletions, and the change inside each is the single key. No
+manifest and no golden moved — `fresh_s42_matches_committed_manifest` passes against the committed
+`tests/data/s42-manifest.sha256`, which is the byte-identity gate on `series.csv`, `events.csv` and
+every snapshot file. `timing.json`'s wall time is machine noise and was reverted rather than committed.
+
+**The audit is closed for the garden direction.** `UNITS.md` now says at the top that every remaining
+`deferred` row is deferred by decision with a named owner, and the file is a record rather than a work
+list. Three owners: G5 for the fertility and detritus group, the shot that unparks the animal tier for
+the tier and its six `SIG_*` constants, and **nobody** for the legacy non-water moisture path, which
+is retired in place — it exists so that pre-G4 runs still reproduce, and converting it would defeat
+the only reason it is still there.

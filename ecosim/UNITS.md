@@ -1,21 +1,29 @@
-# Units audit (shots G4b, G4c)
+# Units audit (shots G4b, G4c, G4e)
 
 Every parameter in `params.toml` and every unit-bearing constant in the code, with the unit it is
 actually in today, the unit it should be in, and where its value comes from. Written before any
 conversion, as the shot prompt asks, so that the audit stands as the finding even if the conversion
 has to be split across shots.
 
-**Status column.** `converted` — re-expressed by shot G4b or G4c; the shot is named in the row or
-the section heading. `unchanged` — already in the declared system, nothing to do. `deferred` — still
-in old units, and since shot G4c handed on to `overnight/shots/G4e-units-calibration-rest2.md`.
-`dimensionless` — carries no unit, nothing to convert. A row marked `deferred` must not be read as
-physical.
+**This audit is complete for the garden direction (shot G4e).** Every parameter the garden series
+reads is in the declared system of section 1, and **every row still marked `deferred` is deferred by
+a decision with a named owner**, listed in section 6: the fertility and detritus group is G5's, the
+animal tier and its six `SIG_*` constants belong to whatever shot unparks the tier, and the legacy
+non-water moisture path is **retired in place and converts never**. Nothing here is outstanding for
+want of time. This file is now a record, not a work list; the two findings it hands on are
+mechanisms, not units (section 7's two time scales, and deciduous phenology, which is backlog row
+G10).
 
-**What shot G4c converted, and what it did not.** G4c took the two subsystems its prompt made
-non-negotiable: **light** (section 3.6) and **tree demography** (section 3.7). It did **not** reach
-the fertility and detritus indices, `climate.decay_k`'s 10x error, the parked animal tier or the
-legacy moisture model; those four are still in section 6 and are G4e's. This table is not complete
-and does not claim to be.
+**Status column.** `converted` — re-expressed by shot G4b, G4c or G4e; the shot is named in the row
+or the section heading. `unchanged` — already in the declared system, nothing to do. `deferred` —
+still in old units, by the decision recorded in section 6, with the shot that resolves it named.
+`dimensionless` — carries no unit, nothing to convert. A row marked `deferred` must not be read as
+physical, and must not be read as a gap either.
+
+**What each shot converted.** G4b took the water tier, rainfall, the cadences and the decay and leach
+rates. G4c took the two subsystems its prompt made non-negotiable: **light** (section 3.6) and **tree
+demography** (section 3.7). G4e took the one parameter left that was worth converting, **tree
+immigration** (section 3.8), and wrote the standing deferrals in section 6 down as decisions.
 
 **Reference column.** `ref` — calibrated against a published value, named in the reference list at
 the bottom. `model` — a declared model constant with no physical counterpart; its value is a
@@ -75,7 +83,7 @@ the largest single finding of the audit; see section 7.
 | `[season]` | 1 | temperature amplitude, °C | unchanged |
 | `[cover]` | 7 | ground-cover water, litter and fertility | 1 converted, 4 dimensionless, 2 deferred |
 | `[grass]`, `[shrub]` | 6 each | the two ground-cover species | 2 converted each, 1 dimensionless, 3 curves (2 converted — the light curve in G4c — 1 deferred) |
-| `[tree]` | 21 | the tree species | 11 converted (8 in G4c: the light curve, `sapling_light`, the four ages, `seed_every`, `dry_death_ticks`), 2 unchanged, 6 dimensionless, 2 deferred (`death_detritus`, `immigration_interval`) |
+| `[tree]` | 21 | the tree species | 12 converted (8 in G4c: the light curve, `sapling_light`, the four ages, `seed_every`, `dry_death_ticks`; 1 in G4e: `immigration_interval`), 2 unchanged, 6 dimensionless, 1 deferred (`death_detritus`, with the fertility group — section 6) |
 | `[bundle]` | 6 | how a scene becomes a world | 2 converted (G4c), 3 unchanged, 1 dimensionless |
 | `[animals]` | 1 | the animal tier's switch | dimensionless |
 | `[grazer]`, `[hunter]` | 22, 23 | the animal tier | deferred (the tier is parked) |
@@ -88,7 +96,7 @@ the largest single finding of the audit; see section 7.
 26 sections and 181 keys before this shot (208 scalars with the nine four-element curves expanded),
 27 sections and 185 keys after it. Every key appears in sections 3–6 below.
 
-## 3. Converted by this shot
+## 3. Converted (shots G4b, G4c and G4e)
 
 ### 3.1 Climate and rain
 
@@ -215,7 +223,8 @@ can be read from the same value. Each is a tick count; the duration it stands fo
 | `tree.update_every` | already a parameter | 50 | unchanged |
 | `world.compact_every` | already a parameter | 100 | unchanged |
 | `tree.seed_every` | already a parameter | 200 ticks | **converted in G4c** to `tree.seeds_per_year` = 20, a rate; see section 3.7 |
-| `grazer/hunter/tree.immigration_interval` | already parameters | 500 | deferred, see section 6 |
+| `grazer/hunter.immigration_interval` | already parameters | 500 | deferred **with the animal tier**, see section 6 |
+| `tree.immigration_interval` | already a parameter | 500 ticks | **converted in G4e** to `tree.immigrants_per_year` = 8, a rate; see section 3.8 |
 
 ### 3.6 Light (shot G4c)
 
@@ -278,6 +287,31 @@ light change above.
 `year_len = 4000` they come back as exactly 500, 500, 1000, 6000, 500, 200 and 3000, which is why
 this conversion is byte-neutral on its own.
 
+### 3.8 Tree immigration (shot G4e)
+
+| key | old value | new key and value | unit | ref | status |
+|---|---|---|---|---|---|
+| `tree.immigration_interval` | 500 ticks | `immigrants_per_year` = 8.0 | immigration checks per year | model | converted |
+
+The last cadence in the tree tier. It is a **world** cadence, not a tree age: `Sim::immigrate` tests
+the tick counter in its own phase right after animals, so the derivation lives on `Params`
+(`ticks_between`, and the named `tree_immigration_every()`) and **not** in `TreeAges`, whose whole
+reason to exist is that a tree age is read against a tree's own counter. `TreeAges::seed_every` now
+calls the same `ticks_between`, so a rate per year becomes a cadence in ticks in exactly one place:
+`round(year_len / per_year)`, never less than a tick, and `u32::MAX` at a rate of 0, which leaves the
+event out rather than dividing by zero. At the shipped `year_len = 4000`, 8 a year is **exactly 500
+ticks**, so nothing moved.
+
+**A ceiling, not a rate.** A check plants a sapling only if fewer than `tree.immigration_floor` trees
+are alive, and that floor is 0 at the defaults, so no immigration has ever fired in a reference run.
+The conversion is therefore byte-neutral by construction and byte-identity is only a weak check of it;
+`animals.rs`'s `a_tree_immigrates_at_its_rate_whatever_the_rate_is` is the real one, raising the floor
+and showing the first arrival land on the derived tick for 8, 4, 20, 1 and 4000 checks a year, and no
+arrival at all in 20000 ticks at a rate of 0.
+
+**The two animal keys did not convert, and that is deliberate.** See section 6: they are deferred with
+the parked tier, which is why three sibling keys now hold two different kinds of number.
+
 **The values are deliberately not corrected.** The unit is now right and the number is now visibly
 wrong, which is the whole point: see section 7 for the decision and `DECISIONS.md`, "Units
 calibration, part two". Before this shot a reader had to divide 6000 by `year_len` to discover that
@@ -314,11 +348,22 @@ is the *only* tree age that is. Every other one is out by 50x or more (section 7
 `grazer.immigration_floor`, `grazer.eat_min_grass`, `hunter.start_count`, `hunter.kill_prob`,
 `hunter.immigration_floor`.
 
-## 6. Deferred to shot G4e — still in old units
+## 6. Deferred by decision — still in old units, with an owner each
 
 Read no row in this list as physical. Shot G4c cleared light (section 3.6) and tree demography
-(section 3.7) out of this list; what is left below is the whole of what G4e inherits, and nothing
-else is outstanding.
+(section 3.7) out of it and G4e cleared tree immigration (section 3.8); what is left is here because
+someone decided it should be, not because a shot ran out of time. Every group below names the shot
+that resolves it, and one of them names nobody on purpose.
+
+| what | why it is not converting | who resolves it |
+| --- | --- | --- |
+| The fertility and detritus indices — `fertility` (0–255), `Patch::detritus`, `cover.fertility_draw`, `cover.fertility_full`, `cover.litter_factor`, `climate.initial_fertility`, `tree.death_detritus`, `fire.ash`, `fire.detritus_yield`, `fire.detritus_weight`, `grazer.corpse_detritus`, `hunter.corpse_detritus` | converting them would be work thrown away | **G5**, which deletes the field and replaces it with nitrogen, phosphorus and potassium, and which also owns `climate.decay_k`'s 10x error |
+| The animal tier — all 45 keys of `[grazer]` and `[hunter]`, `[disease]`'s two rates, the 0–100 animal energy index, the two animal `immigration_interval` keys and the six `SIG_*` constants of `check.rs` | the tier is parked by the operator's direction of 2026-09-19 | **whatever shot unparks the tier**, and nothing before it |
+| The legacy non-water moisture path — `climate.rain_base`, `rain_amp`, `evap_base`, `evap_div`, `pond_moisture`, `initial_moisture`, `climate.diffusion` | it is the pre-water-tier model, kept only so that runs pinned to it still reproduce; converting it would defeat the one reason it still exists | **nobody. It is retired in place**, and converts never |
+
+The third row is the one a reader cannot work out from the backlog, because it is the only one whose
+answer is "never": there is no shot to wait for and none is coming. If the pinned runs are ever
+dropped, the path goes with them rather than being converted.
 
 **Nutrients (subsystem 5, mostly deferred).** `cover.fertility_draw` = 20,
 `cover.fertility_full` = 64, `cover.litter_factor` = 20, `climate.initial_fertility` = 128,
@@ -327,6 +372,11 @@ else is outstanding.
 the 0–255 fertility index or the arbitrary detritus scale. Shot **G5 replaces this field
 outright** with nitrogen, phosphorus and potassium, so converting the index here would be
 converting a quantity that is about to be deleted.
+
+`tree.death_detritus` = 40 is named here a second time because it is the one `deferred` row left in
+`[tree]`, where every other key is now converted or dimensionless, and it belongs to this group
+rather than to the tree tier: it is a quantity **on the detritus scale**, which is the fertility
+index in another coat. G5 owns it with the rest of the scale.
 
 The two rates that read a clock or a water flow were converted anyway, because leaving them on
 the old cadence would contradict section 2: a rate is per hour or per year whatever index it
@@ -368,16 +418,25 @@ converts cover fraction to energy; `intake_max`, `intake_k`, `eat_below`, `repro
 `fail_cost` are all on the energy index. The tier is parked by the operator's direction of
 2026-09-19, so converting it buys nothing the garden series needs.
 
-**The `immigration_interval`s.** 500 ticks for each of trees, grazers and hunters. They are
-schedules, not rates — `seed_every` was the other one and shot G4c turned it into
-`tree.seeds_per_year`, which is the shape these three should take too. Two of the three belong to
-the parked animal tier, so they wait for it.
+**The two animal `immigration_interval`s.** 500 ticks each for grazers and hunters. They are
+schedules, not rates — `seed_every` was the third of that kind and shot G4c turned it into
+`tree.seeds_per_year`, and G4e turned `tree.immigration_interval` into `tree.immigrants_per_year`
+(section 3.8), which is the shape these two should take too.
+
+**Three sibling keys now hold two different kinds of number, on purpose.** After G4e the tree
+immigrates at a rate per year and the two animals still immigrate every N ticks. That reads like an
+oversight and is not one: these two keys are deferred **with the tier**, on the same decision and
+with the same owner as the other 45. Converting a parked tier's cadence buys the garden series
+nothing and would be re-judged anyway by the shot that unparks it — which is also the shot that has
+to face `[grazer]` and `[hunter]`'s undeclared 0–100 energy index, beside which one cadence is the
+small half of the problem. They convert when the tier unparks, and not before.
 
 **The signature constants of `check.rs`.** `SIG_MAX_LAG` 8000, `SIG_LAG_STEP` 50, `SIG_START` 5000,
 `SIG_END` 60000, `SIG_DETREND` 12000, `SIG_MAX_PERIOD` 20000 — six tick counts that score the
 predator–prey signature. They stay tick-denominated and move with the animal tier, which shot G4c
-left parked on the operator's direction of 2026-09-19; they are G4e's, or whichever shot un-parks
-the tier. Stated plainly a second time, because a silent deferral is how this kind of thing is lost:
+left parked on the operator's direction of 2026-09-19. **They are not G4e's**: G4e's scope was one
+parameter and this write-up, and it left the tier alone deliberately. They belong to whichever shot
+un-parks the tier, with the rest of it. Stated plainly a second time, because a silent deferral is how this kind of thing is lost:
 this is a deferral, not a justification. If `climate.year_len` moves before that shot, the signature
 score changes meaning and nothing will complain. The grazer-cycle windows in `check.rs` stay in
 ticks with them.

@@ -44,9 +44,10 @@ rain_gradient = 0.6
 
 # Update cadences, in ticks (shot G4b). Every rate is per hour or per year and is charged over
 # cadence × tick_hours, so doubling a cadence leaves an annual total alone (DECISIONS.md, "Units
-# calibration"). tree.update_every, world.compact_every and the three immigration_interval keys were
-# already parameters and stay in their own sections; tree.seed_every became a rate per year in shot
-# G4c, so it is no longer a cadence.
+# calibration"). tree.update_every, world.compact_every and the two animal immigration_interval keys
+# were already parameters and stay in their own sections; tree.seed_every and
+# tree.immigration_interval became rates per year in shots G4c and G4e, so they are no longer
+# cadences.
 [schedule]
 cover_every = 10
 soil_every = 10
@@ -227,7 +228,10 @@ light = [0.2353, 0.5882, 1.0, 1.0039]
 moisture = [0.1176, 0.3922, 1.0, 1.004]
 temp = [-3.0, 2.0, 26.0, 31.0]
 immigration_floor = 0
-immigration_interval = 500
+# Tree immigration checks a year (shot G4e: was one every 500 ticks, and 4000/500 = 8). The world
+# clock, not a tree's age. At immigration_floor = 0 no check ever plants anything, so this is the
+# cadence at which the model asks whether the population has fallen too low.
+immigrants_per_year = 8.0
 
 [bundle]
 # A world loaded from a bundle (shot G1, `../docs/SCENE-CONTRACT.md`). These keys are ignored by a

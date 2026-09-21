@@ -202,8 +202,10 @@ pub struct ClimateParams {
 /// How often each staggered tier updates, in ticks (shot G4b). Every cadence lives here so that a
 /// tier's rate and the cadence it is charged over are read from the same value: a rate is per hour
 /// or per year and is multiplied by `cadence × tick_hours`, so doubling a cadence leaves an annual
-/// total alone. `tree.update_every`, `tree.seed_every`, `world.compact_every` and the three
-/// `immigration_interval`s were already parameters and stay where they are.
+/// total alone. `tree.update_every`, `world.compact_every` and the two animal
+/// `immigration_interval`s were already parameters and stay where they are; `tree.seed_every` and
+/// `tree.immigration_interval` became rates per year in shots G4c and G4e, and their tick cadences
+/// are derived by [`Params::ticks_between`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleParams {
@@ -414,8 +416,12 @@ pub struct TreeParams {
     pub temp: Curve,
     /// One sapling arrives when fewer than this many trees are alive (0 disables immigration).
     pub immigration_floor: u32,
-    /// Ticks between tree immigration checks.
-    pub immigration_interval: u32,
+    /// Tree immigration checks a year (shot G4e: was `immigration_interval`, one check every 500
+    /// ticks, and 4000/500 = 8). One check every `round(year_len / immigrants_per_year)` ticks of
+    /// the **world** clock, not of a tree's age; 0 leaves immigration out. A check that finds the
+    /// population at or above `immigration_floor` arrives at nothing, so this is a ceiling on
+    /// arrivals, not a rate of them.
+    pub immigrants_per_year: f32,
 }
 
 /// Whether the two animal species take part in a run at all (shot G0). Garden runs turn them off;
@@ -721,6 +727,25 @@ impl Params {
         (1.0 / libm::tan(a.to_radians())) as f32
     }
 
+    /// Ticks between two events that happen `per_year` times a year, from `climate.year_len`:
+    /// `round(year_len / per_year)`, never less than one tick. A rate of 0 gives [`u32::MAX`], which
+    /// leaves the event out rather than dividing by zero — no tick and no tree age is a multiple of
+    /// it. This is the one place a rate per year becomes a cadence in ticks (shots G4c and G4e).
+    pub fn ticks_between(&self, per_year: f32) -> u32 {
+        if per_year > 0.0 {
+            (self.climate.year_len as f64 / per_year as f64).round().clamp(1.0, u32::MAX as f64) as u32
+        } else {
+            u32::MAX
+        }
+    }
+
+    /// Ticks between tree immigration checks, from `tree.immigrants_per_year` (shot G4e). A **world**
+    /// cadence, not a tree age, which is why it is here and not in [`TreeAges`]: `immigrate` tests it
+    /// against the tick counter in its own phase right after animals (DECISIONS.md, shot 11).
+    pub fn tree_immigration_every(&self) -> u32 {
+        self.ticks_between(self.tree.immigrants_per_year)
+    }
+
     /// Ticks in `years` years of this run, from `climate.year_len`.
     pub fn ticks_in_years(&self, years: f32) -> u32 {
         (years as f64 * self.climate.year_len as f64).round().clamp(0.0, u32::MAX as f64) as u32
@@ -739,11 +764,7 @@ impl Params {
             max: self.ticks_in_years(t.max_age_years),
             tall_import: self.ticks_in_years(self.bundle.tree_tall_age_years),
             dry_death: dry.round().clamp(0.0, u32::MAX as f64) as u32,
-            seed_every: if t.seeds_per_year > 0.0 {
-                (self.climate.year_len as f64 / t.seeds_per_year as f64).round().clamp(1.0, u32::MAX as f64) as u32
-            } else {
-                u32::MAX
-            },
+            seed_every: self.ticks_between(t.seeds_per_year),
         }
     }
 }

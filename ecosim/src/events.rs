@@ -354,11 +354,13 @@ mod tests {
         for (floor, every) in [
             (&mut p.grazer.immigration_floor, &mut p.grazer.immigration_interval),
             (&mut p.hunter.immigration_floor, &mut p.hunter.immigration_interval),
-            (&mut p.tree.immigration_floor, &mut p.tree.immigration_interval),
         ] {
             *floor = b.floor;
             *every = 20;
         }
+        // The tree's cadence is a rate per year since shot G4e; 20 ticks is year_len / 20.
+        p.tree.immigration_floor = b.floor;
+        p.tree.immigrants_per_year = p.climate.year_len as f32 / 20.0;
         p.tree.initial_age_years = p.tree.mature_age_years;
         p.tree.seeds_per_year = p.climate.year_len as f32 / p.tree.update_every as f32;
         p

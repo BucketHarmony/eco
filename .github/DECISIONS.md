@@ -164,6 +164,21 @@ The runner that ran it: **4 vCPU, Intel Xeon Platinum 8370C at 2.80 GHz, 16 GB**
 `which runner` step. Four cores is the whole story of this job — SwiftShader rasterises on them, and
 `ecosim`'s release build, Chromium and ffmpeg all queue for them.
 
+### The controlled version of the same measurement, which arrived by luck
+
+This shot's second commit changes comments and this file and nothing else, so `ecoview/` is
+byte-identical between 35599849884 and 35602067865. The same 49 tests, one after the other:
+
+| run | head | runner | the suite | the job |
+|---|---|---|---|---|
+| 35599849884 | ea43603 | 4 vCPU Intel Xeon Platinum 8370C @ 2.80 GHz | **17.7 min** | 19.9 min |
+| 35602067865 | 522d203 | 4 vCPU AMD EPYC 7763 | **13.0 min** | 15.0 min |
+
+**1.36x, with the code held still.** That is the thesis of this whole section, measured rather than
+inferred: nothing in the suite got slower or faster between those two runs, and the wall clock moved
+by a third. It is also the argument for the `which runner` step paying for its three lines on its
+first day — without it this table would be two unexplained numbers.
+
 ### What was not done: `workers` stays 1
 
 A second Playwright worker was the row's own first suspect, and the measurement above argues against

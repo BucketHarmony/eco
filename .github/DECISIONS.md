@@ -145,6 +145,25 @@ shortened or made `continue-on-error`. The job duplicates `ecoview`'s data step 
 the two 20000-tick runs and `sync-data.sh`) and shares its cargo cache key, which is the price of the
 split and is paid on a second runner rather than on the critical path.
 
+### What it actually did, measured after the fact — and the prediction was wrong
+
+Run **35599849884** on ea43603, green in all ten checks in 20.1 min and 50.4 runner minutes:
+`ecoview` **19.9 min**, `ecoview-film` **7.9 min** (film 81 s, tiled film 289 s).
+
+19.9, not the 16.9 predicted above, **because that runner was the slowest yet measured**: its 49 tests
+summed to 1056.7 s against the slow reference run's 876.7 and the fast one's 529.9 — 1.99x the fast
+run, where the pair used to build the prediction spanned only 1.65x. The prediction is left standing
+above rather than quietly corrected, because the gap between it and this line is the point: **the job's
+duration is a property of the machine it lands on, and any single number for it is a sample.**
+
+What the split is worth is the difference, not the total. On this run the two films cost 6.2 min, so
+without it `ecoview` would have been about **26.1 min — 87% of its timeout**, worse than the 83% that
+opened the row. With it the same job on the same machine sat at **66%**.
+
+The runner that ran it: **4 vCPU, Intel Xeon Platinum 8370C at 2.80 GHz, 16 GB**, from the new
+`which runner` step. Four cores is the whole story of this job — SwiftShader rasterises on them, and
+`ecosim`'s release build, Chromium and ffmpeg all queue for them.
+
 ### What was not done: `workers` stays 1
 
 A second Playwright worker was the row's own first suspect, and the measurement above argues against
@@ -157,25 +176,41 @@ this job cannot afford until that budget is fixed, and the fix is inside a froze
 `retries: process.env.CI ? 1 : 0` in `ecoview/playwright.config.ts`. A runner 7% slower than the slowest
 one measured reddens a shot that changed nothing, which is precisely what happened on 35585550769. The
 retry turns that into a slower green run, and Playwright prints the test as flaky, so it stays visible
-rather than silent. It costs nothing when nothing fails.
+rather than silent. It costs nothing when nothing fails, and it did not fire on 35599849884.
+
+It is worth more than the margin arithmetic suggested when it was written: the section below shows the
+expensive test is not always the same test, so the retry covers a roaming cost rather than one known
+slow spot.
 
 This is a mitigation and is written down as one. It is **not** a widened gate: no assertion, tolerance
 or floor moved, and a test that fails twice still fails.
 
 ### Handed up, because it is inside a frozen component
 
-`ecoview` is frozen for features, and its *test bodies* are out of this shot's scope. Two things in them
-are wrong and want a row of their own:
+`ecoview` is frozen for features, and its *test bodies* are out of this shot's scope. One thing in them
+is wrong and wants a row of its own — and run 35599849884 corrected this shot's first reading of it,
+so what follows is the second reading.
 
-1. **`edit.spec.ts:331` has no slack.** Its budget is the 180 s from `test.describe.configure` at line 92
-   — the config's `timeout: 60_000` never applies in that file — and it measured 168 s. It is the one
-   test in the suite that cannot absorb the runners' ordinary variance.
-2. **`test.slow()` is on the wrong test.** It sits at line 301, inside `edit.spec.ts:300`, which measures
-   **19.7 s** against the 540 s that marker gives it — 3.6% — while the 168 s test next to it has none.
-   Its comment says "about two minutes here"; the test it is attached to takes twenty seconds.
+**A two-to-three-minute cost lands on one of `edit.spec.ts:300` and `:331`, and not reliably the same
+one.** Every other test in the suite scaled by 1.21 between the slow reference run and 35599849884.
+Those two swapped places:
 
-Moving that one marker is a two-line change that would give the failing test 540 s instead of 180, and
-it is the actual fix for the intermittent red. A config shot may not make it.
+| | fast run | slow run | 35599849884 |
+|---|---|---|---|
+| `edit.spec.ts:300` places and removes one cube with every hotbar slot | 12.8 s | 19.7 s | **192.0 s** |
+| `edit.spec.ts:331` picks the block under the crosshair | 84.0 s | 168.0 s | **37.5 s** |
+| the pair, together | 96.8 s | 187.7 s | 229.5 s |
+| every other test, summed | 433 s | 689 s | 827 s |
+
+So `test.slow()` at line 301 is not simply attached to the wrong test of the two. **It is attached to
+only one of the two tests that need it**, and this run is the evidence: `:300` survived 192 s only
+because that marker gives it 540 s, while `:331`, with the 180 s the `describe.configure` at line 92
+gives the whole block, hit exactly that ceiling on run 35585550769 and reddened a shot that had
+changed nothing. Whichever of the pair the cost lands on is the one that decides the build.
+
+The fix is one line — the block's budget, or the marker on both — and it is the real fix for the
+intermittent red. A config shot may not make it. What the cost *is* was not chased: it is inside the
+editor's first-person path, which both tests drive and nothing else does.
 
 ### Also true, and left alone deliberately
 

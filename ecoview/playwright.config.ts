@@ -13,8 +13,8 @@ export default defineConfig({
   // nothing. The retry converts that into a slower green run and Playwright reports it as flaky, so
   // the drift stays visible. It is a mitigation, not the fix: the fix is that test's budget, which
   // lives in a frozen component (.github/DECISIONS.md, shot C2).
-  // `workers` stays 1 for the same measurement: a second worker competes for the few cores
-  // SwiftShader rasterises on, which slows every test, and that test has 7% of headroom to give.
+  // `workers` stays 1 for the same measurement: a second worker competes for the 4 vCPUs of the
+  // runner that SwiftShader rasterises on, which slows every test, and that one has 7% to give.
   retries: process.env.CI ? 1 : 0,
   reporter: 'list',
   use: {

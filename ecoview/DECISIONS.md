@@ -771,3 +771,42 @@ per column: patch (0, 0) in `#b3300a` (one tick left) and patch (1, 2) in `#d970
 reads a fire's age correctly. 11 charcoal patches in two connected regions — 6,847 px over the western
 40 × 32 m and one isolated 874 px block past its north-east corner — with both live fires inside the
 large scar. `shots/REACCEPT-E7.md` has the side-by-side and the numbers.
+
+## E9 the retry that stops at the two slow tests
+
+**The two first-person tests in `tests/e2e/edit.spec.ts` now sit in a `test.describe` of their own with
+`test.describe.configure({ retries: 0 })`. Nothing else changes: both keep `test.slow()`, and 180_000,
+540_000 and 60_000 are all untouched.** Shot C2 added `retries: process.env.CI ? 1 : 0` to absorb a
+1.65x runner lottery; shot E8 gave both of these tests `test.slow()`, which triples their budget to
+540 s. Each was right on its own and the product is what bites: a hung attempt costs the whole 540 s
+and the retry costs 540 s more, so one hang is **18 minutes** on top of the suite.
+
+**The arithmetic, on this branch's own measurements rather than on estimates.** CI run 35620155590
+(AMD EPYC 7763, the fast runner) ran the 49 tests in 12.9 min inside a 14.95 min job, so the job costs
+about 2.1 min either side of the suite, against a `timeout-minutes: 30` ceiling. If the expensive one of
+the pair hangs: 12.9 − 1.9 + 18.0 = 29.0 min of suite, a **31.1 min job — killed, on the fast runner**.
+With the retry off for those two it is 12.9 − 1.9 + 9.0 = 20.0, a 22.1 min job that **fails cleanly with
+a timeout message**. On the slow runner (1.36x on the same code, measured by C2) the same two numbers are
+about 35 min killed against 26 min clean. A hang anywhere else in the suite costs 180 + 180 s and lands
+near 21 min, so the exposure really is these two tests and not the retry as such.
+
+**Why not the three alternatives.** Dropping `retries` in `playwright.config.ts` would take the
+mitigation away from the 47 tests that cost nothing to retry and still measure inside their budgets.
+Putting `retries: 0` on the file-level `describe.configure` at the top of `edit.spec.ts` would cover 11
+more tests whose worst case is 6 min, for no gain. Tightening the 540 s cap is the option E8 examined
+and rejected: the 192.0 s peak was measured on a slow draw and a slower one is possible, so a tighter cap
+reddens a shot that changed nothing — which is the failure C2 was opened to remove.
+
+**Verified, not read.** Playwright 1.63 scopes retries to a file or a describe block and **never to a
+single test**: `test.describe.configure()` inside a test body throws ("did not expect
+test.describe.configure() to be called here"), checked on a throwaway spec. On this file, with `CI=1`
+and a deliberately failing assertion, `--reporter=json` reports **1 attempt** for both tests in the new
+block, each still at `timeout: 540000` with its `slow` annotation, and **2 attempts** for
+`turns edit mode and the first-person camera on and off`, its neighbour outside the block at 180_000. The
+block nests inside `edit mode on a world bundle`, so the two test titles gain one path segment; nothing
+in `.github/` or `scripts/` selects a test by title.
+
+**A fifth data point for the swap, from run 35620155590:** `places and removes one cube` 114 s and
+`picks the block under the crosshair` 33.8 s. The pair now reads 12.8 / 19.7 / 192.0 / 108.0 / 114.0
+against 84.0 / 168.0 / 37.5 / 41.8 / 33.8 — the expensive one has been the first on three runs running,
+and it is still not a property of the test.

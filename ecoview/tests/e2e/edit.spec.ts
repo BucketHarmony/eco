@@ -302,55 +302,66 @@ test.describe('edit mode on a world bundle', () => {
   // 35599849884 this one measured 12.8, 19.7 and 192.0 s while 'picks the block under the crosshair'
   // measured 84.0, 168.0 and 37.5 s, with every other test in the suite moving by about 1.2x. So both
   // carry test.slow(): the block's 180 s is not enough for whichever one draws the long straw.
-  test('places and removes one cube with every hotbar slot, back to the bundle it loaded', async ({ page, request }) => {
-    test.slow(); // 12.8, 19.7 then 192.0 s -- it needs the whole 540 s on the run where it is the slow one
-    const errors = trackErrors(page);
-    await open(page, url({ cam: 'iso', edit: 1, slot: 'ground', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
-    const i = at(LAWN);
-    // One dig first: that puts the column on the cube lattice, where a place and a remove are mirrors.
-    expect(await page.evaluate(() => window.__ecoviewEdit!.act('remove'))).toBe(true);
-    const dug = await cell(page, i);
-    const d0 = await digest(page);
-    for (let k = 0; k < SLOTS.length; k++) {
-      const slot = SLOTS[k];
-      await page.keyboard.press(`Digit${k + 1}`);
-      expect(await page.evaluate(() => window.__ecoviewEdit!.act('place')), slot).toBe(true);
-      const up = await cell(page, i);
-      expect(level(up.ground_h + up.building_h), slot).toBe(level(dug.ground_h + dug.building_h) + 1);
-      expect(await page.evaluate(() => window.__ecoviewEdit!.act('remove')), slot).toBe(true);
-      expect(await cell(page, i), slot).toEqual(dug); // the cube came off exactly as it went on
-      expect(await digest(page), slot).toEqual(d0);
-    }
-    // Undo the lot, including the dig, and the grids are the bundle's own bytes again.
-    const ops = await page.evaluate(() => window.__ecoviewEdit!.ops());
-    expect(ops).toHaveLength(1 + 2 * SLOTS.length);
-    for (let k = 0; k < ops.length; k++) expect(await page.evaluate(() => window.__ecoviewEdit!.undo())).toBe(true);
-    expect(await page.evaluate(() => window.__ecoviewEdit!.changed())).toEqual([]);
-    const files = await save(page);
-    for (const name of ['ground_h.f32', 'medium.u8', 'building_h.f32']) {
-      expect(files.get(`capitol-edit-1-${name}`)!.equals(await fixtureFile(request, name)), name).toBe(true);
-    }
-    expect(errors).toEqual([]);
-  });
+  // They sit in a describe of their own so that CI's one retry does not apply to them (shot E9):
+  // test.slow() and retries multiply. An attempt that hangs costs the whole 540 s and the retry costs
+  // 540 s more, and 18 minutes on top of a suite that measures 12.9 min on a fast runner gets the
+  // 30-minute job killed, where one attempt fails cleanly with a timeout message. Playwright scopes
+  // retries to a file or a describe block and never to a single test -- test.describe.configure()
+  // inside a test body throws -- so this block holds exactly the two that carry the tripled budget,
+  // and the other 47 tests in the suite keep their retry (ecoview/DECISIONS.md, "E9 the retry").
+  test.describe('the first-person pick path', () => {
+    test.describe.configure({ retries: 0 });
 
-  test('picks the block under the crosshair with the middle button', async ({ page }) => {
-    test.slow(); // 84.0, 168.0 then 37.5 s -- 168.0 is 93% of the block's 180 s, and it hit it exactly once
-    const errors = trackErrors(page);
-    await open(page, url({ cam: 'iso', edit: 1, slot: 'ground', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
-    const slots = page.locator('#hotbar .slot');
-    await expect(slots.nth(SLOTS.indexOf('ground'))).toHaveClass(/on/);
-    // The crosshair is on lawn, so a middle click takes the hotbar to the lawn slot.
-    await page.mouse.click(CENTRE.x, CENTRE.y, { button: 'middle' });
-    expect(await panel(page)).toContain('picked lawn');
-    await expect(slots.nth(SLOTS.indexOf('lawn'))).toHaveClass(/on/);
-    expect(page.url()).toContain('slot=lawn');
-    // Put a building cube there and it picks the building slot instead, because that is the top cube.
-    await page.keyboard.press(`Digit${SLOTS.indexOf('building') + 1}`);
-    expect(await page.evaluate(() => window.__ecoviewEdit!.act('place'))).toBe(true);
-    await page.keyboard.press(`Digit${SLOTS.indexOf('gravel') + 1}`);
-    expect(await page.evaluate(() => window.__ecoviewEdit!.pickSlot())).toBe('building');
-    await expect(slots.nth(SLOTS.indexOf('building'))).toHaveClass(/on/);
-    expect(errors).toEqual([]);
+    test('places and removes one cube with every hotbar slot, back to the bundle it loaded', async ({ page, request }) => {
+      test.slow(); // 12.8, 19.7 then 192.0 s -- it needs the whole 540 s on the run where it is the slow one
+      const errors = trackErrors(page);
+      await open(page, url({ cam: 'iso', edit: 1, slot: 'ground', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
+      const i = at(LAWN);
+      // One dig first: that puts the column on the cube lattice, where a place and a remove are mirrors.
+      expect(await page.evaluate(() => window.__ecoviewEdit!.act('remove'))).toBe(true);
+      const dug = await cell(page, i);
+      const d0 = await digest(page);
+      for (let k = 0; k < SLOTS.length; k++) {
+        const slot = SLOTS[k];
+        await page.keyboard.press(`Digit${k + 1}`);
+        expect(await page.evaluate(() => window.__ecoviewEdit!.act('place')), slot).toBe(true);
+        const up = await cell(page, i);
+        expect(level(up.ground_h + up.building_h), slot).toBe(level(dug.ground_h + dug.building_h) + 1);
+        expect(await page.evaluate(() => window.__ecoviewEdit!.act('remove')), slot).toBe(true);
+        expect(await cell(page, i), slot).toEqual(dug); // the cube came off exactly as it went on
+        expect(await digest(page), slot).toEqual(d0);
+      }
+      // Undo the lot, including the dig, and the grids are the bundle's own bytes again.
+      const ops = await page.evaluate(() => window.__ecoviewEdit!.ops());
+      expect(ops).toHaveLength(1 + 2 * SLOTS.length);
+      for (let k = 0; k < ops.length; k++) expect(await page.evaluate(() => window.__ecoviewEdit!.undo())).toBe(true);
+      expect(await page.evaluate(() => window.__ecoviewEdit!.changed())).toEqual([]);
+      const files = await save(page);
+      for (const name of ['ground_h.f32', 'medium.u8', 'building_h.f32']) {
+        expect(files.get(`capitol-edit-1-${name}`)!.equals(await fixtureFile(request, name)), name).toBe(true);
+      }
+      expect(errors).toEqual([]);
+    });
+
+    test('picks the block under the crosshair with the middle button', async ({ page }) => {
+      test.slow(); // 84.0, 168.0 then 37.5 s -- 168.0 is 93% of the block's 180 s, and it hit it exactly once
+      const errors = trackErrors(page);
+      await open(page, url({ cam: 'iso', edit: 1, slot: 'ground', brush: 1, aim: `${LAWN.gx},${LAWN.gy}` }));
+      const slots = page.locator('#hotbar .slot');
+      await expect(slots.nth(SLOTS.indexOf('ground'))).toHaveClass(/on/);
+      // The crosshair is on lawn, so a middle click takes the hotbar to the lawn slot.
+      await page.mouse.click(CENTRE.x, CENTRE.y, { button: 'middle' });
+      expect(await panel(page)).toContain('picked lawn');
+      await expect(slots.nth(SLOTS.indexOf('lawn'))).toHaveClass(/on/);
+      expect(page.url()).toContain('slot=lawn');
+      // Put a building cube there and it picks the building slot instead, because that is the top cube.
+      await page.keyboard.press(`Digit${SLOTS.indexOf('building') + 1}`);
+      expect(await page.evaluate(() => window.__ecoviewEdit!.act('place'))).toBe(true);
+      await page.keyboard.press(`Digit${SLOTS.indexOf('gravel') + 1}`);
+      expect(await page.evaluate(() => window.__ecoviewEdit!.pickSlot())).toBe('building');
+      await expect(slots.nth(SLOTS.indexOf('building'))).toHaveClass(/on/);
+      expect(errors).toEqual([]);
+    });
   });
 
   test('turns edit mode and the first-person camera on and off from the keyboard', async ({ page }) => {

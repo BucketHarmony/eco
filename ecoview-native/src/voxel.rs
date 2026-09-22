@@ -40,6 +40,22 @@ pub const GRASS: u16 = 15;
 /// One past the last id, for palette sizing.
 pub const ID_COUNT: usize = 16;
 
+/// How many levels of room [`VoxelWorld::open_dig_room`] opens under the site at a time.
+///
+/// Opening room is a full remesh, so one level per stroke would remesh the world twelve times over a
+/// pond; a block of levels makes it once or twice. Eight levels is 4 m on the reference site's 0.5 m
+/// lattice, so the whole dig limit is two lifts and never three.
+pub const DIG_ROOM_LEVELS: usize = 8;
+
+/// How far below the bundle's zero the viewer digs before a run has told it otherwise, in metres.
+///
+/// This is `ecosim`'s `[bundle] base_z` default: the layers of soil it puts under the bundle's lowest
+/// ground. A run publishes its own in `meta.json` and [`VoxelWorld::read_dig_limit`] adopts it; this
+/// is what a site with no run loaded uses, and it is a fallback in exactly the sense shot S4's
+/// plantable gate is one -- the simulator owns the number and the viewer only has a guess at it until
+/// the simulator has spoken.
+pub const DEFAULT_DIG_LIMIT_M: f32 = 8.0;
+
 /// Quantise a height to a lattice level, the way `ecoview` does at draw time
 /// (ecoview/DECISIONS.md, "E3 block world"): the data stays continuous, only the display is a lattice.
 #[inline]
@@ -113,6 +129,31 @@ pub struct VoxelWorld {
     pub ao: bool,
     pub chunks: ChunkPos,
     pub levels: usize,
+    /// How far the lattice floor has been pushed **below the bundle's own zero**, in metres (S6).
+    ///
+    /// `ground_h` is in the *lattice* frame, where 0 is the bottom of the voxel grid and nothing can
+    /// be negative. A bundle's heights are relative to its own lowest point, so on a low-relief site
+    /// that floor is a few centimetres under the lawn and `LowerGround` runs out of ground almost at
+    /// once. [`VoxelWorld::open_dig_room`] moves the floor down instead of clamping: every column
+    /// rises by the same amount, the lattice gains that many levels, and this records the shift so
+    /// every number the world reports outside itself is still in the bundle's frame.
+    ///
+    /// It is 0 for a world that has not been dug, which is what keeps the mesh goldens from V0 on
+    /// standing: `from_bundle` never opens room, only an edit does.
+    datum_m: f32,
+    /// How far below the bundle's zero this world will go before an edit is refused, in metres.
+    ///
+    /// **The simulator's number, not the viewer's.** `ecosim` puts `[bundle] base_z` layers of soil
+    /// under the bundle's lowest ground and a column's surface layer is `base_z + round(its mean
+    /// height)`, so a hole deeper than `base_z` metres is one the exported world cannot represent.
+    /// [`VoxelWorld::read_dig_limit`] takes it from a loaded run's `meta.json`; until a run says
+    /// otherwise it is [`DEFAULT_DIG_LIMIT_M`], which is that parameter's default.
+    dig_limit_m: f32,
+    /// Whether [`VoxelWorld::dig_limit_m`] came from a run or is this viewer's own default.
+    ///
+    /// The refusal the HUD prints names the limit's source, the way shot S4's plantable line does, so
+    /// it cannot credit a run that was never loaded or that predates shot S2's `bundle` section.
+    dig_limit_from_run: bool,
 }
 
 /// One overlay band per column of the grid the field was read on, as
@@ -236,6 +277,41 @@ impl Plantable {
     }
 }
 
+/// Moves every plant voxel up `cells` levels, into buckets for the chunk grid it now belongs to.
+///
+/// A lift changes what chunk a given level is in, so the buckets cannot simply be carried over. The
+/// alternative is re-voxelising the whole scene, which would be correct and also throws away the
+/// run's trees until the next snapshot is applied; re-bucketing keeps exactly the voxels that were
+/// there. Anything pushed past the top is dropped, the way [`VoxelWorld::set_plant`] drops it.
+fn shift_plants(
+    plants: &[Vec<(u8, u8, u8, u16)>],
+    before: ChunkPos,
+    after: ChunkPos,
+    cells: usize,
+) -> Vec<Vec<(u8, u8, u8, u16)>> {
+    let mut out = vec![Vec::new(); after.x * after.y * after.z];
+    for cz in 0..before.z {
+        for cy in 0..before.y {
+            for cx in 0..before.x {
+                let src = cx + before.x * (cy + before.y * cz);
+                for &(lx, lz, ly, id) in &plants[src] {
+                    let z = cz * CS + lz as usize + cells;
+                    let nz = z / CS;
+                    if nz >= after.z {
+                        continue;
+                    }
+                    let dst = cx + after.x * (cy + after.y * nz);
+                    out[dst].push((lx, (z % CS) as u8, ly, id));
+                }
+            }
+        }
+    }
+    for bucket in &mut out {
+        bucket.sort_unstable();
+    }
+    out
+}
+
 /// "concrete, asphalt, roof, water grow nothing", or that none of them do.
 fn sealed_line(media: &[String], grows: &[bool]) -> String {
     let sealed: Vec<&str> = media
@@ -298,6 +374,9 @@ impl VoxelWorld {
             ao: false,
             chunks,
             levels,
+            datum_m: 0.0,
+            dig_limit_m: DEFAULT_DIG_LIMIT_M,
+            dig_limit_from_run: false,
         };
         let trees: Vec<TreeForm> = b.trees.iter().map(TreeForm::measured).collect();
         w.voxelise_plants(&trees, &b.shrubs, None);
@@ -987,7 +1066,13 @@ impl VoxelWorld {
         let before = self.column_span(i);
         match action {
             EditAction::RaiseGround => self.ground_h[i] += self.cell_m,
-            EditAction::LowerGround => self.ground_h[i] = (self.ground_h[i] - self.cell_m).max(0.0),
+            // Two floors, and the lower of them wins. The lattice cannot go under its own level 0,
+            // and the exported world cannot go under the simulator's `base_z`; a caller that wants
+            // the first one out of the way calls `open_dig_room` before it gets here.
+            EditAction::LowerGround => {
+                let floor = (self.datum_m - self.dig_limit_m).max(0.0);
+                self.ground_h[i] = (self.ground_h[i] - self.cell_m).max(floor);
+            }
             EditAction::SetSurface(m) => self.medium[i] = m,
             EditAction::RaiseBuilding => self.building_h[i] += self.cell_m,
             EditAction::LowerBuilding => {
@@ -1000,14 +1085,128 @@ impl VoxelWorld {
 
     /// What a column holds: `(ground height, medium code, building height)`.
     ///
-    /// The crosshair reads this to say what it is pointing at, and an undo entry is taken from it
-    /// **before** the edit rather than derived from the action afterwards: `LowerGround` clamps at
-    /// zero and `SetSurface` throws the old code away, so the opposite action is not an undo.
+    /// The height is **in the bundle's frame**, where zero is the bundle's own zero and a column dug
+    /// below it is negative; the lattice's own floor is at `-`[`VoxelWorld::datum_m`] and is not this
+    /// caller's business. The crosshair reads this to say what it is pointing at, and an undo entry
+    /// is taken from it **before** the edit rather than derived from the action afterwards:
+    /// `LowerGround` clamps at the lattice floor and `SetSurface` throws the old code away, so the
+    /// opposite action is not an undo. Taking it in the bundle's frame is also what makes an undo
+    /// survive a dig: the entry still means the same height after the floor has moved under it.
     pub fn column(&self, x: usize, y: usize) -> Option<(f32, u8, f32)> {
         (x < self.width && y < self.depth).then(|| {
             let i = x + self.width * y;
-            (self.ground_h[i], self.medium[i], self.building_h[i])
+            (
+                self.ground_h[i] - self.datum_m,
+                self.medium[i],
+                self.building_h[i],
+            )
         })
+    }
+
+    /// How far the lattice floor sits below the bundle's zero, in metres. 0 until something is dug.
+    #[inline]
+    pub fn datum_m(&self) -> f32 {
+        self.datum_m
+    }
+
+    /// How far below the bundle's zero this world will go before an edit is refused, in metres.
+    #[inline]
+    pub fn dig_limit_m(&self) -> f32 {
+        self.dig_limit_m
+    }
+
+    /// Whether the dig limit is a run's number or this viewer's default, for the HUD to say which.
+    #[inline]
+    pub fn dig_limit_from_run(&self) -> bool {
+        self.dig_limit_from_run
+    }
+
+    /// The ground grid **in the bundle's frame**, which is what gets written back out to disk.
+    ///
+    /// A dug column is negative here, and that is the point: `ecosim` reads `ground_h.f32` as heights
+    /// over the bundle's zero and puts `[bundle] base_z` layers of soil under the lowest of them, so a
+    /// hole is a negative number and nothing about the format has to change to carry one. Allocating
+    /// a copy is fine -- it happens once, when a run is started, beside writing 1 MB of it to disk.
+    pub fn ground_export(&self) -> Vec<f32> {
+        if self.datum_m == 0.0 {
+            return self.ground_h.clone();
+        }
+        self.ground_h.iter().map(|g| g - self.datum_m).collect()
+    }
+
+    /// The deepest column on the site, in the bundle's frame. Negative once anything has been dug.
+    pub fn lowest_ground_m(&self) -> f32 {
+        self.ground_h
+            .iter()
+            .fold(f32::INFINITY, |a, b| a.min(*b))
+            .min(f32::MAX)
+            - self.datum_m
+    }
+
+    /// Takes the dig limit from a run's `meta.json`: `ecosim`'s own `[bundle] base_z`.
+    ///
+    /// Called wherever [`VoxelWorld::read_plantable`] is, and for the same reason -- a run can arrive
+    /// after the world does, and a number read only at startup would still be the fallback's. Shrinking
+    /// the limit below what has already been dug does not undo anything; it only stops the next stroke.
+    pub fn read_dig_limit(&mut self, meta: &RunMeta) {
+        if let Some(m) = meta.base_z_m() {
+            self.dig_limit_m = m;
+            self.dig_limit_from_run = true;
+        }
+    }
+
+    /// How much further this column can be lowered before the dig limit stops it, in metres.
+    ///
+    /// The limit is the simulator's, not the lattice's: the lattice floor moves when it is reached
+    /// ([`VoxelWorld::open_dig_room`]), and what does not move is how deep a hole the exported world
+    /// can carry. Never negative, and zero means the next `LowerGround` will do nothing.
+    pub fn dig_room_m(&self, x: usize, y: usize) -> f32 {
+        match self.column(x, y) {
+            Some((g, _, _)) => (g + self.dig_limit_m).max(0.0),
+            None => 0.0,
+        }
+    }
+
+    /// Would `LowerGround` here do nothing? True when the column is already at the dig limit.
+    pub fn at_dig_limit(&self, x: usize, y: usize) -> bool {
+        self.dig_room_m(x, y) < self.cell_m
+    }
+
+    /// Opens room under the site so a dig can go below the bundle's zero, if it needs any.
+    ///
+    /// Returns `true` when the lattice grew, which means **every** mesh in the world is stale: the
+    /// ground did not move in world space -- [`crate::mesh::mesh_chunk`] subtracts the datum back out
+    /// again -- but every voxel moved in the lattice, so every chunk buffer has to be refilled. The
+    /// chunk grid can also gain a layer, and then the caller's own per-chunk bookkeeping is invalid
+    /// too; [`VoxelWorld::chunk_count`] says whether it did.
+    ///
+    /// This is the half of shot S6 that the operator called "not a one-line change". Clamping at zero
+    /// was not a wrong line -- it is what a lattice with a floor can honestly do -- so the fix is to
+    /// give the lattice somewhere to put the hole rather than to delete the clamp.
+    pub fn open_dig_room(&mut self, x: usize, y: usize) -> bool {
+        if x >= self.width || y >= self.depth {
+            return false;
+        }
+        let i = x + self.width * y;
+        // Room is needed only when this column is about to walk off the bottom of the lattice, which
+        // after the first lift is rare: eight levels is eight more strokes.
+        if self.ground_h[i] - self.cell_m >= -1e-6 {
+            return false;
+        }
+        if self.at_dig_limit(x, y) {
+            return false;
+        }
+        let cells = DIG_ROOM_LEVELS;
+        let dz = cells as f32 * self.cell_m;
+        self.datum_m += dz;
+        for g in &mut self.ground_h {
+            *g += dz;
+        }
+        self.levels += cells;
+        let before = self.chunks;
+        self.chunks.z = self.levels.div_ceil(CS);
+        self.plants = shift_plants(&self.plants, before, self.chunks, cells);
+        true
     }
 
     /// Puts a column back the way [`VoxelWorld::column`] found it. Returns the stale chunks.
@@ -1017,7 +1216,7 @@ impl VoxelWorld {
         }
         let i = x + self.width * y;
         let before = self.column_span(i);
-        self.ground_h[i] = was.0;
+        self.ground_h[i] = was.0 + self.datum_m;
         self.medium[i] = was.1;
         self.building_h[i] = was.2;
         let after = self.column_span(i);
@@ -1086,7 +1285,8 @@ impl VoxelWorld {
                 continue;
             }
             let i = x + self.width * y;
-            if p[1] <= self.ground_h[i] + self.building_h[i] {
+            // World space is the bundle's frame, so the lattice's own datum comes back out here.
+            if p[1] <= self.ground_h[i] - self.datum_m + self.building_h[i] {
                 return Some((x, y));
             }
         }

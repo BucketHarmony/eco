@@ -1145,3 +1145,191 @@ the row's 1,500** -- 1,025 to spare, with both write-ups in it. The three PNGs a
 nothing. `tests/mesh_golden.rs` is 185 of the insertions, the two write-ups 124, `src/voxel.rs` 141,
 `src/main.rs` 24 and `src/run.rs` 20: **185 non-test code, 185 test, 124 write-up**. The 16 deleted
 lines in `src/voxel.rs` are the `grows` field and the four-name `matches!` V4 built it with.
+
+# S6 -- digging below the site's zero
+
+## The defect, reproduced on the public site
+
+The operator found it on a low-relief private site and filed it as backlog row S6: twelve
+`LowerGround` strokes on a flat lawn square scraped a few centimetres instead of digging a pond,
+because `VoxelWorld::apply` clamped the ground at `0.0` and a bundle's heights are measured from its
+own lowest point -- so the deepest hole anywhere on a site was that site's total relief, and only at
+its single highest column. The same defect is in the committed Capitol bundle, so everything measured
+below is measured there.
+
+`worlds/capitol/ground_h.f32` against `medium.u8`, all 262,144 ground cells:
+
+| | |
+| --- | --- |
+| Total relief | **8.59 m** (0.00 to 8.59) |
+| Lawn cells | 169,876, **64.8%** of the site |
+| Lawn median height | **5.42 m** |
+| Lawn cells that could not be dug even **0.5 m** | 2,178, **1.3%** |
+| Lawn cells that could not be dug **3.0 m** | 20,009, **11.8%** |
+| The square the screenshots dig, (208..223, 80..95) | median **0.29 m**, min 0.08, max 0.46 |
+
+So on this site the old clamp let you dig 3 m of pond over seven eighths of the lawn and nothing
+worth calling a pond on the rest -- and the low lawn terrace the screenshots use, a 16 x 16 m square
+of flat grass, capped at **0.46 m** no matter how many times you pressed **Z**. Twelve strokes there
+asked for 6 m and moved the ground 0.29 m at the median column. That is the operator's report,
+on public data.
+
+## The floor that is left, and where it comes from
+
+Part (a) is done: the ground goes below zero. It is not unbounded, and the bound is not the viewer's
+guess -- it is `ecosim`'s. `params.bundle.base_z` is how many 1 m ecology layers the simulator puts
+under the bundle's lowest ground (8 by default, `ecosim/src/world.rs`), and a column whose surface
+falls below layer 0 cannot be simulated at all. So the viewer reads `base_z` out of the run's
+`meta.json` and digs to **8.00 m** below zero and no further; with no run loaded it uses its own
+`DEFAULT_DIG_LIMIT_M`, also 8.0. Nothing in the run directory format changed: `ground_h.f32` is
+signed and a hole is a negative height, which is what the simulator already expects of a bundle
+whose ground dips under its own datum. The row worried that `height.bin` being unsigned made this a
+format question; it does not bind, because nothing in the viewer reads a run's absolute height --
+`Run::check_against` compares grid dimensions, cell size and name, and `height.bin` is used only as a
+z index inside the run's own light grid.
+
+One caveat the run directory puts on part (a), found while checking that claim and filed as backlog
+row S13: only a run written since shot S2 carries a `bundle` section at all, so `runs/s42` and
+`fixtures/s42-mini` cannot answer and the viewer's own 8.0 m default stands in. That is the S4
+situation exactly, and the HUD says which of the two it used.
+
+Measured on `runs/capitol-s42` at tick 10000, over BRP:
+
+| | Undug | After 12 strokes on the square | After 40 strokes |
+| --- | --- | --- | --- |
+| `datum_m` | 0.00 | **8.00** | 8.00 |
+| `dig_limit_m` | 8.00 (from the run) | 8.00 | 8.00 |
+| `lowest_ground_m` | 0.00 | **-5.92** | **-7.92** |
+| `levels` (lattice) | 214 | **230** | 230 |
+| `chunks` / drawn | 324 / 93 | 324 / **131** | 324 / 131 |
+| crosshair cell the camera's ray lands on | (216, 95) | (216, 85) | (216, 82) |
+| its `ground_h` | 0.14 | **-5.69** | **-7.72** |
+| its `dig_room_m` | 8.14 | 2.31 | **0.28**, `at_dig_limit` true |
+
+The lattice gains 8 levels at a time (`DIG_ROOM_LEVELS`), so two lifts cover the whole 8 m limit and
+a third is never needed. The deepest column stops at -7.92 and not at -8.00 because a stroke is a
+whole 0.5 m cell and the last, partial cell is refused rather than shortened: `at_dig_limit` is true
+as soon as there is less than one cell of room left, which is what the HUD reports. The camera is
+fixed in all three columns and the cell under the crosshair still changes, because the ray now
+reaches down into the hole.
+
+## What the lift costs
+
+The datum is lazy: it opens only when a stroke would go under the lattice floor, and until then the
+world is bit-for-bit the world V0 built. When it does open, every voxel in the site moves one chunk
+layer down in the lattice while standing still in world space, so every chunk is remeshed. Two
+strokes on the same world, each timed by `apply_edits` and read back as `last_remesh_ms`:
+
+| Stroke | What it touched | Cost |
+| --- | --- | --- |
+| `LowerGround` at (216, 60), ground 5.4 m | one chunk | **10.1 ms** |
+| `LowerGround` at (216, 95), ground 0.14 m -- the first one that goes under zero | all 324 chunks, plus despawning and respawning every chunk entity | **915.8 ms** |
+
+A one-second hitch, once or twice per session, on the stroke that crosses zero. That is the price of
+keeping the undug world's mesh bytes identical, and it buys the three mesh golden hashes: **no golden
+moved and nothing was regenerated.** The alternative -- reserving 8 m of room at load -- would have
+moved the floor and side-wall vertices of every world the component has ever meshed.
+
+## Where the metres are measured from
+
+Two frames, and the shot keeps them apart on purpose. The **lattice** frame is non-negative and its
+level 0 is the grid floor; the **bundle** frame is heights over the bundle's own zero, and it is
+what the camera, the crosshair ray, the HUD and `ecoview.stats` all speak. `mesh_chunk` subtracts
+`datum_m` from every chunk origin, so a lift moves nothing in world space:
+`opening_dig_room_leaves_every_undug_column_where_it_was_in_world_space` pins a lawn column's top
+face at 1.00 m before and after the lift, with its underside dropping 0.00 -> -4.00 m. Digging a
+pond in one corner does not lift the site under the camera.
+
+## Part (b): the HUD says so before the stroke, not after it
+
+The row asked, failing (a), for at least an indication. Both are here, and the indication is a
+reading rather than an error message -- the crosshair line carries how much is left to dig on every
+frame:
+
+- `crosshair (216, 85)  lawn  ground -5.69 m  2.31 m left to dig`
+- `crosshair (216, 82)  lawn  ground -7.72 m  at the dig floor: [Z] does nothing here`
+
+and a stroke that is refused says why, in the editor's note line, naming the limit **and where the
+limit came from** -- because on a bundle with no run loaded the 8 m is the viewer's own number and
+crediting a run with it would be the S4 defect again:
+
+- with the reference run loaded: `(223, 95) is 7.90 m below the site's zero and that is as deep as
+  this world goes -- 8 m of soil sits under the bundle's lowest ground, the run's
+  params.bundle.base_z, and a hole cannot go under it`
+- on the bare bundle: the same sentence ending `..., this viewer's default, with no run loaded to
+  ask, and a hole cannot go under it`
+
+while the stroke that opens room says that too, because a one-second hitch with no explanation reads
+as a bug:
+
+- `digging below the site's zero: opened room under the whole site, the lattice floor is now 8.00 m
+  down`
+
+An agent gets the same facts as numbers: `ecoview.stats` gains `datum_m`, `dig_limit_m`,
+`dig_limit_from_run` and `lowest_ground_m` at the top level and `dig_room_m` and `at_dig_limit` under
+`crosshair`. The agent gate's own `stats` line shows them on a world nobody dug --
+`"datum_m":0.0,"dig_limit_m":8.0,"lowest_ground_m":0.0` -- which is the reading that says the lazy
+datum is still closed.
+
+## The screenshots
+
+Four, each one viewed. `--headless --frames 300`, camera `--eye 108,22,66 --look 108,-2,46`, and
+the dig is twelve or forty `--edit 208,80,223,95,LowerGround` flags over the low lawn terrace.
+
+| File | Arguments | What it shows |
+| --- | --- | --- |
+| `s6-dig-basin.png` | `--world ../ecosim/worlds/capitol`, 12 strokes | The thing V5 could not do: a square basin with vertical walls and a flat floor, cut 5.7 m into a terrace that stands 0.29 m over the bundle's zero. Under V5's clamp this same command left a scrape shallower than the grass. The HUD reads `ground -5.69 m  2.31 m left to dig` and the note says the lattice floor is now 8.00 m down. |
+| `s6-dig-floor.png` | `--run ../ecosim/runs/capitol-s42 --tick 10000`, 40 strokes | The floor, and part (b) doing its job. The crosshair reads `ground -7.72 m  at the dig floor: [Z] does nothing here` and the note explains that the run puts 8 m of soil under the bundle. The reference site is loaded, so the 8.00 m limit on this frame is the run's `base_z` and not the viewer's default. The terrain is under 998 trees and 172,107 shrub voxels; this frame is evidence about the HUD, and `s6-dig-basin.png` is the evidence about the ground. |
+| `s6-dig-floor-no-run.png` | `--world ../ecosim/worlds/capitol`, 40 strokes | The same forty strokes with no run to ask, which is the other half of the refusal. The basin is plainly 8 m deep with a flat floor -- the picture `s6-dig-floor.png` cannot show under its trees -- and the note ends `..., this viewer's default, with no run loaded to ask, and a hole cannot go under it`. |
+| `s6-agent-loop.png` | the agent gate's own capture | Unchanged in kind from S5's: the gate digs nothing, and it is here to show that a viewer carrying a datum still answers an agent that never opens one. |
+
+Nothing under `eco-private/` was read or referenced, and every number above is from the committed
+Capitol bundle or from a run of it. A private home-scene pass is owed for this shot and
+is the operator's: the crosshair line gains a clause on every frame, and the private site is where
+the defect was found.
+
+## The gates
+
+| Gate | Result |
+| --- | --- |
+| `cargo test --release --no-default-features --test mesh_golden` (the CI gate) | **79 pass**, S4's 72 plus seven |
+| `cargo test --release` | 79 pass |
+| `cargo fmt --check` | clean |
+| `cargo clippy --all-targets` | the same three pre-existing `src/bundle.rs` findings S4 and S5 recorded, no new one and no `#[allow]` added |
+| `cargo build --release` | clean |
+| `agent_loop --run ../ecosim/runs/capitol-s42 --out shots/s6-agent-loop.png` | **PASS**, 19 calls, 0 retries, 4.8 s to the first screenshot, 1,607,596 bytes read back |
+
+The seven new tests, in the file's order:
+
+- `a_dig_goes_below_the_bundles_zero_instead_of_stopping_at_it`
+- `the_dig_floor_is_the_simulators_base_z_and_the_world_says_when_it_is_reached`
+- `opening_dig_room_leaves_every_undug_column_where_it_was_in_world_space`
+- `a_lift_carries_the_plant_voxels_up_with_the_ground`
+- `a_dug_site_exports_its_hole_as_a_negative_height`
+- `the_dig_limit_comes_from_the_runs_meta_json`
+- `an_undug_world_still_meshes_to_the_bytes_it_always_did`
+
+The last one is the sibling of the three golden hashes: it asserts that a world nobody dug meshes to
+the bytes it always did, so a later shot that makes the datum eager fails here and not only in the
+goldens. V0's edit test is kept and reworded rather than replaced -- `apply` on its own still never
+crosses the lattice floor, because S6 moved that floor instead of deleting the clamp.
+
+## Line budget
+
+`git diff --stat 4a4f019 -- ecoview-native/` is **639 insertions and 21 deletions, 618 net**, and
+with this write-up and DECISIONS.md's five S6 sections in it **about 780 against the row's 1,500** --
+720 to spare. `tests/mesh_golden.rs` is 256 of the insertions, `src/voxel.rs` 214, `src/main.rs` 90,
+DECISIONS.md 78 (now ~95), `src/run.rs` 16 and `src/mesh.rs` 6: **326 non-test code and 256 test**
+before the prose. The four PNGs are binary and count nothing. Nothing outside `ecoview-native/` is
+touched -- no `ecosim/`, no `ecoview/`, no `CLAUDE.md`, and no run directory regenerated.
+
+## A trap this shot hit, and S4 had already written down
+
+S4's write-up recorded that `cargo fmt` cannot see inside a string literal and that `\`-continued
+literals are therefore worth looking at. This shot hit the next version of it: the refusal note was
+edited by a script, and what landed in the source was `` at the end of the line instead of a bare
+`\` continuation -- a valid Rust string with a carriage return and 29 spaces inside it. It compiled,
+`cargo fmt --check` passed, all 79 tests passed, and the only thing wrong with it was the picture,
+where the note broke into three ragged lines with a gap. It was found by rendering the frame and
+looking at it, which is the only gate that could have found it, and it is the second time in three
+shots that the picture caught something no test did.

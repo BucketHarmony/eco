@@ -128,9 +128,13 @@ pub fn mesh_chunk(
     mesher.clear();
     mesher.fast_mesh(voxels, opaque, transparent);
 
+    // The lattice's own datum comes back out here, so world space stays in the bundle's frame
+    // whatever the editor has dug (shot S6, `VoxelWorld::open_dig_room`). It is a whole number of
+    // cells, so the coordinates are still exact multiples of the cell size and the goldens below
+    // still hash the same bits -- and for a world nobody has dug it is 0 and this line is nothing.
     let origin = [
         (c.x * CS) as f32 * cell_m,
-        (c.z * CS) as f32 * cell_m,
+        (c.z * CS) as f32 * cell_m - world.datum_m(),
         (c.y * CS) as f32 * cell_m,
     ];
     let mut m = ChunkMesh::default();

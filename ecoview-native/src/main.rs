@@ -24,6 +24,12 @@
 //! -- it writes the edited site out as a world bundle, runs `ecosim` on it as a command, reads the
 //! run back and plays it from tick 0. **Backspace** stops a run in flight.
 //!
+//! **Z digs below the site's zero** (shot S6). A bundle's heights are measured from its own lowest
+//! ground, so a pond on flat ground has to go under that datum; the world carries the offset instead
+//! of clamping, and the floor is the soil the run puts under the bundle
+//! (`params.bundle.base_z`, [`ecoview_native::run::RunMeta::base_z_m`]) and no deeper. The HUD says
+//! how much is left to dig before the stroke, and says so when a stroke would hit the floor.
+//!
 //! **The simulator decides and the viewer expresses** (`overnight/DIRECTION-native-viewer.md`). The
 //! round trip changes nothing about that: the edit changes the ground, and every consequence of it
 //! -- water, light, fertility, what grows and what dies -- is `ecosim`'s. The two projects still
@@ -311,8 +317,8 @@ struct Site {
 }
 
 /// One thing to do to the world's columns. `Undo` is not an [`EditAction`]: the opposite of an
-/// action is not its inverse, because `LowerGround` clamps at zero and `SetSurface` forgets what was
-/// there, so an undo restores the three numbers it saw rather than acting again.
+/// action is not its inverse, because `LowerGround` clamps at the dig floor and `SetSurface` forgets
+/// what was there, so an undo restores the three numbers it saw rather than acting again.
 #[derive(Debug, Clone, Copy)]
 enum EditOp {
     Cell(usize, usize, EditAction),
@@ -954,6 +960,9 @@ fn load_snapshot(
     // Which media grow things is the run's answer, not this viewer's (shot S4). Read here rather
     // than at load because a run can arrive later -- the round trip grows one from the edited site.
     world.read_plantable(&run.meta);
+    // And how deep a hole the exported world can carry is the run's answer too (shot S6): it is the
+    // simulator's `[bundle] base_z`, the soil it puts under the bundle's lowest ground.
+    world.read_dig_limit(&run.meta);
     let start = Instant::now();
     let snap = match run.trees_at(t.index) {
         Ok(s) => s,
@@ -1466,16 +1475,48 @@ fn apply_edits(
     // difference is nothing, but a `--edit` rectangle is thousands of them over the same handful of
     // chunks, and remeshing per cell would mesh each of those chunks thousands of times.
     let mut stale: Vec<ChunkPos> = Vec::new();
+    // Set when a dig has moved the lattice floor. Every chunk is then stale and the chunk grid may
+    // have grown a layer, so the per-chunk bookkeeping below is rebuilt rather than patched.
+    let mut lifted = false;
     for op in std::mem::take(&mut queue.0) {
         let changed = match op {
             EditOp::Cell(x, y, action) => match site.world.column(x, y) {
                 Some(was) => {
-                    editor.undo.push((x, y, was));
-                    if editor.undo.len() > UNDO_DEPTH {
-                        editor.undo.remove(0);
+                    // A hole deeper than the exported world can carry is refused and said out loud,
+                    // which is the half of shot S6 the row asked for first: before this, a stroke on
+                    // low ground moved the ground a few centimetres and stopped with no indication
+                    // why. The note names where the limit came from, because on a bundle with no run
+                    // loaded it is this viewer's default and not any run's number.
+                    if action == EditAction::LowerGround && site.world.at_dig_limit(x, y) {
+                        editor.note = format!(
+                            "({x}, {y}) is {:.2} m below the site's zero and that is as deep \
+                             as this world goes -- {:.0} m of soil sits under the bundle's \
+                             lowest ground, {}, and a hole cannot go under it",
+                            -was.0,
+                            site.world.dig_limit_m(),
+                            if site.world.dig_limit_from_run() {
+                                "the run's params.bundle.base_z"
+                            } else {
+                                "this viewer's default, with no run loaded to ask"
+                            }
+                        );
+                        Vec::new()
+                    } else {
+                        editor.undo.push((x, y, was));
+                        if editor.undo.len() > UNDO_DEPTH {
+                            editor.undo.remove(0);
+                        }
+                        site.edits += 1;
+                        if action == EditAction::LowerGround && site.world.open_dig_room(x, y) {
+                            lifted = true;
+                            editor.note = format!(
+                                "digging below the site's zero: opened room under the whole site, \
+                                 the lattice floor is now {:.2} m down",
+                                site.world.datum_m()
+                            );
+                        }
+                        site.world.apply(x, y, action)
                     }
-                    site.edits += 1;
-                    site.world.apply(x, y, action)
                 }
                 None => {
                     editor.note = format!("({x}, {y}) is outside the site");
@@ -1501,6 +1542,16 @@ fn apply_edits(
         }
     }
     let material = site.material.clone();
+    if lifted {
+        // Nothing moved in world space, and every voxel moved in the lattice. The chunk grid can
+        // also have gained a layer, which invalidates every index into `entities`, so the entities
+        // go and come back rather than being reassigned.
+        for e in site.entities.iter_mut().filter_map(Option::take) {
+            commands.entity(e).despawn();
+        }
+        site.entities = vec![None; site.world.chunk_count()];
+        stale = site.world.all_chunks();
+    }
     for c in stale {
         let i = site.world.chunk_index(c);
         let m = mesh_chunk(&site.world, c, &palette, &mut scratch);
@@ -1593,9 +1644,13 @@ fn sim_tick(
         sim.ticks = ticks;
         let root = sim.root.clone();
         let w = &site.world;
+        // The bundle's frame, not the lattice's: a column dug below the bundle's zero goes out as a
+        // negative height, and `ecosim` puts `[bundle] base_z` layers of soil under the lowest of
+        // them, so the hole is carried by the format as it stands (shot S6).
+        let ground = w.ground_export();
         match SimJob::start(
             &scene.bundle,
-            (&w.ground_h, &w.medium, &w.building_h),
+            (&ground, &w.medium, &w.building_h),
             &root,
             seed,
             ticks,
@@ -2304,7 +2359,7 @@ fn editor_line(editor: &Editor, site: &Site, scene: &Scene) -> String {
         .and_then(|(x, y)| site.world.column(x, y).map(|c| (x, y, c)))
     {
         Some((x, y, (g, m, b))) => format!(
-            "crosshair ({x}, {y})  {}  ground {g:.2} m{}\n",
+            "crosshair ({x}, {y})  {}  ground {g:.2} m{}  {}\n",
             scene
                 .bundle
                 .media
@@ -2314,6 +2369,13 @@ fn editor_line(editor: &Editor, site: &Site, scene: &Scene) -> String {
                 format!("  building {b:.2} m")
             } else {
                 String::new()
+            },
+            // How much further [Z] will go, which is the reading the row was filed for the want
+            // of: strokes on low ground stopped and the HUD said nothing about why (shot S6). Zero
+            // is spelled out rather than printed as 0.00.
+            match site.world.dig_room_m(x, y) {
+                r if r < site.world.cell_m => "at the dig floor: [Z] does nothing here".to_string(),
+                r => format!("{r:.2} m left to dig"),
             }
         ),
         None => format!("crosshair on nothing within {PICK_RANGE_M:.0} m\n"),
@@ -2646,7 +2708,17 @@ fn stats_method(
             "column": site.world.column(x, y).map(|(g, m, b)| json!({
                 "ground_h": g, "medium": m, "building_h": b,
             })),
+            // Shot S6: an agent digging a pond can read how much further it will go, and see that
+            // it stopped, rather than inferring it from a `ground_h` that did not move.
+            "dig_room_m": site.world.dig_room_m(x, y),
+            "at_dig_limit": site.world.at_dig_limit(x, y),
         })),
+        // The lattice floor and the limit on it, both in metres below the bundle's zero. `datum_m`
+        // is 0 until something is dug, which is what keeps an undug world meshing to V0's bytes.
+        "datum_m": site.world.datum_m(),
+        "dig_limit_m": site.world.dig_limit_m(),
+        "dig_limit_from_run": site.world.dig_limit_from_run(),
+        "lowest_ground_m": site.world.lowest_ground_m(),
         "sim": sim_json(&sim),
         "last_remesh_ms": site.last_remesh_ms,
         "run": t.run.as_ref().map(|r| json!({

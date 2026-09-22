@@ -894,3 +894,92 @@ simulator's to name and a tenth one should arrive here as data rather than as a 
 replaces the value only when it differs. Reading once at startup would be wrong for the case shot E4
 built: the round trip grows a run from the edited site and adopts it mid-session, and a gate read
 before that run existed would still be the fallback's while the HUD claimed otherwise.
+
+## S6 the lattice floor moves; the ground does not
+
+`LowerGround` clamped at zero because the voxel lattice has a floor at level 0 and a bundle's
+`ground_h` is relative to its own lowest point. On a low-relief site those two facts multiply badly:
+the deepest hole anywhere is the site's total relief, and only at its single highest point. The
+operator raised it from a low-relief site (backlog row S6) and it is in the committed Capitol bundle
+too: 1.3% of its lawn could not be dug one 0.5 m cell and 11.8% could not reach 3 m, and the flat
+lawn terrace the shot's screenshots dig sits 0.29 m over the bundle's zero.
+
+The clamp was not a wrong line. It is what a lattice with a floor can honestly do. So the fix gives
+the lattice somewhere to put the hole instead of deleting the clamp: `VoxelWorld` carries a
+`datum_m`, `open_dig_room` raises every column by `DIG_ROOM_LEVELS` levels when a dig reaches the
+floor, and `apply` still clamps — at a floor that has just moved.
+
+**`ground_h` stays in the lattice frame and nothing else does.** Every number the world reports
+outside itself is in the bundle's frame: `column`, `dig_room_m`, `lowest_ground_m`, `ground_export`,
+and the ray in `pick_cell` all convert. `mesh_chunk` subtracts the datum from the Y of every vertex,
+so **world space is the bundle's frame too** — the camera, the crosshair, the HUD's metres and the
+meshes are all in the same units they were before this shot, and digging a pond in one corner does
+not lift the site under the camera. `opening_dig_room_leaves_every_undug_column_where_it_was_in_world_space`
+is that invariant as a test: the lawn's top face is at 1.00 m before the dig and 1.00 m after it,
+while the world's underside drops from 0.00 m to −4.00 m.
+
+The alternative was to keep the heights in the bundle's frame and let them go negative, which reads
+better and draws a bottomless pit: `voxel()` answers air below level 0, so a dug column would be a
+hole punched through the floor of the world with nothing under it.
+
+## S6 the datum is opened lazily, and that is what saves V0's goldens
+
+Reserving the room at load would be simpler code and would change the mesh of every world that has
+ever been loaded — the floor and the side walls move even when nothing is dug — so the five golden
+hashes carried from V0 through V6 would have had to be regenerated. They are the only continuity
+evidence this component has, and spending them on a feature that does not need them would be a bad
+trade. `from_bundle` therefore never opens room; only an edit does, and `mesh_chunk`'s new term is
+`- 0.0` on every world that existed before this shot.
+`an_undug_world_still_meshes_to_the_bytes_it_always_did` says so where a reader will see it.
+
+Eight levels at a time, rather than one, because opening room is a full remesh and a per-stroke lift
+would remesh the world twelve times over one pond. Eight covers the operator's measured case in two
+lifts. A lift also stales every chunk and can grow the chunk grid a layer, which invalidates every
+index into `Site::entities`, so `apply_edits` despawns the chunk entities and rebuilds the vector
+rather than reassigning it. The plant buckets are re-bucketed (`shift_plants`) rather than
+re-voxelised: re-voxelising would be correct and would drop the run's trees until the next snapshot.
+
+## S6 the depth limit is the simulator's `base_z`, and nothing in the format changes
+
+The row called this "a real format question, not a one-line change", on the grounds that the run
+directory's `height.bin` is unsigned. It turns out not to bind, twice over.
+
+Nothing in the viewer reads a run's *absolute* height. `height.bin` is used to pick the light sample
+above a column, inside the run's own grid; a tree stands on the viewer's own ground; a pond stands on
+the column's own top solid. So the run's datum is the run's business.
+
+And the bundle needs no new field either. `ground_h.f32` is signed, and `ecosim` already carries the
+datum this needs: `[bundle] base_z` is the ecology layers of soil it puts under the bundle's lowest
+ground, and a column's surface layer is `base_z + round(its mean height in metres)`
+(`ecosim/src/world.rs:422`). A hole therefore goes out as a negative height and the simulator puts it
+in the soil it already had. `hydro.rs` routes on `1000.0 * ground_h` through an order-preserving float
+key, so a negative elevation orders correctly; the one place a bare `0.0` appears is `peak`, which
+only lifts roofs above everything.
+
+That makes `base_z` the real limit: at `base_z` metres down a column's surface layer is 0 and there is
+nothing left underneath. So the viewer takes the limit **from the run**, out of `meta.json`'s
+`params.bundle.base_z`, exactly the way shot S4 takes the plantable gate and S2 takes the overlay
+ramps — read in `load_snapshot`, so a run that arrives mid-session (E4's round trip) is adopted. With
+no run loaded it is `DEFAULT_DIG_LIMIT_M`, that parameter's own default, and shrinking the limit
+afterwards stops the next stroke rather than undoing a hole already dug.
+
+## S6 part (b) is the reading before the stroke as well as after it
+
+The row asked, at minimum, that an edit which hit the floor say so. It does: the stroke is refused
+and the HUD names why, in the simulator's terms ("8 m of soil sits under the bundle's lowest ground,
+the run's params.bundle.base_z, and a hole cannot go under it"). But a message only after the fact would still let the
+operator take twelve strokes to find out, so the crosshair line carries `N.NN m left to dig` at all
+times, and `at the dig floor: [Z] does nothing here` when there is none. `ecoview.stats` reports
+`dig_room_m` and `at_dig_limit` on the crosshair and `datum_m`, `dig_limit_m` and `lowest_ground_m`
+on the site, so an agent digging a pond can see it stop without reading pixels.
+
+## S6 the refusal names its source, because on a bare bundle the limit is the viewer's own
+
+The first wording of the refusal said "the run puts 8 m of soil under the bundle's lowest ground" on
+every site, including one with no run loaded at all — where the number is `DEFAULT_DIG_LIMIT_M` and no
+run has said anything. That is the same mistake shot S4 found in its own first draft (a run with no
+`params.medium` still read as "from the run's meta.json"), so it is fixed the same way: `VoxelWorld`
+carries `dig_limit_from_run`, the note ends with either `the run's params.bundle.base_z` or `this
+viewer's default, with no run loaded to ask`, and `ecoview.stats` publishes the flag beside the
+number. `shots/s6-dig-floor.png` and `shots/s6-dig-floor-no-run.png` are the same dig with the two
+wordings, which is why there are four screenshots and not three.

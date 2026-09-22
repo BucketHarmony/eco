@@ -1931,16 +1931,24 @@ fn undo_puts_back_what_the_edit_took_rather_than_acting_again() {
     assert!(!w.restore_column(5, 5, was).is_empty());
     assert_eq!(w.column(5, 5), Some(was));
 
-    // Ground: `LowerGround` clamps at zero, so the opposite action is not an inverse. Eight drops
-    // take this column to the floor; the ninth does nothing, and a raise afterwards would leave it
-    // half a metre above where it started. The recorded column does not.
+    // Ground: `LowerGround` clamps at the lattice floor, so the opposite action is not an inverse.
+    // Eight drops take this column to the floor; the ninth does nothing, and a raise afterwards
+    // would leave it half a metre above where it started. The recorded column does not.
+    //
+    // Shot S6 moved the floor rather than deleting the clamp, and this is still `apply`'s own
+    // contract: it acts on the lattice as it finds it. A caller that wants the floor out of the way
+    // asks for room first, which is what the S6 section at the end of this file tests.
     for _ in 0..8 {
         w.apply(0, 0, EditAction::LowerGround);
     }
     let floor = w.column(0, 0).unwrap();
     assert_eq!(floor.0, 0.0);
     w.apply(0, 0, EditAction::LowerGround);
-    assert_eq!(w.column(0, 0).unwrap().0, 0.0, "it cannot go below zero");
+    assert_eq!(
+        w.column(0, 0).unwrap().0,
+        0.0,
+        "`apply` alone does not go below the lattice floor"
+    );
     w.apply(0, 0, EditAction::RaiseGround);
     assert_eq!(w.column(0, 0).unwrap().0, 0.5, "the opposite over-corrects");
     w.restore_column(0, 0, floor);
@@ -2712,4 +2720,244 @@ fn the_capitol_run_and_the_name_list_agree() {
     for code in 0..media().len() as u8 {
         assert_eq!(from_run.grows(code), from_names.grows(code));
     }
+}
+
+// -----------------------------------------------------------------------------------------------
+// Shot S6: digging below the bundle's zero.
+//
+// A bundle's `ground_h` is relative to its own lowest point and the voxel lattice has a floor at
+// level 0, so `LowerGround` used to clamp there: the deepest hole anywhere on a site was that site's
+// total relief, and only at its single highest point. The same defect is in the committed Capitol
+// bundle, where 1.3% of the lawn could not be dug even one 0.5 m cell and 11.8% could not reach 3 m
+// (MEASUREMENTS.md, S6). Two things are tested here and they are the row's two parts: the floor moves down instead of clamping (a), and
+// where it genuinely cannot move the world says so (b).
+//
+// The invariant that makes (a) safe is that **world space does not move**. The lattice frame shifts
+// and `mesh_chunk` subtracts the shift back out, so an undug column's surface is at the same metre
+// after a dig as before it -- and an undug world has a zero datum, which is why the five golden
+// hashes above are untouched by this shot rather than regenerated.
+
+use ecoview_native::voxel::{DEFAULT_DIG_LIMIT_M, DIG_ROOM_LEVELS};
+
+/// One `LowerGround` stroke as the viewer applies it: open room under the site if the lattice has
+/// run out, then act. `apply_edits` in `main.rs` is this pair, and the reason they are two calls is
+/// that opening room stales every chunk in the world, which `apply`'s per-chunk answer cannot say.
+fn dig(w: &mut VoxelWorld, x: usize, y: usize) -> bool {
+    let lifted = w.open_dig_room(x, y);
+    w.apply(x, y, EditAction::LowerGround);
+    lifted
+}
+
+/// The row's part (a): twelve strokes on low ground dig twelve strokes' worth.
+///
+/// This is the operator's own measurement, in the shape a test can hold: a site whose relief is a
+/// fraction of the hole being asked for. Before this shot the column below stopped at 0.00 m after
+/// one stroke and the remaining eleven did nothing.
+#[test]
+fn a_dig_goes_below_the_bundles_zero_instead_of_stopping_at_it() {
+    let mut w = VoxelWorld::from_bundle(&flat(16, 0.5, 0.5));
+    assert_eq!(w.datum_m(), 0.0, "nothing is dug, so there is no datum yet");
+    for _ in 0..12 {
+        dig(&mut w, 3, 3);
+    }
+    assert_eq!(
+        w.column(3, 3).unwrap().0,
+        -5.5,
+        "0.5 m of ground and twelve 0.5 m strokes is 5.5 m below the bundle's zero"
+    );
+    assert_eq!(
+        w.lowest_ground_m(),
+        -5.5,
+        "and it is the deepest thing on the site"
+    );
+    assert_eq!(
+        w.column(4, 3).unwrap().0,
+        0.5,
+        "the column beside it did not move"
+    );
+    // Two lifts, not twelve: room is opened a block of levels at a time on purpose, because opening
+    // it is a full remesh.
+    assert_eq!(w.datum_m(), 2.0 * DIG_ROOM_LEVELS as f32 * 0.5);
+}
+
+/// The row's part (b): where the world really cannot go deeper, it stops and it says so.
+///
+/// The floor is not the lattice's -- that one moves -- it is the simulator's `[bundle] base_z`, the
+/// soil it puts under the bundle's lowest ground. At that depth a column's surface layer is 0 and
+/// the exported world has nothing left to put under it.
+#[test]
+fn the_dig_floor_is_the_simulators_base_z_and_the_world_says_when_it_is_reached() {
+    let mut w = VoxelWorld::from_bundle(&flat(16, 0.5, 0.0));
+    assert_eq!(w.dig_limit_m(), DEFAULT_DIG_LIMIT_M);
+    assert_eq!(w.dig_room_m(3, 3), DEFAULT_DIG_LIMIT_M);
+    assert!(!w.at_dig_limit(3, 3));
+    for _ in 0..16 {
+        dig(&mut w, 3, 3);
+    }
+    assert_eq!(w.column(3, 3).unwrap().0, -DEFAULT_DIG_LIMIT_M);
+    assert_eq!(w.dig_room_m(3, 3), 0.0, "there is nothing left to dig");
+    assert!(
+        w.at_dig_limit(3, 3),
+        "and the HUD and BRP can both see that"
+    );
+    // The seventeenth stroke is refused rather than silently absorbed, which is the whole point:
+    // the old clamp was not wrong about what it could do, only silent about it.
+    dig(&mut w, 3, 3);
+    assert_eq!(w.column(3, 3).unwrap().0, -DEFAULT_DIG_LIMIT_M);
+    assert!(
+        !w.at_dig_limit(4, 3),
+        "the limit is per column, not per site"
+    );
+}
+
+/// The invariant that makes the moving floor safe: an undug column does not move in world space.
+///
+/// Everything the viewer shows outside the lattice -- the camera, the crosshair's ray, the HUD's
+/// metres, the meshes themselves -- is in the bundle's frame. If a dig shifted that frame, digging a
+/// pond in one corner would lift the whole site under the camera.
+#[test]
+fn opening_dig_room_leaves_every_undug_column_where_it_was_in_world_space() {
+    let bounds = |w: &VoxelWorld| {
+        let m = mesh_chunk(
+            w,
+            ChunkPos { x: 0, y: 0, z: 0 },
+            &surface_palette(),
+            &mut Scratch::new(),
+        );
+        let ys: Vec<f32> = m.positions.iter().map(|p| p[1]).collect();
+        (
+            ys.iter().copied().fold(f32::INFINITY, f32::min),
+            ys.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        )
+    };
+    let mut w = VoxelWorld::from_bundle(&flat(16, 0.5, 0.5));
+    let (floor_before, top_before) = bounds(&w);
+    assert_eq!((floor_before, top_before), (0.0, 1.0));
+    // Two strokes: the first fits inside the lattice, the second is the one that needs room.
+    assert!(!dig(&mut w, 0, 0), "0.5 m to 0.0 m needs no room");
+    assert!(dig(&mut w, 0, 0), "0.0 m to -0.5 m does");
+    let (floor_after, top_after) = bounds(&w);
+    assert_eq!(
+        top_after, top_before,
+        "the lawn is still one metre up, where it was"
+    );
+    assert_eq!(
+        floor_after,
+        -(DIG_ROOM_LEVELS as f32) * 0.5,
+        "and the world's underside is where the room was opened to"
+    );
+    assert_eq!(
+        w.column(5, 5).unwrap().0,
+        0.5,
+        "an untouched column reads the same height as before the dig"
+    );
+}
+
+/// A lift moves every voxel in the lattice, plants included, and they end up back where they were.
+///
+/// The plant buckets are keyed by chunk, so a lift cannot carry them over unchanged; re-bucketing is
+/// what `shift_plants` is for. Re-voxelising instead would also be correct and would throw away the
+/// trees a run put here until the next snapshot was applied.
+#[test]
+fn a_lift_carries_the_plant_voxels_up_with_the_ground() {
+    let mut b = flat(16, 0.5, 0.5);
+    b.trees.push(Tree {
+        x: 2.0,
+        y: 2.0,
+        height: 6.0,
+        crown_radius: 1.5,
+        crown_base: 2.0,
+    });
+    let mut w = VoxelWorld::from_bundle(&b);
+    // Through the chunk buffer, because that is where a plant voxel exists: `VoxelWorld::voxel`
+    // answers for the heightfield alone and `fill_chunk` lays the plants over it.
+    let trunk = |w: &VoxelWorld| -> Vec<usize> {
+        use ecoview_native::voxel::{CS_P, CS_P3, TRUNK};
+        let mut buf = vec![0u16; CS_P3];
+        w.fill_chunk(ChunkPos { x: 0, y: 0, z: 0 }, &mut buf);
+        // The buffer's axes are the mesher's: stride 1 north, CS_P east, CS_P^2 up, one cell of pad.
+        (0..w.levels)
+            .filter(|z| buf[(4 + 1) + (4 + 1) * CS_P + (z + 1) * CS_P * CS_P] == TRUNK)
+            .collect()
+    };
+    let before = trunk(&w);
+    assert!(!before.is_empty(), "the tree is standing on column (4, 4)");
+    assert!(!dig(&mut w, 0, 0));
+    assert!(dig(&mut w, 0, 0), "this is the stroke that lifts the world");
+    let after = trunk(&w);
+    assert_eq!(
+        after,
+        before
+            .iter()
+            .map(|z| z + DIG_ROOM_LEVELS)
+            .collect::<Vec<usize>>(),
+        "the trunk rose by exactly the lift, so in world space it did not move"
+    );
+}
+
+/// What goes out to `ecosim`: the bundle's frame, with the hole as a negative height.
+///
+/// Nothing about the bundle format changes to carry this. `ground_h.f32` is signed, and the
+/// simulator already puts `[bundle] base_z` layers of soil under the bundle's lowest ground -- the
+/// hole is what that soil is for. The lattice's own datum is the viewer's private business and must
+/// not leak into the file, or the same site would grow a different run after being dug and refilled.
+#[test]
+fn a_dug_site_exports_its_hole_as_a_negative_height() {
+    let b = flat(16, 0.5, 0.5);
+    let mut w = VoxelWorld::from_bundle(&b);
+    assert_eq!(w.ground_export(), b.ground_h, "undug, it is the bundle");
+    for _ in 0..3 {
+        dig(&mut w, 1, 1);
+    }
+    let out = w.ground_export();
+    assert_eq!(out[1 + 16], -1.0, "0.5 m less three 0.5 m strokes");
+    assert_eq!(out[5 + 16 * 5], 0.5, "and every other cell is untouched");
+    let dir = std::env::temp_dir().join("s6-export");
+    let _ = std::fs::remove_dir_all(&dir);
+    b.save(&dir, (&out, &w.medium, &w.building_h), "shot S6 test")
+        .unwrap();
+    let back = Bundle::load(&dir).unwrap();
+    assert_eq!(back.ground_h, out, "the negative height survives the file");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The depth limit is the run's number, not the viewer's, wherever the run states one.
+///
+/// Same rule as shot S4's plantable gate and shot S2's overlay ramps: the simulator owns it and the
+/// viewer adopts it when a run arrives. A run that does not state one leaves the fallback standing.
+#[test]
+fn the_dig_limit_comes_from_the_runs_meta_json() {
+    let mut w = VoxelWorld::from_bundle(&flat(16, 0.5, 0.5));
+    w.read_dig_limit(&meta_with_media("{}"));
+    assert_eq!(
+        w.dig_limit_m(),
+        DEFAULT_DIG_LIMIT_M,
+        "a run with no `bundle` object leaves the fallback alone"
+    );
+    assert!(
+        !w.dig_limit_from_run(),
+        "and the HUD must not credit that run with the number"
+    );
+    let run = Run::load(std::path::Path::new("../ecosim/fixtures/capitol-mini")).unwrap();
+    assert_eq!(
+        run.meta.base_z_m(),
+        Some(8.0),
+        "the committed reference run publishes its base_z"
+    );
+    w.read_dig_limit(&run.meta);
+    assert_eq!(w.dig_limit_m(), 8.0);
+    assert!(w.dig_limit_from_run(), "and this one is credited with it");
+}
+
+/// The regression sibling: a world nobody has dug is bit for bit the world V0 through V6 meshed.
+///
+/// The three goldens at the top of this file already say so, and this says *why* they still can: the
+/// datum is zero until an edit needs it, so `mesh_chunk`'s new term is `- 0.0` on every world that
+/// existed before this shot. Without the laziness those hashes would have had to be regenerated, and
+/// the continuity they carry from V0 would have been spent on a feature that did not need it.
+#[test]
+fn an_undug_world_still_meshes_to_the_bytes_it_always_did() {
+    let w = VoxelWorld::from_bundle(&flat(16, 0.5, 4.0));
+    assert_eq!(w.datum_m(), 0.0);
+    assert_eq!(mesh_one(&flat(16, 0.5, 4.0)).0, 0x7c23_841c_633d_3d9d);
 }

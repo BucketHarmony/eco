@@ -78,6 +78,17 @@ pub struct RunMeta {
     pub params: Params,
 }
 
+impl RunMeta {
+    /// How deep a hole this run's world can carry, in metres: `params.bundle.base_z`.
+    ///
+    /// `None` when the run predates the key or was written by a reader that left it out, and then
+    /// the viewer keeps its own fallback and says so, the way it does for every other number it has
+    /// to guess (shot S4). Since `ecosim` shot S2 every run at the defaults publishes it.
+    pub fn base_z_m(&self) -> Option<f32> {
+        self.params.bundle.base_z.map(f32::from)
+    }
+}
+
 /// One row of `meta.json`'s `species`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Species {
@@ -148,6 +159,11 @@ pub struct BundleParams {
     pub tree_mature_height: Option<f32>,
     pub tree_tall_height: Option<f32>,
     pub tree_tall_age_years: Option<f32>,
+    /// Ecology layers of soil the simulator puts under the bundle's **lowest** ground, so a column's
+    /// surface layer is `base_z + round(its mean height in metres)`. Shot S6 reads it as the depth a
+    /// hole may be dug to: at `base_z` metres below the bundle's zero the surface layer is 0 and the
+    /// exported world has nothing left underneath it.
+    pub base_z: Option<u8>,
 }
 
 /// One row of `params.medium`: what the simulator says a surface does.

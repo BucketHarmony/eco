@@ -512,8 +512,9 @@ fn the_scale_and_the_species_colours_come_from_meta_json() {
     // The union of the three species' temperature curves: shrub's -5 and grass's 35.
     let t = Scale::of(Overlay::Temperature, m);
     assert_eq!((t.lo, t.hi), (-5.0, 35.0));
-    // Twice the crowding disease threshold, and the fire duration, both as written in params.
-    assert_eq!(Scale::of(Overlay::Crowding, m).hi, 32.0);
+    // The fire duration, as written in params. Crowding used to be here too, at twice the disease
+    // threshold; shot S7 measured the field and moved it off the parameter, so it is checked below
+    // with the other scale this viewer owns.
     assert_eq!(Scale::of(Overlay::Fire, m).hi, 3.0);
     // Light and moisture are fractions because the file format says so, not by a choice made here.
     assert_eq!(Scale::of(Overlay::Light, m).hi, 1.0);
@@ -524,9 +525,11 @@ fn the_scale_and_the_species_colours_come_from_meta_json() {
     // there is no parameter in the run that says how deep a deep puddle is -- so shot S5 draws it
     // on a ramp of its own and says on screen that it did. That is the fallback machinery working,
     // not a hole in it, and the test asserts the fallback rather than skipping the overlay.
+    // Crowding joined water on the viewer's side of that line in shot S7, for the same reason and
+    // not a weaker one: `meta.json` publishes no number saying how many grazers a patch holds.
     for o in Overlay::ALL
         .into_iter()
-        .filter(|o| o.is_field() && *o != Overlay::Water)
+        .filter(|o| o.is_field() && *o != Overlay::Water && *o != Overlay::Crowding)
     {
         let s = Scale::of(o, m);
         assert!(s.from_meta(), "{}: {}", o.name(), s.source);
@@ -535,6 +538,11 @@ fn the_scale_and_the_species_colours_come_from_meta_json() {
     assert!(!w.from_meta(), "{}", w.source);
     assert!(w.source.contains("ponded depth"), "{}", w.source);
     assert_eq!((w.lo, w.hi), ecoview_native::overlay::WATER_RAMP_MM);
+    let c = Scale::of(Overlay::Crowding, m);
+    assert!(!c.from_meta(), "{}", c.source);
+    assert_eq!((c.lo, c.hi), ecoview_native::overlay::CROWDING_RAMP);
+    // And the threshold that used to be the ramp's top is still on the line, as a landmark.
+    assert!(c.source.contains("disease starts at 16"), "{}", c.source);
 
     let p = palette(Overlay::Surface, Some(m));
     assert_eq!(p[TRUNK as usize], linear_rgba("#112233"));
@@ -3146,4 +3154,249 @@ fn turning_the_year_over_one_tick_changes_the_leaves_and_nothing_else() {
         let next = SkyState::of(tick.with_day(Some(day + 7.0)), 42.7).mesh_key();
         assert_ne!(one, next, "a week from day {day} is a different step");
     }
+}
+
+// ---- shot S7: the animals fixture, and a crowding ramp taken off a measurement ----
+//
+// In this file for the reason every block above it is: CI runs exactly one test target.
+//
+// **Two halves of one row, and they are the same blind spot twice.** `ecosim` shot S1 committed
+// `fixtures/capitol-animals-mini` "so the viewer track stops testing against worlds with no
+// animals", and then nothing in this component opened it -- so every crowding field this viewer had
+// ever banded was still all zeros. That is the first half: these tests read the fixture.
+//
+// The second half is what reading it shows. V2 scaled the crowding overlay to
+// `2 x params.disease.grazer_threshold`, which is 32, and the field reaches **95** on this fixture
+// and **229** on `runs/s42` -- so the busiest patches, the ones the map exists to find, were one
+// flat colour. The scale is now measured over both runs and is logarithmic; `CROWDING_RAMP` carries
+// the distribution it was taken from.
+
+use ecoview_native::overlay::{crowding_band, CROWDING_RAMP};
+use ecoview_native::palette::CROWDING_EMPTY;
+
+/// The committed animals-on run. Before this shot **nothing in this component opened it**.
+const ANIMALS_FIXTURE: &str = "../ecosim/fixtures/capitol-animals-mini";
+/// Its animals-off sibling, which every other fixture test in this file uses. S1 kept the pair a
+/// pair on the `ecosim` side; this file keeps it one on the viewer's.
+const QUIET_FIXTURE: &str = "../ecosim/fixtures/capitol-mini";
+
+/// The scale V2 drew crowding on, rebuilt here so the two can be compared on one snapshot. It is
+/// not reachable from `Scale::of` any more, and the comparison below is the reason to keep its
+/// shape around for one test.
+fn v2_crowding_scale() -> Scale {
+    Scale {
+        lo: 0.0,
+        hi: 32.0,
+        unit: "grazers per patch",
+        source: "2 x params.disease.grazer_threshold".into(),
+    }
+}
+
+/// How many different bands a list of them holds.
+fn distinct(v: &[u8]) -> usize {
+    let mut s: Vec<u8> = v.to_vec();
+    s.sort_unstable();
+    s.dedup();
+    s.len()
+}
+
+/// The row's first half: this viewer opens the animals fixture and finds the animals in it.
+///
+/// Every number here is read off the committed bytes and matches what S1 recorded when it made
+/// them, which is the point -- a regeneration that quietly dropped the animal tier fails here, in
+/// the component that draws them, and not six shots later in a screenshot nobody can explain.
+#[test]
+fn the_viewer_reads_the_committed_animals_run() {
+    let run = Run::load(std::path::Path::new(ANIMALS_FIXTURE)).unwrap();
+    assert_eq!(run.snapshot_count(), 2);
+    assert_eq!((run.tick_at(0), run.tick_at(1)), (0, 2000));
+    let d = run.meta.dims;
+    assert_eq!((d.x, d.y, d.patch), (256, 256, 8));
+    assert_eq!(d.patch_count(), 1024);
+    assert!(
+        run.meta.world.is_some(),
+        "a format-4 run carrying a world/ is the only kind this viewer can open, which is why the \
+         20,000-tick strip run cannot stand in for this fixture"
+    );
+
+    let start = run.fields_at(0).unwrap();
+    let grown = run.fields_at(1).unwrap();
+    let total = |f: &Fields| f.grazers.iter().sum::<u32>();
+    let busiest = |f: &Fields| *f.grazers.iter().max().unwrap();
+    let occupied = |f: &Fields| f.grazers.iter().filter(|g| **g > 0).count();
+
+    assert_eq!(total(&start), 300, "the 300 grazers the parameters place");
+    assert_eq!((busiest(&start), occupied(&start)), (3, 251));
+    assert_eq!(total(&grown), 9204, "S1's count at tick 2000");
+    assert_eq!((busiest(&grown), occupied(&grown)), (95, 869));
+
+    // And the overlay reads them where they are: a patch's count is the value at every one of the
+    // 64 ecology columns it covers, which is what makes the patch grid visible on the picture.
+    let hot = grown
+        .grazers
+        .iter()
+        .position(|g| *g == 95)
+        .expect("the busiest patch");
+    let (px, _) = d.patch_grid();
+    let (cx, cy) = ((hot % px) * d.patch, (hot / px) * d.patch);
+    assert_eq!(grown.value(Overlay::Crowding, &d, cx, cy), 95.0);
+    assert_eq!(grown.value(Overlay::Crowding, &d, cx + 7, cy + 7), 95.0);
+}
+
+/// The regression sibling, on the other fixture: the animals-off run still has nobody on it, and
+/// this viewer draws every one of its patches in the empty band rather than the palest magenta.
+///
+/// S1 asserted the same fact about the same bytes from `ecosim`'s side. Asserting it here as well
+/// is not duplication: it is what stops a later shot "fixing" the pair by turning animals on in
+/// `capitol-mini`, which would move every pixel test in this component at once.
+#[test]
+fn the_animals_off_sibling_still_has_nobody_on_it() {
+    let run = Run::load(std::path::Path::new(QUIET_FIXTURE)).unwrap();
+    let d = run.meta.dims;
+    let f = run.fields_at(run.snapshot_count() - 1).unwrap();
+    assert_eq!(f.grazers.iter().sum::<u32>(), 0, "animals.enabled=false");
+    let s = Scale::of(Overlay::Crowding, &run.meta);
+    let (bands, stats) = f.bands(Overlay::Crowding, &d, &s);
+    assert_eq!((stats.min, stats.max, stats.mean), (0.0, 0.0, 0.0));
+    assert!(
+        bands.iter().all(|b| *b == CROWDING_EMPTY),
+        "an empty site is empty, not faintly crowded"
+    );
+}
+
+/// The row's second half, measured on the fixture rather than argued: the ramp no longer flattens
+/// the patches the map exists to show.
+///
+/// The old scale put everything from 32 grazers up in one band, and on this snapshot that is five
+/// patches spanning 32 to 95 -- a factor of three, drawn in one colour, at the top of the range.
+/// The new ramp separates them and leaves headroom above the busiest patch this run ever had.
+#[test]
+fn the_crowding_ramp_no_longer_flattens_the_patches_it_exists_to_show() {
+    let run = Run::load(std::path::Path::new(ANIMALS_FIXTURE)).unwrap();
+    let d = run.meta.dims;
+    let f = run.fields_at(1).unwrap();
+    let old = v2_crowding_scale();
+    let new = Scale::of(Overlay::Crowding, &run.meta);
+    assert_eq!((new.lo, new.hi), CROWDING_RAMP);
+
+    let clamped: Vec<u32> = f.grazers.iter().copied().filter(|g| *g >= 32).collect();
+    assert_eq!(clamped.len(), 5, "five patches at or over the old top");
+    assert_eq!(
+        (
+            *clamped.iter().min().unwrap(),
+            *clamped.iter().max().unwrap()
+        ),
+        (32, 95)
+    );
+    for g in &clamped {
+        assert_eq!(
+            band_of(*g as f32, &old),
+            (BANDS - 1) as u8,
+            "all one colour"
+        );
+    }
+    let spread: Vec<u8> = clamped
+        .iter()
+        .map(|g| crowding_band(*g as f32, &new))
+        .collect();
+    assert!(
+        spread.iter().max().unwrap() - spread.iter().min().unwrap() >= 3,
+        "the five spread up the ramp instead of stacking on its end: {spread:?}"
+    );
+    assert!(
+        spread.iter().all(|b| *b < (BANDS - 1) as u8),
+        "and none is at the top, so a busier run still has somewhere to go: {spread:?}"
+    );
+
+    // The cost, asserted rather than hidden: a log ramp spends bands on the top of the range, so
+    // the bulk loses separation. On this snapshot 27 distinct bands become 18 -- and neighbouring
+    // bands are already below what the eye separates on a lit surface (DECISIONS.md, V2), while
+    // 32-against-95 was not.
+    let old_bands: Vec<u8> = f.grazers.iter().map(|g| band_of(*g as f32, &old)).collect();
+    let (bands, stats) = f.bands(Overlay::Crowding, &d, &new);
+    assert_eq!(distinct(&old_bands), 27);
+    let new_bands: Vec<u8> = f
+        .grazers
+        .iter()
+        .map(|g| crowding_band(*g as f32, &new))
+        .collect();
+    assert_eq!(distinct(&new_bands), 18);
+    // The field itself is untouched by any of this: the scale is a drawing, not a reading.
+    assert_eq!((stats.min, stats.max), (0.0, 95.0));
+    assert_eq!(bands.len(), d.columns());
+}
+
+/// An empty patch is a fact, not a small number, and it gets its own band.
+///
+/// Crowding's ramp runs from white, so before this shot a patch holding one grazer and a patch
+/// holding none were the same white: the map could not be read for where the animals were *not*.
+/// This is the shape water's dry ground and fire's quiet ground already had.
+#[test]
+fn an_empty_patch_is_its_own_band_and_one_grazer_is_not() {
+    let s = Scale::of(Overlay::Crowding, &RunMeta::default());
+    assert_eq!(crowding_band(0.0, &s), CROWDING_EMPTY);
+    assert_eq!(crowding_band(1.0, &s), CROWDING_EMPTY + 1);
+    let p = palette(Overlay::Crowding, None);
+    assert_ne!(
+        p[ID_COUNT + CROWDING_EMPTY as usize],
+        p[ID_COUNT + CROWDING_EMPTY as usize + 1],
+        "nobody here and one grazer here are different colours"
+    );
+    // The same neutral dry ground is drawn in, which is the whole reason it reads as "nothing".
+    assert_eq!(
+        p[ID_COUNT + CROWDING_EMPTY as usize],
+        palette(Overlay::Water, None)[ID_COUNT + WATER_DRY as usize]
+    );
+    // The ramp above it still reaches the ramp's top colour, so the legend strip is not truncated.
+    // Within a float's last bit: the band is `lerp`'d to 1.0 and the hex is converted directly.
+    let top = linear_rgba(Overlay::Crowding.ramp(None).hi.as_str());
+    for c in 0..4 {
+        assert!(
+            (p[ID_COUNT + BANDS - 1][c] - top[c]).abs() < 1e-6,
+            "channel {c}: {:?} against {top:?}",
+            p[ID_COUNT + BANDS - 1]
+        );
+    }
+}
+
+/// The ramp is log2, so every doubling is the same distance up it, and it is monotone.
+///
+/// This is the property that makes the picture readable: two patches four bands apart hold about
+/// twice as many grazers wherever on the map they are, which a linear ramp with a clamp on its end
+/// cannot promise.
+#[test]
+fn a_doubling_of_grazers_is_a_fixed_step_up_the_crowding_ramp() {
+    let s = Scale::of(Overlay::Crowding, &RunMeta::default());
+    assert_eq!((s.lo, s.hi), CROWDING_RAMP, "even with no params at all");
+    let step = |n: f32| crowding_band(n, &s) as i32;
+    // Eight doublings over the thirty bands above the empty one is 3.75 bands a doubling, and a
+    // band is an integer: so each doubling is 3 or 4 bands and the eight together are exactly the
+    // ramp. Asserting the total as well as the steps is what makes this a log scale rather than
+    // eight arbitrary jumps that happen to be small.
+    let mut last = step(1.0);
+    assert_eq!(last, CROWDING_EMPTY as i32 + 1);
+    for k in 1..=8 {
+        let b = step((1u32 << k) as f32);
+        assert!(
+            (3..=4).contains(&(b - last)),
+            "doubling to 2^{k} moved {} bands",
+            b - last
+        );
+        last = b;
+    }
+    assert_eq!(last - step(1.0), (BANDS - 2) as i32, "the whole ramp, once");
+    assert_eq!(
+        step(256.0),
+        (BANDS - 1) as i32,
+        "eight doublings is the top"
+    );
+    // Monotone, and clamped rather than wrapped past the end.
+    let mut prev = 0;
+    for n in 0..=600 {
+        let b = step(n as f32);
+        assert!(b >= prev, "the band fell at {n}");
+        assert!(b <= (BANDS - 1) as i32);
+        prev = b;
+    }
+    assert_eq!(step(1_000_000.0), (BANDS - 1) as i32);
 }

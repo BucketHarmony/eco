@@ -232,6 +232,17 @@ pub const FIRE_BURNT: u8 = 1;
 const FIRE_QUIET_HEX: &str = "#5a5f52";
 const FIRE_BURNT_HEX: &str = "#2b2b2b";
 
+/// Crowding's band 0: a patch with **nobody on it**, off the ramp (shot S7,
+/// [`crate::overlay::crowding_band`]).
+///
+/// The third overlay to need one of these, and the reason is the first two's: crowding's ramp runs
+/// from white, so an empty patch and a patch holding one grazer were the same white before this
+/// shot, and the map could not be read for where the animals were not.
+pub const CROWDING_EMPTY: u8 = 0;
+/// The same neutral [`WATER_DRY`] is drawn in, on purpose: both bands mean "the simulator put
+/// nothing here", and a reader who has learnt one map reads the other without being told.
+const CROWDING_EMPTY_HEX: &str = WATER_DRY_HEX;
+
 /// sRGB channel to linear, the conversion Bevy's `LinearRgba` vertex colours want.
 fn to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
@@ -317,6 +328,16 @@ pub fn palette(overlay: Overlay, meta: Option<&RunMeta>) -> Vec<[f32; 4]> {
             out[ID_COUNT + b] = lerp(lo, hi, (b - first) as f32 / (BANDS - first - 1) as f32);
         }
         out[ID_COUNT + WATER_DRY as usize] = linear_rgba(WATER_DRY_HEX);
+    }
+    if overlay == Overlay::Crowding {
+        // Water's shape again, and for the same reason: band 0 is a categorical "nobody here" and
+        // the ramp starts above it, so one grazer on a patch is already the palest magenta rather
+        // than the white an empty patch is drawn in (shot S7).
+        let first = CROWDING_EMPTY as usize + 1;
+        for b in first..BANDS {
+            out[ID_COUNT + b] = lerp(lo, hi, (b - first) as f32 / (BANDS - first - 1) as f32);
+        }
+        out[ID_COUNT + CROWDING_EMPTY as usize] = linear_rgba(CROWDING_EMPTY_HEX);
     }
     if overlay == Overlay::Fire {
         // Fire's ramp covers the burning bands only, so a patch with one tick left is already dull

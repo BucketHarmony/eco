@@ -1517,3 +1517,133 @@ The **hour** is still a key and a flag and is still the viewer's; nothing here t
 held date does **not** reach the overlays: an overlay band is a number the simulator published at
 that tick, and no date the viewer holds changes one. The test asserts that on the palette, which is
 where it would leak if it ever did.
+
+# S7 -- the animals fixture, and a crowding ramp taken off a measurement
+
+Backlog row S7, no prompt file: the row is the specification. Everything below is measured on this
+machine (12th Gen Intel i9-12900KF, 16 cores / 24 threads, RTX 4090) unless it says otherwise.
+
+## What the crowding field actually holds
+
+Counted the way the viewer counts it -- one grazer per `entities.json` row of kind `grazer`, floored
+to a column, summed per patch -- over every snapshot of every run in the repo that has the animal
+tier on. Patches are 8 x 8 columns, so a patch is 64 m<sup>2</sup> on both worlds.
+
+| Run | Snapshots | Patches | Occupied | Median occupied | p90 | p99 | Busiest |
+|---|---|---|---|---|---|---|---|
+| `fixtures/capitol-animals-mini` @ 0 | 1 | 1024 | 251 | 1 | 2 | 2 | **3** |
+| `fixtures/capitol-animals-mini` @ 2000 | 1 | 1024 | 869 | 10 | 15 | 28 | **95** |
+| `runs/capitol-s42-animals`, 2,000 ticks | 11 | 1024 | 251-869 | 5 | 11 | 18 | **95** |
+| `runs/s42`, 20,000 ticks, the strip | 201 | 256 | 165-254 | 9 | 18 | 63 | **229** |
+
+Two readings out of that table.
+
+**The field spans an empty patch to better than two hundred, and its middle sits at ten.** V2's top
+of `2 x params.disease.grazer_threshold` = 32 is between the p99 and the maximum -- not an absurd
+number, and not one the field respects.
+
+**The strip run has had animals on since shot 1.** So the field was never unobserved; it was
+unopenable. This viewer requires a run carrying a `world/` bundle and `runs/s42` is format 3. That is
+the narrow version of the blind spot, and it is the row's own.
+
+## What the old scale did to the top of the field, on the committed fixture
+
+The five patches at or over the old top, at tick 2000:
+
+| Grazers | Old band (linear 0-32) | New band (log2 1-256) |
+|---|---|---|
+| 32 | 31 | 20 |
+| 34 | 31 | 20 |
+| 35 | 31 | 20 |
+| 73 | 31 | 24 |
+| 95 | 31 | **26** |
+
+Five patches spanning a factor of three, drawn in one colour. The new ramp separates 32 from 73 from
+95 and leaves five bands of headroom above the busiest patch this run ever had; 32, 34 and 35 still
+share a band, which is a log scale being right about three numbers within 10% of each other rather
+than the clamp coming back.
+
+And what it costs in the bulk, on the same snapshot: **27 distinct bands become 18**. The median
+occupied patch moves from band 10 to band 13, the p90 from 15 to 16 and the p99 from 28 to 19.
+Neighbouring bands are already below what the eye separates on a lit surface (DECISIONS.md, V2),
+while 32-against-95 was not, which is the whole trade.
+
+## The screenshots
+
+Seven, all 1280 x 800. Six are crowding on the animals fixture in **three matched pairs** -- same
+camera, same snapshot, same flags, one frame per scale. The old-scale halves were rendered by
+stashing `src/overlay.rs` and `src/palette.rs`, rebuilding and running the viewer, so both sides of
+every pair are real frames from real code rather than an argument about what the old one drew.
+
+The two top-down pairs use `--no-sky --no-ao` so the colour on a top face is the band and nothing
+else. One line each, written after looking at them:
+
+| File | Verdict |
+|---|---|
+| `s7-crowding-old-scale.png` | The default camera at tick 2000 on the old scale: a pale pink site with two or three hard magenta squares in the half of it the HUD leaves visible, and the HUD line `scale from 2 x params.disease.grazer_threshold` with no `(!)`. |
+| `s7-crowding.png` | The same frame on the new one: the site carries a mid-pink with the patch grid legible across it, the hot patches are still the hot patches, and the legend now reads `1.00 to 256.00 grazers per patch, log2`. |
+| `s7-crowding-top-old-scale.png` | Top-down, flat-lit, tick 2000, old scale: nearly white over most of the site with about a dozen strong squares in it -- five of those are the clamp itself and the other eight are within a band or two of it, while everything between 5 and 15 grazers is the same near-white. |
+| `s7-crowding-top.png` | The same frame on the new scale: the whole patch grid is shaded, the busiest patches are darker than their neighbours instead of being the only thing on the map. 19.0% of the frame differs from its pair by more than 8/255. |
+| `s7-crowding-t0-old-scale.png` | **The clearest picture in the set.** Tick 0, 251 of 1024 patches occupied, and the site is one flat white: 1 grazer and 0 grazers are the same colour, so the map shows nothing at all. |
+| `s7-crowding-t0.png` | The same tick with an empty band: 251 white patches scattered over grey-green ground, which is a legible occupancy map. 45.7% of the frame changes. |
+| `s7-agent-loop.png` | The agent gate's own capture, unchanged in kind from V8's: the gate never opens the crowding overlay, and it is here to show that a viewer carrying a new band still answers an agent that never asks for it. |
+
+## The gates
+
+| Gate | Result |
+|---|---|
+| `cargo test --release --no-default-features --test mesh_golden` (the CI gate) | **88 pass**, V8's 83 plus five; 12 s including compile |
+| `cargo test --release` | 88 pass |
+| `cargo fmt --check` | clean |
+| `cargo clippy --all-targets` | the same three pre-existing `src/bundle.rs` findings S4, S5, S6 and V8 recorded, no new one and no `#[allow]` added |
+| `cargo doc --no-deps` | the same three pre-existing private-link warnings, no new one |
+| `cargo build --release` | clean, 22.7 s |
+| `agent_loop --run ../ecosim/runs/capitol-s42 --out shots/s7-agent-loop.png` | **PASS**, 18 calls, 0 retries, 5.0 s to the first screenshot, 1,645,758 bytes read back |
+
+The five new tests:
+
+- `the_viewer_reads_the_committed_animals_run` -- the row's first half. Opens the fixture, checks its
+  two snapshots and its dims, and asserts S1's counts off the committed bytes: 300 grazers over 251
+  patches at tick 0, 9,204 over 869 at tick 2000, busiest 95, and a patch's count read at every one
+  of the 64 columns it covers.
+- `the_animals_off_sibling_still_has_nobody_on_it` -- the regression sibling. `capitol-mini` holds no
+  grazer and every patch of it draws in the empty band, so the pair S1 made stays a pair.
+- `the_crowding_ramp_no_longer_flattens_the_patches_it_exists_to_show` -- the row's second half,
+  measured on the fixture: the five clamped patches were all band 31, they now spread at least three
+  bands and none of them is at the top; and the cost, 27 distinct bands to 18, asserted rather than
+  described.
+- `an_empty_patch_is_its_own_band_and_one_grazer_is_not` -- the categorical band, its colour, and
+  that the ramp above it still reaches the ramp's top hue so the legend strip is not truncated.
+- `a_doubling_of_grazers_is_a_fixed_step_up_the_crowding_ramp` -- the log property. Each doubling
+  moves 3 or 4 bands (30 bands over 8 doublings is 3.75, and a band is an integer) and the eight
+  together are exactly the ramp; monotone over 0-600 and clamped, not wrapped, past the end.
+
+## Line budget
+
+`git diff --stat 84dbba6 -- ecoview-native/` is **579 insertions and 27 deletions, 552 net against
+the row's 1,500** -- 948 to spare, with both write-ups in it (this paragraph included, which is why
+it was written last). The code is `tests/mesh_golden.rs` 256 against 3 deleted, `src/overlay.rs` 80
+against 24, and `src/palette.rs` 21: **256 test and 101 non-test** insertions. The prose is
+DECISIONS.md 92 and this file 130. The seven PNGs are binary and count nothing.
+
+Nothing outside `ecoview-native/` is touched -- no `ecosim/`, no `ecoview/`, no `CLAUDE.md`, no
+workflow, and no run directory or fixture regenerated. `ecosim/fixtures/capitol-animals-mini` is
+**read** by two tests and five screenshots and is not modified by any of them, which is the row.
+
+## What this shot did not do
+
+Three things a reader of the row might expect and will not find.
+
+**`meta.json` still carries no crowding scale**, so the viewer's number is marked `(!)` on the HUD
+every frame it is on the screen. Publishing one is an `ecosim` row and an `ecoview-native` shot may
+not write it (MASTER.md, component isolation). If a later `ecosim` shot adds an
+`overlays.crowding.hi` or a `params.animals.patch_capacity`, `Scale::of` should read it and this
+constant should become the fallback -- the machinery for that is already here and water is in the
+same position.
+
+**Nothing was copied into `ecoview/public/`** and `scripts/sync-data.sh` is untouched, for the
+reason S1 gave and for one more: `ecoview` is frozen and this shot may not edit it.
+
+**No animal is drawn.** Crowding is a patch field the simulator publishes, and this shot bands it;
+there is no grazer geometry in this viewer and this row did not ask for any. A picture of the
+crowding overlay is a map of where the animals are, not a picture of animals.

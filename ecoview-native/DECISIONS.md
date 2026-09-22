@@ -1062,3 +1062,95 @@ that macro past the default recursion limit. The compiler's own suggestion is
 `#![recursion_limit = "256"]`; the `sky` object was lifted into `sky_json` instead. A crate-wide
 knob raised to make one function compile is the kind of thing that is never lowered again, and the
 object was the largest thing in that macro anyway.
+
+# S7 -- the animals fixture, and a crowding ramp taken off a measurement
+
+Backlog row S7, no prompt file: the row is the specification. It has two halves and they are the
+same blind spot twice -- `ecosim` shot S1 committed an animals-on world so the viewer track would
+stop testing against worlds with nobody in them, and then nothing in this component opened it.
+
+## S7 the fixture is opened here, not only in `ecosim`
+
+S1 committed `ecosim/fixtures/capitol-animals-mini/` and pinned it with two `ecosim` tests, which is
+all an `ecosim` row may do. The row's stated purpose was the viewer's, though, and until this shot
+`ecoview-native` had no test, no screenshot and no line of any kind that touched it: every crowding
+field this viewer had ever banded was all zeros, on `capitol-mini` or on `runs/capitol-s42`, because
+every bundle-world run carries `--set animals.enabled=false` (`ecosim` DECISIONS, shot G3a).
+
+So `the_viewer_reads_the_committed_animals_run` opens it and asserts the counts S1 recorded off the
+same bytes -- 300 grazers over 251 patches at tick 0, 9,204 over 869 at tick 2000, busiest 95 -- and
+five of the six screenshots in this shot are taken on it.
+
+**The pair stays a pair.** `the_animals_off_sibling_still_has_nobody_on_it` asserts that
+`capitol-mini` still holds no grazer and that every one of its patches draws in the empty band. S1
+asserts the same fact from `ecosim`'s side; this is not duplication, it is what stops a later shot
+"fixing" the pair by turning animals on in `capitol-mini`, which would move every picture in this
+component at once.
+
+**Why the strip run cannot stand in for the fixture.** `runs/s42` has had animals on since shot 1 and
+it reaches 229 grazers on a patch, so the field was never unobserved -- it was unopenable. This
+viewer requires a `world/` bundle and `runs/s42` is format 3. That is a narrower explanation of the
+blind spot than "no world has animals", and it is the row's own reading.
+
+## S7 the crowding ramp is measured, and it is logarithmic
+
+V2 set crowding's top to `2 x params.disease.grazer_threshold`, which is 32. Measured on every run
+with the animal tier on: the fixture's busiest patch holds **95** and `runs/s42` reaches **229**, so
+everything from 32 up was one flat colour -- and on the fixture that is 32, 34, 35, 73 and 95 drawn
+identically, at the top of the range, which is precisely the population the map exists to find.
+
+A disease threshold is a statement about one animal's health. It says where the simulator starts
+killing grazers for crowding; it says nothing about how many this viewer will be asked to draw, and
+the two turned out to differ by nearly a decade. So the ramp comes off the field now:
+`CROWDING_RAMP = (1.0, 256.0)`, **log2**, eight doublings over the thirty bands above the empty one.
+
+- **256** is the first power of two above the largest patch count ever measured, which is the
+  strip's 229. A rule, so the next shot to measure a bigger one knows what to do with it.
+- **Log, for the reason S5's water ramp is log.** The field's median occupied patch holds 9 or 10
+  and its maximum is 229: a linear ramp to 32 clamps the top and a linear ramp to 229 puts the
+  median in band 1 of 32 and draws a busy site as an empty one.
+- **Still not the data's own range.** "V2 the scale is the simulator's range, never the data's" is
+  untouched: these are fixed constants, the same in every snapshot of every run, chosen once from a
+  distribution and written down with it. A ramp stretched to each snapshot's own maximum is the
+  thing both that decision and this one refuse.
+
+**The cost is stated and asserted.** A log ramp spends bands on the top of the range, so the bulk
+loses separation: on the fixture's tick 2000, 27 distinct bands become 18, and 32, 34 and 35 now
+share a band. That is the scale being right rather than the clamp coming back -- those three are
+within 10% of each other -- and neighbouring bands are already below what the eye separates on a lit
+surface (V2, above), while 32-against-95 was not.
+`the_crowding_ramp_no_longer_flattens_the_patches_it_exists_to_show` asserts both halves of that
+trade, so a later shot that tries to widen the ramp sees what it is spending.
+
+## S7 the scale is the viewer's, and the HUD says so
+
+Crowding's `Scale::source` now reads `this viewer's fallback: meta.json has no scale for grazers per
+patch (log2 1-256, measured); disease starts at 16`, and the HUD marks the line `(!)`, which is the
+machinery V2 built for exactly this. `meta.json` publishes no number saying how many grazers a patch
+holds -- there is no such parameter -- so crowding joins standing water on the viewer's side of that
+line, for the same reason and not a weaker one.
+
+**The threshold stays on the line as a landmark.** It is a true and useful fact about the ramp --
+above 16 the simulator is killing grazers on that patch -- and printing it beside the range costs
+nothing, where letting it *decide* the range cost the top decade of the field. That is the only
+surviving use of `disease.grazer_threshold` in this viewer.
+
+## S7 an empty patch is its own band
+
+Crowding's ramp runs from white, so before this shot a patch holding one grazer and a patch holding
+nobody were the same white: at tick 0, with 251 of 1024 patches occupied, the map drew one flat white
+site. `CROWDING_EMPTY` is band 0, off the ramp, with the ramp starting above it -- the third overlay
+to take this shape, after fire's quiet ground and water's dry ground.
+
+It is drawn in the same neutral `WATER_DRY` uses, on purpose: both bands mean "the simulator put
+nothing here", and a reader who has learnt one map reads the other without being told. The two
+tick-0 frames in `shots/` are the whole argument -- 45.7% of that frame changes.
+
+## S7 nothing was copied into `ecoview/public/`
+
+The row offered `sync-data.sh` as one of the three things that could point at the fixture. It is
+still the wrong one, for the reason S1 gave: `ecoview` is frozen, this component opens
+`../ecosim/...` paths directly, and syncing without committing the 22 MB copy would leave it
+untracked beside tracked siblings. An `ecoview-native` shot may not edit `ecoview/` in any case
+(MASTER.md, component isolation). The test and the screenshots are the two halves that were
+available, and they are the two the row asked for first.

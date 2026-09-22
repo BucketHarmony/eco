@@ -2,13 +2,15 @@
 //!
 //! Shot V2. The six overlays -- light, moisture, fertility, temperature, crowding and fire -- are
 //! the fields `ecosim` already writes every snapshot, so nothing here computes ecology. It reads,
-//! scales and bands. **Every number in a scale comes from the run's own `meta.json`**, and where the
-//! file does not carry one the [`Scale`] says so in words rather than substituting a constant
-//! silently (DECISIONS.md, "V2: what meta.json owns and what it does not").
+//! scales and bands. **Every number in a scale that the run publishes comes from the run's own
+//! `meta.json`**, and where the file does not carry one the [`Scale`] says so in words rather than
+//! substituting a constant silently (DECISIONS.md, "V2: what meta.json owns and what it does not").
+//! Two scales are the viewer's because there is no number in the run to read: standing water's
+//! depth ramp (S5) and, since shot S7, crowding's -- see [`CROWDING_RAMP`].
 //!
 //! Like the rest of the library half this module never mentions Bevy.
 
-use crate::palette::{Overlay, BANDS, FIRE_BURNT, FIRE_QUIET, WATER_DRY};
+use crate::palette::{Overlay, BANDS, CROWDING_EMPTY, FIRE_BURNT, FIRE_QUIET, WATER_DRY};
 use crate::run::{Dims, Params, Run, RunMeta};
 use serde::Deserialize;
 use std::io;
@@ -95,11 +97,23 @@ pub struct Scale {
 /// `ecoview/src/world.ts`'s constants, so a run too old to state its own scale is drawn the way the
 /// browser viewer draws it rather than in some third way.
 const FALLBACK_TEMP: (f32, f32) = (0.0, 30.0);
-const FALLBACK_CROWDING_FULL: f32 = 32.0;
 const FALLBACK_FIRE_DURATION: f32 = 3.0;
 
 fn viewer_fallback(what: &str) -> String {
     format!("this viewer's fallback: meta.json has no {what}")
+}
+
+/// Crowding's scale line: whose the ramp is, and where on it the simulator starts killing grazers.
+///
+/// The second clause is the only surviving use of `disease.grazer_threshold` in this viewer. It is a
+/// landmark and not a bound, so it is written where a reader can see both at once rather than
+/// silently deciding the ramp.
+fn crowding_source(p: &Params) -> String {
+    let mut s = viewer_fallback("scale for grazers per patch (log2 1-256, measured)");
+    if let Some(t) = p.disease.grazer_threshold {
+        s.push_str(&format!("; disease starts at {t:.0}"));
+    }
+    s
 }
 
 /// `water.bin` is ponded depth in tenths of a millimetre (CLAUDE.md, the run directory contract).
@@ -124,6 +138,30 @@ pub const WATER_RAMP_MM: (f32, f32) = (1.0, 10_000.0);
 /// line this viewer draws between the two -- the viewer's, not the run's, and the HUD prints both
 /// counts so the difference is never hidden (DECISIONS.md, S5).
 pub const POND_MIN_MM: f32 = 5.0;
+
+/// The two ends of the crowding overlay's ramp, in grazers standing on one patch, and they are
+/// **log2**. Shot S7 -- the number used to be `2 x params.disease.grazer_threshold`, which is 32.
+///
+/// A disease threshold is a statement about one animal's health, not about how many animals a
+/// viewer will be asked to draw, and the two turned out to differ by nearly a decade. Measured over
+/// every snapshot of every committed or reference run that has the animal tier on:
+/// `ecosim/fixtures/capitol-animals-mini` at tick 2000 holds 9,204 grazers over 869 occupied
+/// patches, median **10**, ninetieth percentile 15, ninety-ninth **28** and busiest **95**;
+/// `runs/s42`, the 20,000-tick strip, runs 201 snapshots with a median of 9 and reaches **229** on
+/// one patch at tick 12000. So the field spans an empty patch to better than two hundred, and its
+/// middle sits at ten.
+///
+/// A linear ramp fits neither end. To 32 the busiest patches clamp -- 0.6% of the occupied patches
+/// on the fixture and 3.6% on the strip, which sounds small and is exactly the population the
+/// overlay exists to find. To 229 the median lands in band 1 of 32 and the site is drawn empty.
+/// Eight doublings of log2 carry the whole span at 3.75 bands a doubling, and they are the same
+/// eight doublings in every snapshot of every run, which a ramp taken from each snapshot's own
+/// maximum would not be (DECISIONS.md, "V2 the scale is the simulator's range, never the data's").
+///
+/// 256 is the first power of two above the largest patch count ever measured, which is the strip's
+/// 229. 1 is the smallest patch that holds anybody; an empty patch is [`CROWDING_EMPTY`], off the
+/// ramp, the way dry ground is off the water ramp.
+pub const CROWDING_RAMP: (f32, f32) = (1.0, 256.0);
 
 /// The byte `light.bin` uses for full sun (ecosim/UNITS.md, 3.6). Named because shot V3 reads the
 /// same file at a crown's level (`run.rs`, `CrownLight`) and the two must divide by the same number.
@@ -171,21 +209,16 @@ impl Scale {
                     source: viewer_fallback("species temp curves"),
                 },
             },
-            // Twice the threshold at which crowding disease starts, which is `ecoview`'s rule for
-            // the same overlay -- but read from the run instead of written into the viewer.
-            Overlay::Crowding => match p.disease.grazer_threshold {
-                Some(t) => Scale {
-                    lo: 0.0,
-                    hi: 2.0 * t,
-                    unit: "grazers per patch",
-                    source: "2 x params.disease.grazer_threshold".into(),
-                },
-                None => Scale {
-                    lo: 0.0,
-                    hi: FALLBACK_CROWDING_FULL,
-                    unit: "grazers per patch",
-                    source: viewer_fallback("disease.grazer_threshold"),
-                },
+            // Measured, not parameterised: see [`CROWDING_RAMP`] for the distribution and shot S7
+            // for why the disease threshold stopped being the top of this ramp. `meta.json` carries
+            // no scale for how many grazers a patch holds, so this says whose number it is, in the
+            // same words the water ramp uses -- and it still names the threshold, because "where
+            // disease starts" is a true and useful mark on a scale even when it is not its end.
+            Overlay::Crowding => Scale {
+                lo: CROWDING_RAMP.0,
+                hi: CROWDING_RAMP.1,
+                unit: "grazers per patch, log2",
+                source: crowding_source(p),
             },
             Overlay::Fire => match p.fire.duration {
                 Some(d) => Scale {
@@ -380,6 +413,27 @@ impl Run {
     }
 }
 
+/// The band one patch's grazer count falls in: 0 for an empty patch, and a log2 ramp above it.
+///
+/// Empty is exactly zero, the way dry ground is in [`water_band`]: nobody standing on a patch is not
+/// a small amount of crowding, it is a different fact, and on a white-to-magenta ramp the palest
+/// band and an empty patch would otherwise be the same colour. Above it the ramp is the eight
+/// doublings of [`CROWDING_RAMP`].
+pub fn crowding_band(n: f32, s: &Scale) -> u8 {
+    if n <= 0.0 {
+        return CROWDING_EMPTY;
+    }
+    let first = CROWDING_EMPTY as usize + 1;
+    let span = (BANDS - first - 1) as f32;
+    let (lo, hi) = (s.lo.max(1.0), s.hi);
+    let t = if hi > lo {
+        (n.max(lo).log2() - lo.log2()) / (hi.log2() - lo.log2())
+    } else {
+        1.0
+    };
+    (first + (t.clamp(0.0, 1.0) * span).round() as usize).min(BANDS - 1) as u8
+}
+
 /// The band a value falls in, clamped at both ends. The top of the range is the last band, not one
 /// past it.
 pub fn band_of(v: f32, s: &Scale) -> u8 {
@@ -424,10 +478,12 @@ impl Fields {
                 min = min.min(v);
                 max = max.max(v);
                 sum += v as f64;
-                out[x + d.x * y] = if o == Overlay::Fire {
-                    self.fire_band(d, x, y, s)
-                } else {
-                    band_of(v, s)
+                out[x + d.x * y] = match o {
+                    Overlay::Fire => self.fire_band(d, x, y, s),
+                    // Crowding is the third overlay with a categorical bottom band and a ramp above
+                    // it, and it is log (shot S7, [`crowding_band`]).
+                    Overlay::Crowding => crowding_band(v, s),
+                    _ => band_of(v, s),
                 };
             }
         }

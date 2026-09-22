@@ -14,6 +14,7 @@
 //! | latitude | `--lat`, default [`DEFAULT_LATITUDE_DEG`] | the viewer's -- no bundle or run carries one |
 //! | sun elevation and azimuth | the standard solar geometry below, from those three | derived |
 //! | leaf and grass colour | the base hue is `meta.json`'s species colour; the seasonal departure from it is this module's | both, and the HUD says which is which |
+//! | the eye's exposure | how much of the ground is under a crown, against [`SHADE_FLOOR`]; `--exposure` and the **-**, **=** and **0** keys override it | the viewer's, and the HUD says so |
 //!
 //! **The hour is deliberately not taken from the tick**, although it could be: a tick is
 //! `8766 / year_len` hours (`ecosim/UNITS.md`), so tick 100 really is 219.15 hours into the run and
@@ -629,6 +630,54 @@ impl SkyState {
         }
     }
 
+    /// The eye's adaptation, from how much of the ground is under a crown (shot V7).
+    ///
+    /// **This is the one thing in this module that changes what a surface receives**, and it is
+    /// still expression: it moves an engine light, not a field, and no run has an ambient level in
+    /// it to contradict. The reason it exists is that V6 turned shadow maps on, and from that shot
+    /// on a shadowed surface got `ambient / (ambient + sun)` of a lit one -- about a thirteenth at
+    /// the default hour -- where V5 gave it everything. That ratio is right for the sun and wrong
+    /// for the eye, which opens up when it walks under a canopy. Nothing was offered to close the
+    /// gap but **O**, which takes the whole beauty pass away.
+    ///
+    /// So: pick the ambient level that would put a shadowed surface at [`SHADE_FLOOR`] of a lit
+    /// one, and take `closure` of the way there. An open site moves by nothing at all, which is
+    /// what keeps every frame V6 through V8 took where it was; a site whose ground is entirely
+    /// under leaves gets the full two stops. The sun's own level is never touched, so lit ground
+    /// stays where the sun put it apart from the ambient it also receives.
+    ///
+    /// `manual` overrides the measurement outright with a number of stops, because a measurement
+    /// good enough to default to is not a measurement anybody should be stuck with.
+    pub fn adapt(&self, closure: f32, manual: Option<f32>) -> Adaptation {
+        // Lux on horizontal ground: the sun's own figure is for a surface facing it.
+        let lit = self.sun.illuminance * self.sun.dir[1].max(0.0);
+        let was = self.ambient;
+        let ambient = match manual {
+            Some(stops) => was * 2f32.powf(stops.clamp(-EXPOSURE_LIMIT, EXPOSURE_LIMIT)),
+            None => {
+                // `a / (a + lit) = floor` solved for a. With the sun down this is 0 and the max
+                // below keeps the night exactly as dark as V6 drew it.
+                let need = lit * SHADE_FLOOR / (1.0 - SHADE_FLOOR);
+                was + closure.clamp(0.0, 1.0) * (need - was).max(0.0)
+            }
+        };
+        let ratio = |a: f32| if a + lit > 0.0 { a / (a + lit) } else { 1.0 };
+        Adaptation {
+            closure,
+            lit,
+            was,
+            ambient,
+            stops: if was > 0.0 {
+                (ambient / was).log2()
+            } else {
+                0.0
+            },
+            ratio_was: ratio(was),
+            ratio: ratio(ambient),
+            manual: manual.is_some(),
+        }
+    }
+
     /// The one line the HUD and every scripted run print, naming whose each half is.
     pub fn line(&self) -> String {
         let (month, day) = self.clock.month_day();
@@ -643,6 +692,88 @@ impl SkyState {
             self.latitude_deg,
         )
     }
+}
+
+/// How dark the shadows are allowed to get, as a fraction of lit ground, under a closed canopy.
+///
+/// **The eye's number, not the sun's** (shot V7). It is a target on the illuminance ratio between
+/// a shadowed horizontal surface and a lit one:
+///
+/// | | shade : lit | stops |
+/// |---|---|---|
+/// | V0 through V5: no shadow maps at all | 1 : 1 | 0 |
+/// | V6 as shipped, June at 10:00 | 1 : 13 | 3.7 |
+/// | this, under a closed canopy | 1 : 4 | 2 |
+///
+/// V6's figure is the physically correct one -- 10,000 lux of sun against 740 of sky is roughly
+/// what a clear morning does -- and it is the one a site with an open canopy keeps, because the
+/// correction is scaled by how much of the ground is actually under a crown. What V6 left out is
+/// that an eye under that canopy opens up, and a camera with a fixed exposure does not. Two stops
+/// is the range a print holds and is between the two numbers above rather than a return to either.
+pub const SHADE_FLOOR: f32 = 0.25;
+
+/// How far [`Adaptation`] will be pushed by hand, in stops either way.
+pub const EXPOSURE_LIMIT: f32 = 4.0;
+
+/// What the eye's adaptation did to one frame: the measurement, the lift and the contrast either
+/// side of it (shot V7).
+///
+/// Every field is lux on a **horizontal** surface, which is what ground is, and the whole thing is
+/// derived: nothing here is stored between frames and nothing feeds back into a run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Adaptation {
+    /// The fraction of the site's ground under a crown ([`crate::voxel::Canopy`]).
+    pub closure: f32,
+    /// Lux the sun puts on lit ground. Zero once it is down, which is what keeps a dusk or a night
+    /// frame exactly where V6 drew it: there is no sun to hide in, so there is nothing to adapt to.
+    pub lit: f32,
+    /// Ambient lux before and after.
+    pub was: f32,
+    pub ambient: f32,
+    /// The lift, in stops. Zero on an open site.
+    pub stops: f32,
+    /// Shadowed ground as a fraction of lit ground, before and after.
+    pub ratio_was: f32,
+    pub ratio: f32,
+    /// Was the number set by hand (`--exposure`, the **-** and **=** keys) rather than measured?
+    pub manual: bool,
+}
+
+impl Adaptation {
+    /// The one line the HUD and every scripted run print. `1/14 of lit` rather than `0.069` because
+    /// the number a reader can check against the picture is the ratio, not the fraction.
+    pub fn line(&self) -> String {
+        let one_in = |r: f32| {
+            if r > 0.0 {
+                format!("1/{:.0}", 1.0 / r)
+            } else {
+                "none".to_string()
+            }
+        };
+        format!(
+            "eye adaptation {} -- canopy closure {:.0}%, ambient {:.0} -> {:.0} lux ({:+.2} stops), \
+             shadow {} -> {} of lit ground",
+            if self.manual { "by hand" } else { "measured" },
+            100.0 * self.closure,
+            self.was,
+            self.ambient,
+            self.stops,
+            one_in(self.ratio_was),
+            one_in(self.ratio),
+        )
+    }
+}
+
+/// Reads `--exposure`: `auto`, or a number of stops.
+pub fn parse_exposure(s: &str) -> Option<Option<f32>> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("auto") {
+        return Some(None);
+    }
+    t.parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .map(|v| Some(v.clamp(-EXPOSURE_LIMIT, EXPOSURE_LIMIT)))
 }
 
 /// How many brightness steps ambient occlusion is drawn in, and what each one keeps of a colour.

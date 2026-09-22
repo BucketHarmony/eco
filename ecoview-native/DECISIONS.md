@@ -1154,3 +1154,104 @@ still the wrong one, for the reason S1 gave: `ecoview` is frozen, this component
 untracked beside tracked siblings. An `ecoview-native` shot may not edit `ecoview/` in any case
 (MASTER.md, component isolation). The test and the screenshots are the two halves that were
 available, and they are the two the row asked for first.
+
+# V7 -- the eye's adaptation
+
+## V7 the eye is added, the sun is not corrected
+
+The row calls this "not a wrong number -- a missing one", and the implementation takes that
+literally. `Sun::at` still puts 10,000 lux on a surface facing it and the shadow map still does
+what V6 made it do; nothing about the physics is touched. What is added is the observer: ambient
+is raised toward the level at which a shadowed horizontal surface reads at `SHADE_FLOOR` of a lit
+one.
+
+The alternative was a camera exposure -- a post-process tone curve, or a GPU luminance histogram
+feeding an auto-exposure. Two things ruled it out. **The gate is engine-free**: CI builds this
+crate `--no-default-features`, so nothing on the GPU side of the `viewer` feature can be asserted,
+and a term this shot exists to justify has to be testable. And a histogram exposure reads the
+frame, so it changes when the camera turns, which would make every screenshot in `shots/` a
+function of where the camera happened to point. Moving one engine light off a property of the
+world keeps both: `SkyState::adapt` is a pure function of `(closure, manual)` and is tested as one.
+
+## V7 closure is leaves over ground, measured site-wide
+
+`VoxelWorld::canopy` counts ground columns with at least one `CANOPY` voxel above the ground level
+of that column, over the whole site. Four choices are folded into that sentence.
+
+**Leaves only.** `TRUNK`, `SHRUB`, `GRASS`, `BUILDING` and the pond id are not canopy. A trunk
+casts a shadow a metre wide that an eye does not adapt to; a building's shadow is the case where
+the correct answer really is "it is dark in there", and a site that is 30% roof should not have its
+shadows lifted for it. Cover voxels sit on the ground rather than over it and would count every
+lawn as closed.
+
+**Above the column's own ground, not above sea level.** The Capitol has 4 m of relief across it, so
+a fixed height would call a crown in the low corner a canopy over the high one.
+
+**Site-wide, not camera-relative.** A closure measured in the view frustum would make the exposure
+change as the camera flies, and a screenshot script that sets `--eye` and `--look` would be setting
+the exposure too without saying so. Site-wide costs one full sweep of the plant buckets, which is
+why it is recomputed only when the snapshot or the cover changes, not per frame.
+
+**Ground columns, not leaf voxels.** 1,058,244 leaf voxels at tick 9000 says how much wood there
+is; 34% says how much of the floor is under it, and the floor is what the defect is about.
+
+## V7 two stops, and where the number comes from
+
+`SHADE_FLOOR = 0.25` -- a shadowed surface is held at no worse than a quarter of a lit one, two
+stops down. The three numbers this sits between:
+
+| | shade : lit | stops |
+| --- | --- | --- |
+| V0-V5, no shadow maps | 1 : 1 | 0 |
+| V6 as shipped, June at 10:00 | 1 : 13 | 3.7 |
+| this, under a closed canopy | 1 : 4 | 2 |
+
+Two stops is the range a print holds, and it is deliberately not a return to V5: the shadow stays a
+shadow and is still the darkest thing in the frame. The lift is `closure` of the way from V6's
+level to that floor, so it is proportional to the measurement rather than a switch, and the whole
+term is `max(0, need - was)` -- if the sun is low enough that V6's 740 lux already beats the floor,
+nothing happens at all. That is why a December morning at 18 degrees of sun and 35% closure moves
+by `+0.00` stops and a dusk frame moves by nothing: there is no sun to hide in.
+
+## V7 the lift is on the ambient only, so a clearing does not brighten with the wood
+
+Lit ground receives `ambient + sun`, so raising ambient raises it a little -- at a closed canopy and
+the default hour, by 1.23x, which is about three tenths of a stop. A test pins that below 1.3x, beside an
+equality that the sun's own figure is untouched. This is what keeps the lawn beside a stand of
+trees looking like a lawn rather than like an overexposed one, and it is the property that makes a
+site-wide measurement defensible: the correction is small everywhere the sun reaches and large only
+where it does not.
+
+## V7 the measurement is a default, not a verdict
+
+`--exposure auto|STOPS`, the **-** and **=** keys in half-stop steps, and **0** to hand it back.
+Manual replaces the measurement outright rather than adding to it -- `--exposure 0` is therefore
+the exact V6 picture, which is what makes the before/after pairs in `shots/` a fair comparison and
+is how `v7-canopy-off.png` was taken. The range is clamped to +/- `EXPOSURE_LIMIT` = 4 stops at
+both the flag and the key, because 16x either way is past any use and an unclamped stop count run
+through `2^n` reaches infinity.
+
+The HUD says which of the two it is on every frame, in the word `measured` or `by hand`, beside the
+closure it read and the shadow ratio either side of the lift -- the same shape V6 used for the
+latitude and V8 for the held date. `ecoview.sky` carries all of it under `exposure`, so the agent
+loop can read the number it is looking at.
+
+## V7 the reference site's shadows do move, and this shot does not pretend otherwise
+
+`runs/capitol-s42` is not an open site at every tick. Closure runs 1% at tick 2000 and 34% at 9000,
+so the June frames at the dense ticks gain up to a stop of ambient and their shadows are lighter
+than V6 drew them. Measured on the two overview frames, below the HUD: YLOW 60 -> 75, YAVG 146.8 ->
+151.0, and **YHIGH unchanged at 194**. That is the shot working -- the shadows open, the lit
+picture does not -- but it is a change to committed reference frames and it is recorded here rather
+than buried. No gated screenshot is re-accepted, because `ecoview-native` has none: its goldens are
+meshes, and no mesh moves. `ecoview/shots/REACCEPT-NN.md` is therefore not written and not needed.
+
+## V7 the closed-canopy case is built, because no committed run has one
+
+The row says plainly that the operator measured the defect off-repo and that `capitol-s42` does not
+close its canopy. Rather than take that as a reason to guess, the closed canopy is **constructed**
+in the test from the viewer's own `TreeForm::grown` -- a tree every 6 m over a 32 m site, 3,816 of
+4,096 columns covered, 93.2% -- and the committed fixtures carry the complementary half: they are
+open (0.23% and 4.54%), so they show that an open site is left alone. Between them the two halves
+cover the claim without inventing data, and the built wood is the same procedural wood a run grows,
+not a block of leaf voxels stood in for one.

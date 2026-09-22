@@ -8,7 +8,7 @@
 //!                [--no-water] [--eye X,Y,Z] [--look X,Y,Z] [--headless] [--frames N]
 //!                [--screenshot PATH]
 //!                [--bench SECS] [--port N] [--no-ao] [--no-sky] [--hour H] [--lat DEG]
-//!                [--day N | --date M-D]
+//!                [--day N | --date M-D] [--exposure auto|STOPS]
 //!                [--edit X0,Y0,X1,Y1,ACTION[,MEDIUM]]... [--sim] [--sim-ticks N] [--sim-seed N]
 //!                [--sim-root DIR]
 //! ```
@@ -18,8 +18,19 @@
 //! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**8** for
 //! the overlay; **V** for the ground cover and vines; **F** for the standing water; **K** and **L**
 //! move the hour of the day; **;** and **'** move the date a week without moving the tick and **\\**
-//! hands the date back to the run;
+//! hands the date back to the run; **-** and **=** move the exposure and **0** hands it back to
+//! the measurement;
 //! and **O** turns the beauty pass -- ambient occlusion, sky, sun and seasonal colour -- off.
+//!
+//! **The shadows have an exposure, and it opens under a canopy** (shot V7). V6 turned shadow maps
+//! on, and from that shot a shadowed surface received `ambient / (ambient + sun)` of a lit one --
+//! about a thirteenth at the default hour -- where V5 gave it everything, because V5 cast no
+//! shadows at all. That ratio is right for the sun and wrong for the eye, and the only control over
+//! it was **O**, which takes the whole beauty pass away. The viewer now measures how much of the
+//! site's ground has a crown over it ([`ecoview_native::voxel::VoxelWorld::canopy`]) and lifts the
+//! ambient level towards [`ecoview_native::sky::SHADE_FLOOR`] in proportion. **An open site does
+//! not move**, which is what leaves every frame V6 through V8 took where it was; a site under a
+//! closed canopy gets two stops. It moves an engine light and no field in any run.
 //!
 //! **The date can be held over a tick that does not move** (shot V8). `--day N`, `--date M-D` or
 //! the two date keys turn the year over one snapshot, so the same wood stands in a summer frame and
@@ -81,9 +92,9 @@ use ecoview_native::overlay::{self, FieldStats, Fields, PondStats, Ponds, Scale}
 use ecoview_native::palette::{palette, Overlay, Ramp, BANDS};
 use ecoview_native::run::Run;
 use ecoview_native::sim::{self, SimJob, SimState};
-use ecoview_native::sky::{self, shaded_palette, Clock, SkyState, DAYS_PER_YEAR};
+use ecoview_native::sky::{self, shaded_palette, Adaptation, Clock, SkyState, DAYS_PER_YEAR};
 use ecoview_native::tree::Life;
-use ecoview_native::voxel::{ChunkPos, ColumnBands, EditAction, VoxelWorld};
+use ecoview_native::voxel::{Canopy, ChunkPos, ColumnBands, EditAction, VoxelWorld};
 use ecoview_native::{brp, stress_world, Bundle, CAPITOL};
 
 /// Fly speed and its wheel step, copied from `ecoview`'s `edit.ts` so the two viewers feel the same.
@@ -167,6 +178,9 @@ struct Args {
     /// whatever tick the timeline is on (shot V8). `None` leaves the day the run's, which is where
     /// V6 left it. The keys **;**, **'** and **\** move and release it at runtime.
     day: Option<f32>,
+    /// `--exposure STOPS`: the eye's adaptation held by hand, in stops, or `None` for the measured
+    /// one (shot V7). `--exposure auto` is the default and says so out loud.
+    exposure: Option<f32>,
 }
 
 /// `X0,Y0,X1,Y1,ACTION[,MEDIUM]` in ground cells, inclusive. Fatal when it does not parse, for the
@@ -224,6 +238,7 @@ fn args() -> Args {
         hour: sky::DEFAULT_HOUR,
         lat: sky::DEFAULT_LATITUDE_DEG,
         day: None,
+        exposure: None,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -320,6 +335,19 @@ fn args() -> Args {
                          (6-22 is 22 June)"
                     )
                 }));
+                i += 1;
+            }
+            // Fatal for the reason `--day` is: this flag decides how bright a scripted frame is,
+            // and a silent fall back to the measured value would file a hand-exposed picture under
+            // the automatic one's name.
+            "--exposure" => {
+                let n = next();
+                a.exposure = sky::parse_exposure(&n).unwrap_or_else(|| {
+                    panic!(
+                        "cannot read {n:?} as an exposure; expected `auto` or a number of stops in                          -{0}..{0}",
+                        sky::EXPOSURE_LIMIT
+                    )
+                });
                 i += 1;
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -653,6 +681,12 @@ struct Sky {
     /// The `(on, ao, season step)` the drawn world's palette was built for. Anything else is a
     /// remesh, which is why the season is quantised at all (`sky::SEASON_STEPS`).
     applied: Option<(bool, bool, u32)>,
+    /// How much of the drawn site has a crown over it (shot V7), measured when the snapshot's
+    /// plants change rather than every frame. The one input to the eye's adaptation.
+    canopy: Canopy,
+    /// The adaptation held by hand, in stops, or `None` to take the measurement. `--exposure`,
+    /// **-** and **=** to move it, **0** to hand it back.
+    exposure: Option<f32>,
     /// What the last beauty-pass remesh cost, for `ecoview.stats` and the write-up.
     remesh_chunks: usize,
     remesh_ms: f64,
@@ -670,6 +704,8 @@ impl Sky {
             day: a.day,
             state: SkyState::of(Clock::of(None, 0, a.hour).with_day(a.day), a.lat),
             applied: None,
+            canopy: Canopy::default(),
+            exposure: a.exposure,
             remesh_chunks: 0,
             remesh_ms: 0.0,
             dome: None,
@@ -693,6 +729,12 @@ impl Sky {
             Clock::of(tick, year_len, self.hour).with_day(self.day),
             self.lat,
         );
+    }
+
+    /// The eye's adaptation for this frame (shot V7): the measured canopy closure, or whatever
+    /// **-** and **=** have been pushed to, through [`SkyState::adapt`].
+    fn adapt(&self) -> Adaptation {
+        self.state.adapt(self.canopy.closure(), self.exposure)
     }
 
     /// What the drawn palette depends on. With the seasonal tint off the year is not one of them,
@@ -1077,6 +1119,10 @@ fn setup(
         fields.as_ref().and_then(|f| f.as_ref().ok()),
         want,
     );
+    // How much of the site is under a crown, taken once off the site as it is first drawn (V7).
+    // The bundle's own surveyed trees count for this as much as a run's do: a site photographed
+    // under a closed canopy is as dark as one grown into it.
+    sky.canopy = site.world.canopy();
     // The tree model on stdout as well as in the HUD: a procedural tree is the one thing in the
     // picture a reader cannot check against the run by eye, so a scripted run leaves the numbers
     // behind it (MEASUREMENTS.md, V3).
@@ -1147,6 +1193,18 @@ fn setup(
             "  (--no-sky: the fixed 45 degree sun of V0-V5, and nothing draws the held date)"
         } else {
             "  (--no-sky: the fixed 45 degree sun of V0-V5)"
+        }
+    );
+    // And what the eye did with it (shot V7). On stdout for the same reason as the cover's line:
+    // the report quotes the scripted run, so the caveat travels with the picture -- this is the
+    // viewer's adaptation and not a reading of anything in the run.
+    println!(
+        "exposure: {}{}",
+        sky.adapt().line(),
+        if sky.on {
+            ""
+        } else {
+            "  (--no-sky: no shadow maps, so nothing is drawn with it; ambient is V5's fixed 700)"
         }
     );
     println!(
@@ -1906,6 +1964,12 @@ fn apply_world_state(
     } else {
         Vec::new()
     };
+    // The plants moved, so the canopy did (shot V7). Taken here rather than every frame: it is one
+    // pass over the leaf voxels, which is a couple of milliseconds on the Capitol at tick 20000 and
+    // free on anything smaller, but it is not free enough to do 60 times a second for nothing.
+    if snapshot_moved || cover_moved {
+        sky.canopy = site.world.canopy();
+    }
     if water_moved || snapshot_moved {
         for c in apply_ponds(&mut site.world, &mut timeline, ponds.as_ref()) {
             if !stale.contains(&c) {
@@ -2029,6 +2093,19 @@ fn sky_update(
             sky.day = Some((sky.day.unwrap_or(sky.state.clock.day) + by).rem_euclid(DAYS_PER_YEAR));
         }
     }
+    // Half a stop a press, on the two keys next to the overlay digits, and **0** hands the
+    // exposure back to the measurement. The first press takes the current adaptation as its
+    // starting point, the way the date keys take the drawn date: pushing a picture brighter should
+    // start from the picture, not from wherever the automatic value happened to be zero.
+    for (k, by) in [(KeyCode::Minus, -0.5), (KeyCode::Equal, 0.5)] {
+        if keys.just_pressed(k) {
+            let now = sky.exposure.unwrap_or_else(|| sky.adapt().stops);
+            sky.exposure = Some((now + by).clamp(-sky::EXPOSURE_LIMIT, sky::EXPOSURE_LIMIT));
+        }
+    }
+    if keys.just_pressed(KeyCode::Digit0) {
+        sky.exposure = None;
+    }
     // And **\** hands the date back. The override has to be releasable from the keyboard, because
     // the frame it is on is a frame whose date is not the run's, and getting back to the honest
     // picture should not mean restarting the viewer.
@@ -2061,8 +2138,13 @@ fn sky_update(
         light.shadow_maps_enabled = sky.on && st.sun.is_up();
         tf.rotation = rotation;
     }
+    // The eye's adaptation (shot V7). It moves the ambient level and nothing else: the sun keeps
+    // the illuminance the geometry gave it, so lit ground stays where the sun put it and only the
+    // shadows come up. With the beauty pass off there are no shadow maps to adapt to, so `--no-sky`
+    // is still exactly the picture V0 through V5 took.
+    let adapt = sky.adapt();
     for mut a in &mut ambient {
-        a.brightness = if sky.on { st.ambient } else { FIXED_AMBIENT };
+        a.brightness = if sky.on { adapt.ambient } else { FIXED_AMBIENT };
         a.color = if sky.on {
             Color::linear_rgb(
                 st.ambient_color[0],
@@ -2328,6 +2410,19 @@ fn hud(
                 None => "",
             },
         ));
+        // And what the eye did with all of that (shot V7). On the frame rather than only in the
+        // write-up for the reason the rest of this block is: a picture whose shadows have been
+        // opened up two stops looks exactly like a picture taken under a thinner canopy.
+        s.push_str(&format!(
+            "  {}   [-] [=] stops  [0] {}
+",
+            sky.adapt().line(),
+            if sky.exposure.is_some() {
+                "back to measured"
+            } else {
+                "auto, on"
+            },
+        ));
     } else {
         s.push_str(&format!(
             "beauty pass off -- the fixed 45 degree sun, no season, ambient occlusion {}   [O] on
@@ -2340,6 +2435,14 @@ fn hud(
         if sky.day.is_some() {
             s.push_str(
                 "  a date is held but nothing draws it while the beauty pass is off   [O] on
+",
+            );
+        }
+        // Same case, same treatment (shot V7): with the beauty pass off the sun casts no shadow, so
+        // there is nothing for an exposure to open up and the ambient level is V5's fixed one.
+        if sky.exposure.is_some() {
+            s.push_str(
+                "  an exposure is held but nothing draws it while the beauty pass is off   [O] on
 ",
             );
         }
@@ -2770,6 +2873,7 @@ fn camera_method(In(params): In<Option<Value>>, mut queue: ResMut<CameraQueue>) 
 /// V8 added the two keys that took the `json!` macro past its expansion depth. One object, built
 /// in one place, so an agent reading it and a reader reading this see the same thing.
 fn sky_json(sky: &Sky) -> Value {
+    let adapt = sky.adapt();
     json!({
         "on": sky.on,
         "ao": sky.ao,
@@ -2801,9 +2905,26 @@ fn sky_json(sky: &Sky) -> Value {
             "flush": sky.state.season.flush,
         },
         "ambient": sky.state.ambient,
+        // Shot V7. `ambient` above is still the sky's own level, unchanged, and this is what the
+        // eye did to it before the frame was drawn. `closure` is the measurement it came from and
+        // `manual` says whether the measurement was used at all.
+        "exposure": {
+            "ambient": adapt.ambient,
+            "stops": adapt.stops,
+            "manual": adapt.manual,
+            "held": sky.exposure,
+            "closure": adapt.closure,
+            "canopy_columns": sky.canopy.covered,
+            "ground_columns": sky.canopy.ground,
+            "lit_ground_lux": adapt.lit,
+            "shade_fraction_was": adapt.ratio_was,
+            "shade_fraction": adapt.ratio,
+            "shade_floor": sky::SHADE_FLOOR,
+            "applied": sky.on,
+        },
         "remesh_chunks": sky.remesh_chunks,
         "remesh_ms": sky.remesh_ms,
-        "note": "expression, not simulation: the day of the year is the run's tick over its year_len, and the hour, the latitude and the seasonal hues are the viewer's. The simulator computes light under a fixed 45 degree sun and has no time of day; moving this one changes no number in any run. With day_source = override the date is the viewer's too, held over a tick that has not moved: the sun and the leaf colour follow the held date, and the trees, the water, the burn scars and every overlay band on the frame are still the tick's.",
+        "note": "expression, not simulation: the day of the year is the run's tick over its year_len, and the hour, the latitude, the seasonal hues and the exposure are the viewer's. The exposure is the eye's adaptation and not a measurement of anything in the run: it reads how much of the ground is under a crown and lifts the ambient level towards a floor on the shadow-to-sun ratio, which moves an engine light and no field. It is 0 stops on an open site, 0 stops with the sun down, and 0 stops with the beauty pass off. The simulator computes light under a fixed 45 degree sun and has no time of day; moving this one changes no number in any run. With day_source = override the date is the viewer's too, held over a tick that has not moved: the sun and the leaf colour follow the held date, and the trees, the water, the burn scars and every overlay band on the frame are still the tick's.",
     })
 }
 

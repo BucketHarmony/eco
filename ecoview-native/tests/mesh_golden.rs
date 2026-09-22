@@ -3406,3 +3406,319 @@ fn a_doubling_of_grazers_is_a_fixed_step_up_the_crowding_ramp() {
     }
     assert_eq!(step(1_000_000.0), (BANDS - 1) as i32);
 }
+
+// -----------------------------------------------------------------------------------------------
+// Shot V7: the eye's adaptation.
+//
+// V6 turned shadow maps on and left the exposure where V5 had it. From that shot a shadowed
+// horizontal surface received `ambient / (ambient + sun)` of a lit one -- 740 against 10,000 lux,
+// about a thirteenth -- where V5 gave it everything, because V5 cast no shadows at all. On an open
+// site that is barely visible and is the physically correct answer. Under a closed canopy the whole
+// ground is the shadowed case, and the only control the viewer offered over it was **O**, which
+// takes ambient occlusion, the sun, the sky and the season away together.
+//
+// What is added is the eye, not a correction to the sun: the viewer measures how much of the
+// ground has a crown over it and lifts the AMBIENT level -- one engine light, no field in any run
+// -- towards a floor on the shadow-to-sun ratio, in proportion to that measurement. The three
+// properties worth testing are therefore that it does nothing when there is nothing to adapt to
+// (an open site, a sun below the horizon, the beauty pass off), that it reaches the floor exactly
+// when the ground is entirely covered, and that the number it reads is a real property of the
+// drawn world rather than a constant.
+//
+// The row this shot came from carries a caveat that decides these tests' shape: the operator
+// measured the defect on a site with a genuinely closed canopy that is not in this repository, and
+// `capitol-animals-mini` does not close its canopy. So the closed-canopy case is BUILT here, from
+// the viewer's own tree model, and the committed run carries the other half of the claim -- that
+// this shot leaves the reference site where V6 drew it.
+// -----------------------------------------------------------------------------------------------
+
+use ecoview_native::sky::{parse_exposure, Adaptation, EXPOSURE_LIMIT, SHADE_FLOOR};
+use ecoview_native::voxel::Canopy;
+
+/// A site 32 m across with a tree every 6 m: crowns of about 5 m radius on a 6 m pitch, which is
+/// what a closed canopy is. The trees are the viewer's own procedural ones, so this is the same
+/// wood a run would grow rather than a block of leaf voxels stood in for one.
+fn closed_canopy(n: usize) -> VoxelWorld {
+    let mut w = tall(n, 0.5, 4.0);
+    let span = n as f32 * 0.5;
+    let mut trees = Vec::new();
+    let mut i = 0u64;
+    let mut y = 3.0;
+    while y < span {
+        let mut x = 3.0;
+        while x < span {
+            trees.push(TreeForm::grown(x, y, 18.0, 1.0, 7 + i));
+            i += 1;
+            x += 6.0;
+        }
+        y += 6.0;
+    }
+    w.set_plants(&trees, &[]);
+    w
+}
+
+/// The measurement is a property of the drawn world: ground with a leaf over it, and nothing else.
+#[test]
+fn the_canopy_is_the_ground_that_has_a_leaf_over_it() {
+    let bare = tall(64, 0.5, 4.0);
+    assert_eq!(
+        bare.canopy(),
+        Canopy {
+            ground: 64 * 64,
+            covered: 0
+        }
+    );
+    assert_eq!(bare.canopy().closure(), 0.0);
+
+    // One tree covers its own crown's footprint and no more.
+    let mut one = tall(64, 0.5, 4.0);
+    one.set_plants(&[TreeForm::grown(16.0, 16.0, 18.0, 1.0, 5)], &[]);
+    let c = one.canopy();
+    assert!(c.covered > 0, "a grown tree covers ground");
+    assert!(
+        c.closure() < 0.25,
+        "and one tree on a 32 m site is not a canopy: {}",
+        c.closure()
+    );
+    // Every covered column is under a leaf, and only under a leaf: wood alone does not count.
+    let leaves: std::collections::BTreeSet<(usize, usize)> = one
+        .plant_voxels()
+        .iter()
+        .filter(|v| v.3 == CANOPY)
+        .map(|v| (v.0, v.1))
+        .collect();
+    assert_eq!(c.covered, leaves.len(), "one column per leaf column");
+
+    // Ground cover is on the ground, not over it, so a lawn is not a canopy however thick it is.
+    let mut grassy = tall(64, 0.5, 4.0);
+    let d = eco(64);
+    let f = drivers(d, 1.0, 1.0, 200, 200);
+    let cover = Cover::of(&f, d, 1);
+    grassy.set_scene(&[], &[], Some(&cover));
+    let (g, sh, _) = grassy.cover_counts();
+    assert!(g + sh > 1000, "there is a lawn to not count: {g} + {sh}");
+    assert_eq!(grassy.canopy().covered, 0, "a lawn is not a canopy");
+}
+
+/// The built closed canopy, which is the case the row is about and which no committed run has.
+#[test]
+fn a_closed_canopy_measures_as_one() {
+    let w = closed_canopy(64);
+    let c = w.canopy();
+    assert!(
+        c.closure() > 0.9,
+        "trees on a 6 m pitch close the canopy: {} of {} columns",
+        c.covered,
+        c.ground
+    );
+}
+
+/// The site the viewer opens at: mid-morning in June, the light every shot from V6 on was drawn in.
+fn june_morning() -> SkyState {
+    SkyState::of(on_day(172.0, 10.0), 42.7)
+}
+
+/// An open site is drawn at exactly the illuminance V6 drew it at. This is the half of the claim
+/// that keeps every frame V6, V8 and S7 took where it was.
+#[test]
+fn an_open_site_is_lit_exactly_as_v6_lit_it() {
+    let st = june_morning();
+    let a = st.adapt(0.0, None);
+    assert_eq!(a.ambient, st.ambient);
+    assert_eq!(a.stops, 0.0);
+    assert!(!a.manual);
+    // And V6's own ratio is what it was measured to be. A thirteenth, not the fourteenth the
+    // sun's own 10,000 lux against 740 would give: `lit` is lux on horizontal ground, and at 59
+    // degrees of elevation the sun delivers 8,663 of its 10,106 there.
+    assert!(
+        (1.0 / a.ratio_was - 12.7).abs() < 0.5,
+        "V6's shadow was 1/{:.1} of lit ground",
+        1.0 / a.ratio_was
+    );
+}
+
+/// A closed canopy reaches the floor exactly, and the floor is two stops rather than V5's none.
+#[test]
+fn a_closed_canopy_opens_the_shadows_to_the_floor_and_no_further() {
+    let st = june_morning();
+    let a = st.adapt(1.0, None);
+    assert!(
+        (a.ratio - SHADE_FLOOR).abs() < 1e-4,
+        "shadow is {:.4} of lit ground, floor {SHADE_FLOOR}",
+        a.ratio
+    );
+    assert!(
+        a.stops > 1.5 && a.stops < 2.5,
+        "the whole lift is about two stops: {:+.2}",
+        a.stops
+    );
+    // The sun is untouched: lit ground gains only the ambient it also receives, never the sun's
+    // own level, so a closed canopy does not brighten the clearing beside it by two stops too.
+    assert_eq!(a.lit, st.adapt(0.0, None).lit);
+    assert!(
+        (a.ambient + a.lit) / (st.ambient + a.lit) < 1.3,
+        "lit ground moved by {:.2}x",
+        (a.ambient + a.lit) / (st.ambient + a.lit)
+    );
+}
+
+/// In between, the lift is the measurement's: half covered is half the lux.
+#[test]
+fn the_lift_is_in_proportion_to_what_was_measured() {
+    let st = june_morning();
+    let full = st.adapt(1.0, None).ambient - st.ambient;
+    let half = st.adapt(0.5, None).ambient - st.ambient;
+    assert!((half - full / 2.0).abs() < 1e-3, "{half} against {full}/2");
+    let mut last = -1.0;
+    for i in 0..=20 {
+        let a = st.adapt(i as f32 / 20.0, None);
+        assert!(a.ambient > last, "the lift fell at closure {i}/20");
+        last = a.ambient;
+    }
+    // Out-of-range measurements are clamped, not extrapolated.
+    assert_eq!(st.adapt(4.0, None).ambient, st.adapt(1.0, None).ambient);
+    assert_eq!(st.adapt(-1.0, None).ambient, st.ambient);
+}
+
+/// A night frame is left as dark as V6 drew it, at any closure: there is no sun to hide in, so
+/// there is no shadow to open up. This is what keeps a dusk picture from being brightened into a
+/// different picture by a measurement taken in daylight.
+#[test]
+fn a_dark_frame_has_nothing_to_adapt_to() {
+    for hour in [0.0, 2.0, 22.5] {
+        let st = SkyState::of(on_day(172.0, hour), 42.7);
+        assert!(!st.sun.is_up(), "{hour} is night in June at 42.7 N");
+        let a = st.adapt(1.0, None);
+        assert_eq!(a.ambient, st.ambient, "hour {hour}");
+        assert_eq!(a.stops, 0.0);
+        assert_eq!(a.lit, 0.0);
+    }
+    // And a winter dusk, where the sky is still changing colour: the sun is only just down, so the
+    // lift is zero on the same rule rather than on a special case for night.
+    let dusk = SkyState::of(on_day(355.0, 17.5), 42.7);
+    assert!(!dusk.sun.is_up());
+    assert_eq!(dusk.adapt(1.0, None).ambient, dusk.ambient);
+}
+
+/// A measurement good enough to default to is not one anybody should be stuck with.
+#[test]
+fn an_exposure_by_hand_ignores_the_measurement() {
+    let st = june_morning();
+    let by_hand = st.adapt(1.0, Some(0.0));
+    assert_eq!(by_hand.ambient, st.ambient, "zero stops is V6's own level");
+    assert!(by_hand.manual);
+    assert_eq!(by_hand.closure, 1.0, "the measurement is still reported");
+
+    let up = st.adapt(0.0, Some(2.0));
+    assert!((up.ambient / st.ambient - 4.0).abs() < 1e-3);
+    assert!((up.stops - 2.0).abs() < 1e-4);
+    let down = st.adapt(0.0, Some(-1.0));
+    assert!((down.ambient / st.ambient - 0.5).abs() < 1e-3);
+    // Clamped at both ends, so a typo cannot white out or black out a scripted frame.
+    assert_eq!(
+        st.adapt(0.0, Some(99.0)).ambient,
+        st.adapt(0.0, Some(EXPOSURE_LIMIT)).ambient
+    );
+}
+
+/// `--exposure` reads `auto` or a number of stops, and refuses anything else.
+#[test]
+fn the_exposure_argument_reads_auto_or_stops() {
+    assert_eq!(parse_exposure("auto"), Some(None));
+    assert_eq!(parse_exposure("AUTO"), Some(None));
+    assert_eq!(parse_exposure(" 1.5 "), Some(Some(1.5)));
+    assert_eq!(parse_exposure("-2"), Some(Some(-2.0)));
+    assert_eq!(parse_exposure("0"), Some(Some(0.0)));
+    assert_eq!(parse_exposure("99"), Some(Some(EXPOSURE_LIMIT)));
+    assert_eq!(parse_exposure("nan"), None);
+    assert_eq!(parse_exposure("inf"), None);
+    assert_eq!(parse_exposure("bright"), None);
+    assert_eq!(parse_exposure(""), None);
+}
+
+/// The line the HUD and every scripted run print says which of the two numbers it is.
+#[test]
+fn the_line_says_whether_the_number_was_measured_or_set() {
+    let st = june_morning();
+    let measured = st.adapt(1.0, None).line();
+    assert!(
+        measured.starts_with("eye adaptation measured"),
+        "{measured}"
+    );
+    assert!(measured.contains("canopy closure 100%"), "{measured}");
+    assert!(measured.contains("1/4 of lit ground"), "{measured}");
+    let by_hand = st.adapt(0.0, Some(1.0)).line();
+    assert!(by_hand.starts_with("eye adaptation by hand"), "{by_hand}");
+    assert!(by_hand.contains("+1.00 stops"), "{by_hand}");
+}
+
+/// The other half of the claim, on committed bytes rather than in an argument: the reference site
+/// does not close its canopy, so this shot leaves it where V6 drew it.
+///
+/// A bound rather than a constant, deliberately. The exact figure is in MEASUREMENTS.md and it
+/// moves whenever the ecology does -- shot S11 moved it by changing how trees compete -- and a
+/// constant here would be a fifth number for the next such shot to come back and re-cut. What is
+/// claimed is not a number; it is that the number is small enough to leave the picture alone.
+#[test]
+fn the_committed_reference_site_is_left_where_v6_drew_it() {
+    let bundle = Bundle::load(std::path::Path::new(ecoview_native::CAPITOL)).unwrap();
+    // Both committed Capitol runs, at their last snapshot: 39 trees on the animals fixture at tick
+    // 2000 and 111 on the quiet one at tick 100. Neither is a dense site and that is the finding,
+    // not a shortcoming of the fixtures -- the reference world's trees stand apart.
+    let mut most = 0usize;
+    for dir in [ANIMALS_FIXTURE, QUIET_FIXTURE] {
+        let run = Run::load(std::path::Path::new(dir)).unwrap();
+        let last = run.snapshot_count() - 1;
+        let mut w = VoxelWorld::from_bundle_with_headroom(&bundle, run.life.tall_height_m);
+        let grown = run.trees_at(last).unwrap();
+        assert!(!grown.trees.is_empty(), "{dir} has trees to measure");
+        most = most.max(grown.trees.len());
+        w.set_plants(&grown.trees, &[]);
+        let c = w.canopy();
+        let a = june_morning().adapt(c.closure(), None);
+        println!(
+            "{dir} tick {}: {} trees, {} of {} columns under a crown, {:.2}%, {:+.3} stops",
+            run.tick_at(last),
+            grown.trees.len(),
+            c.covered,
+            c.ground,
+            100.0 * c.closure(),
+            a.stops
+        );
+        assert!(
+            c.closure() < 0.10,
+            "{dir}: the reference site's canopy is open, {:.4}",
+            c.closure()
+        );
+        assert!(
+            a.stops < 0.25,
+            "{dir}: so the exposure barely moves, {:+.3} stops",
+            a.stops
+        );
+    }
+    assert!(
+        most > 100,
+        "the denser of the two is still a real stand: {most}"
+    );
+}
+
+/// And the built closed canopy through the same path, which is the case that needed the shot.
+#[test]
+fn a_closed_canopy_is_the_case_that_needed_the_shot() {
+    let c = closed_canopy(64).canopy();
+    let a: Adaptation = june_morning().adapt(c.closure(), None);
+    println!(
+        "closed canopy: {:.1}% closure, ambient {:.0} -> {:.0} lux, {:+.2} stops, shadow 1/{:.1} -> 1/{:.1}",
+        100.0 * c.closure(),
+        a.was,
+        a.ambient,
+        a.stops,
+        1.0 / a.ratio_was,
+        1.0 / a.ratio
+    );
+    assert!(
+        a.stops > 1.5,
+        "the case the row is about moves: {:+.2}",
+        a.stops
+    );
+}

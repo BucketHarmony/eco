@@ -156,6 +156,31 @@ pub struct VoxelWorld {
     dig_limit_from_run: bool,
 }
 
+/// How many of a world's ground columns have a crown over them (shot V7).
+///
+/// The one number the eye's adaptation is driven by. It is a property of the **world as drawn** --
+/// it moves with the snapshot, because the trees do -- and it is deliberately site-wide rather than
+/// camera-relative: a camera-relative measure would change the exposure as the viewer flew, which
+/// is what a real eye does and what a screenshot must not do (DECISIONS.md, V7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Canopy {
+    /// Ground columns in the world.
+    pub ground: usize,
+    /// How many of them have at least one leaf voxel above them.
+    pub covered: usize,
+}
+
+impl Canopy {
+    /// The covered fraction, 0 on an open site and 1 under a closed canopy. Zero columns is 0.
+    pub fn closure(&self) -> f32 {
+        if self.ground == 0 {
+            0.0
+        } else {
+            self.covered as f32 / self.ground as f32
+        }
+    }
+}
+
 /// One overlay band per column of the grid the field was read on, as
 /// [`crate::overlay::Fields::bands`] produces them.
 ///
@@ -676,6 +701,43 @@ impl VoxelWorld {
             }
         }
         (grass, shrub, vine)
+    }
+
+    /// How much of the ground has a crown over it (shot V7).
+    ///
+    /// One pass over the plant buckets, counting the ground columns with at least one **leaf**
+    /// voxel somewhere above them. Wood is not counted -- a trunk is not a canopy -- and neither is
+    /// the ground cover, which sits on the ground rather than over it, nor a vine, which is on a
+    /// wall. Buildings are not counted either, and that is a decision rather than an oversight:
+    /// ground under a roof is ground nobody can see, so counting it would raise the measure with
+    /// surface that never reaches the frame (DECISIONS.md, V7).
+    ///
+    /// This is O(leaf voxels) -- about 1.8 million on the Capitol at tick 20000, which is a couple
+    /// of milliseconds -- so it is taken when the snapshot's plants change and not every frame.
+    pub fn canopy(&self) -> Canopy {
+        let mut covered = vec![false; self.width * self.depth];
+        for (i, bucket) in self.plants.iter().enumerate() {
+            let c = self.chunk_pos(i);
+            for &(lx, lz, ly, id) in bucket {
+                if id != CANOPY {
+                    continue;
+                }
+                let (x, y) = (c.x * CS + lx as usize, c.y * CS + ly as usize);
+                if x >= self.width || y >= self.depth {
+                    continue;
+                }
+                let j = x + self.width * y;
+                // A leaf is put above the terrain by construction, but a lift can raise the ground
+                // into last snapshot's crown, so the level is checked rather than assumed.
+                if (c.z * CS + lz as usize) as i32 > level_of(self.ground_h[j], self.cell_m) {
+                    covered[j] = true;
+                }
+            }
+        }
+        Canopy {
+            ground: self.width * self.depth,
+            covered: covered.iter().filter(|c| **c).count(),
+        }
     }
 
     /// The inverse of [`VoxelWorld::chunk_index`].

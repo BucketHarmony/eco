@@ -1732,3 +1732,149 @@ test and deletes none.
 ## Line budget
 
 22 insertions, 16 deletions in one file: **6 net lines** against the row's 60, plus this write-up.
+
+# V7 -- the eye's adaptation under a canopy
+
+## The row's caveat, and how it was answered rather than waived
+
+The row ends with the reason it was parked: the operator measured the defect on a site with a
+genuinely closed canopy that is not in this repository, and "`runs/capitol-s42` at its densest tick
+does not close its canopy". That is true, and this shot confirms it from the committed bytes rather
+than taking it on trust. So a worker could not reproduce the operator's frame, and did not try.
+
+What a worker *can* do is split the claim in two and get both halves onto committed ground:
+
+1. **A closed canopy is built** from the viewer's own tree model -- `closed_canopy(64)` plants
+   `TreeForm::grown` every 6 m over a 32 m site and measures **3,816 of 4,096 ground columns under
+   a crown, 93.2%**. That is the case the row describes, made out of the same procedural wood a run
+   grows, and the adaptation is asserted on it directly.
+2. **The reference site is measured** and shown to be the open case, which is the other half of the
+   claim -- that this shot leaves V6's pictures where they are on an open site.
+
+## What the committed data actually holds
+
+`the_committed_reference_site_is_left_where_v6_drew_it`, printed by the test:
+
+| fixture | tick | trees | columns under a crown | closure | lift |
+| --- | --- | --- | --- | --- | --- |
+| `capitol-animals-mini` | 2000 | 39 | 607 of 262,144 | 0.23% | +0.010 stops |
+| `capitol-mini` | 100 | 111 | 11,890 of 262,144 | 4.54% | +0.177 stops |
+
+Both are under a tenth of a closed canopy and both move by under a quarter stop, which is what the
+test asserts. The 39 is post-S11 and is why the "a real stand" check runs across both fixtures
+rather than on the animals one alone.
+
+`runs/capitol-s42`, read at 10:00 on the run's own date, which is what every screenshot does:
+
+| tick | date | sun | trees | closure | ambient | lift | shadow : lit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 22 Mar | 39 deg | -- | 4% | 740 -> 784 | +0.08 | 1/8 -> 1/8 |
+| 2000 | 21 Sep | 40 deg | 218 | 1% | 740 -> 746 | +0.01 | 1/8 -> 1/8 |
+| 5000 | 22 Jun | 59 deg | -- | 16% | 740 -> 1077 | +0.54 | 1/13 -> 1/9 |
+| 9000 | 22 Jun | 59 deg | 2,918 | 34% | 740 -> 1469 | +0.99 | 1/13 -> 1/7 |
+| 10000 | 21 Sep | 40 deg | -- | 5% | 740 -> 799 | +0.11 | 1/8 -> 1/8 |
+| 15000 | 21 Dec | 18 deg | -- | 35% | 740 -> 740 | **+0.00** | 1/3 -> 1/3 |
+| 20000 | 22 Mar | 39 deg | -- | 38% | 740 -> 1142 | +0.63 | 1/8 -> 1/6 |
+
+Three readings worth naming. **The site does close up somewhat** -- 34-38% at the dense ticks, not
+the 0.2-4.5% of the fixtures -- so the reference frames at those ticks do change, by up to a stop.
+**Tick 15000 moves by nothing at all** with 35% closure, because a December sun 18 degrees up puts
+only about 1,400 lux on horizontal ground and V6's 740 of ambient is already above the floor; the
+`max(0, need - was)` term is exactly zero there. **The 1/8 rows are not a fault**: `lit` is lux on
+horizontal ground, so a 39-degree sun delivers less of it and V6's own contrast was milder at those
+ticks than at midsummer.
+
+## The frames, below the HUD
+
+Measured with `ffmpeg signalstats` on the bottom 340 rows of each 1280x800 frame, which is the part
+of the picture the HUD does not cover. `YLOW` is the tenth percentile -- the shadows -- and `YHIGH`
+the ninetieth -- the lit surfaces.
+
+| frame | YMIN | YLOW | YAVG | YHIGH |
+| --- | --- | --- | --- | --- |
+| `v7-canopy-off` (`--exposure 0`, the V6 picture) | 39 | 50 | 73.0 | 151 |
+| `v7-canopy-on` (measured, +0.99 stops) | 50 | **65** | 86.9 | 157 |
+| `v7-canopy-hand` (`--exposure 2`) | 65 | 84 | 104.4 | 165 |
+| `v7-site-off` (`--exposure 0`) | 29 | 60 | 146.8 | **194** |
+| `v7-site-on` (measured, +0.99 stops) | 38 | **75** | 151.0 | **194** |
+
+The site pair is the whole argument in two numbers: **YLOW 60 -> 75 and YHIGH unchanged at 194**.
+The shadows open by a quarter and the lit picture does not move at all, which is what "lift the
+ambient, never the sun" means by the time it reaches a frame.
+
+## The screenshots
+
+Eight, all on the committed `worlds/capitol`, all viewed. The first seven are on `runs/capitol-s42`; the eighth is the agent gate's own frame, on the run the round trip grows.
+
+| file | verdict |
+| --- | --- |
+| `v7-canopy-off.png` | The defect, at eye level under the tick-9000 stand with `--exposure 0`: the ground beneath the crowns is a near-black wash with no voxel structure left in it, YLOW 50, and the HUD says `by hand ... +0.00 stops`. |
+| `v7-canopy-on.png` | The same pose, measured: the same ground reads as dark green with the lattice visible in it, YLOW 65, while the sunlit lawn beyond the trees is where it was. HUD `measured -- canopy closure 34%, ambient 740 -> 1469 lux (+0.99 stops), shadow 1/13 -> 1/7`. |
+| `v7-canopy-hand.png` | `--exposure 2` on the same pose: the shade is fully open and the lit lawn has lifted with it, which is the honest cost of overriding the measurement. HUD reads `by hand` and offers `[0] back to measured`. |
+| `v7-site-on.png` | The overview at tick 9000, 2,918 trees: shadowed lawn, street and the Capitol's shaded faces read as surfaces rather than as holes, the lit lawn unchanged. The exposure line sits under the beauty-pass line, where V6 put the latitude note. |
+| `v7-site-off.png` | The same overview with `--exposure 0` -- V6's reference picture, and the thing the table above is measured against. The difference from `v7-site-on` is in the shadows and nowhere else. |
+| `v7-open.png` | Tick 2000, 218 trees, closure 1%: `+0.01 stops`, and the frame is V6's frame. This is the case the row said the committed run mostly is, and it is left alone. |
+| `v7-dusk.png` | 20:30, the sun 8 degrees below the horizon, closure still 34%: `ambient 120 -> 120 lux (+0.00 stops), shadow 1/1 -> 1/1`. Dusk is exactly where V6 and V8 left it, because there is no sun to hide in. |
+| `v7-agent-loop.png` | The agent gate's frame, 146 trees on a run BRP grew during the loop: closure 5%, `+0.13 stops`, and the exposure line reads back identically in `ecoview.sky`. The scripted surface sees the new number without being told about it. |
+
+## The tests
+
+Eleven added, `cargo test --release --no-default-features --test mesh_golden` goes 88 -> **99**.
+
+| test | what it pins |
+| --- | --- |
+| `the_canopy_is_the_ground_that_has_a_leaf_over_it` | bare ground is 0; one tree covers its own footprint and is not a canopy; trunks, shrubs and grass are not leaves |
+| `a_closed_canopy_measures_as_one` | trees on a 6 m pitch reach 3,816 of 4,096 columns |
+| `an_open_site_is_lit_exactly_as_v6_lit_it` | closure 0 is the identity, and V6's own ratio is 1/12.7 |
+| `a_closed_canopy_opens_the_shadows_to_the_floor_and_no_further` | the floor is hit exactly, the lift is about two stops, the sun is untouched and lit ground moves by under 1.3x |
+| `the_lift_is_in_proportion_to_what_was_measured` | half the closure is exactly half the lift, monotone over 21 steps, and out-of-range closures clamp rather than extrapolate |
+| `a_dark_frame_has_nothing_to_adapt_to` | sun down: zero lift at any closure |
+| `an_exposure_by_hand_ignores_the_measurement` | manual replaces rather than adds, and clamps at +/- 4 stops |
+| `the_exposure_argument_reads_auto_or_stops` | `parse_exposure` on `auto`, numbers, rubbish and infinities |
+| `the_line_says_whether_the_number_was_measured_or_set` | the HUD line's two words and its ratio format |
+| `the_committed_reference_site_is_left_where_v6_drew_it` | both fixtures: closure under 0.10, lift under 0.25 stops |
+| `a_closed_canopy_is_the_case_that_needed_the_shot` | the two ends together: the built canopy moves by two stops and the committed site does not |
+
+## The gates
+
+| command | result |
+| --- | --- |
+| `cargo test --release --no-default-features --test mesh_golden` (the CI gate) | **ok, 99 passed** |
+| `cargo test --release` | **ok**, every suite |
+| `cargo fmt --check` | clean |
+| `cargo clippy --all-targets` | the three pre-existing `src/bundle.rs` findings, none new |
+| `cargo doc` | the three pre-existing private-link warnings, none new |
+| `cargo build --release` | clean |
+| `agent_loop --run ../ecosim/runs/capitol-s42` | **agent gate: PASS**, 19 calls, 0 retries, 5.4 s to the first screenshot |
+
+## Line budget
+
+`git diff --numstat` over `ecoview-native/`, against this shot's own start:
+
+| file | + | - |
+| --- | --- | --- |
+| `src/main.rs` | 127 | 6 |
+| `src/sky.rs` | 131 | 0 |
+| `src/voxel.rs` | 62 | 0 |
+| `tests/mesh_golden.rs` | 314 | 0 |
+
+**628 net lines** against 1,500, plus this write-up, `DECISIONS.md` and seven PNGs.
+
+## What this shot did not do
+
+**It did not touch the sun, the shadow map or any run.** `Sun::at`, `SkyState::of` and every field
+of every snapshot are as V6 left them; the whole of this shot is one engine light and the
+measurement that moves it.
+
+**It did not add a camera exposure.** No tone curve, no luminance histogram, nothing on the GPU
+side of the `viewer` feature -- DECISIONS.md has the two reasons, and the short one is that the CI
+gate builds `--no-default-features` and could not assert a word of it.
+
+**It did not re-accept a reference screenshot.** `ecoview-native`'s goldens are meshes and no mesh
+moves here; the frames in `shots/` are evidence, not gates, so `ecoview/shots/REACCEPT-NN.md` is
+not written. The reference site's shadows *do* change at the dense ticks, and that is recorded in
+DECISIONS.md and measured above rather than left for someone to notice.
+
+**It did not put a latitude, an ambient level or an exposure into any format.** The number is the
+viewer's, the HUD says so in the same words V6 and V8 use, and if a later shot publishes one this
+becomes the fallback -- the same position crowding and standing water are in.

@@ -200,9 +200,14 @@ impl Plantable {
         let sealed = sealed_line(media, &grows);
         let source = if missing.is_empty() {
             format!("the run's meta.json, params.medium.<name>.plantable; {sealed}")
+        } else if missing.len() == media.len() {
+            // A run that says nothing about any medium is not a source. Every format-1, -2 and -3
+            // run is one, and so is any run written before the field existed; naming meta.json
+            // first there would credit the run for an answer it never gave.
+            format!("this viewer's fallback name list, because the run carries no params.medium; {sealed}")
         } else {
             format!(
-                "the run's meta.json, params.medium.<name>.plantable, and this viewer's fallback                  name list for {}, which it does not carry; {sealed}",
+                "the run's meta.json, params.medium.<name>.plantable, and this viewer's fallback name list for {}, which it does not carry; {sealed}",
                 missing.join(", ")
             )
         };

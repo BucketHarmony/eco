@@ -1082,3 +1082,66 @@ against the row's 1,500** -- 381 to spare, with both write-ups in it. The gate i
 insertions, `src/main.rs` 218, `src/overlay.rs` 217, `src/voxel.rs` 162, `src/palette.rs` 56, and
 the two write-ups 186. The split is **653 non-test and 352 test** before the write-ups. The reworded
 CLAUDE.md clause is outside the component and outside the budget.
+
+# S4 -- the plantable gate, read from the run
+
+## The claim this shot has to survive: that it changes no picture
+
+The set the run publishes and the set V4 wrote down are the same set, so the shot is a change of
+source and not of behaviour -- and that is measured twice rather than asserted.
+
+- **In the gate.** `the_capitol_run_and_the_name_list_agree` loads the committed
+  `ecosim/fixtures/capitol-mini` and compares `Plantable::of` against `Plantable::fallback` flag by
+  flag over all nine media. Equal, and the sealed set is `concrete, asphalt, roof, water`. If a
+  later shot changes a `params.toml` default, this goes red and the viewer follows the change.
+- **In the frame.** The same picture was rendered from the commit before this shot (`fccc97d`,
+  built by checking `src/` and `tests/` out at that commit into this working tree) and from the
+  shot's code, same arguments: `--world worlds/capitol --run runs/capitol-s42 --tick 10000 --overlay
+  surface --headless --frames 300`. Both report **99262 grass, 172107 shrub, 5746 vine voxels** and
+  **478601 quads over 93 drawn chunks**, and every pixel from y=400 to the bottom of the 1280x800
+  frame is identical -- **0 of 512000 differ**. The 15.4% that differs over the whole frame is
+  entirely the HUD panel, which has gained a line and reflowed below it.
+
+## The screenshots
+
+Three, all `--world ../ecosim/worlds/capitol --headless --frames 300`, and each one viewed.
+
+| File | Arguments beyond the world | What it shows |
+| --- | --- | --- |
+| `s4-from-the-run.png` | `--run ../ecosim/runs/capitol-s42 --tick 10000 --overlay surface` | The reference site, unchanged to the pixel below the HUD. The new line reads `sealed ground grows nothing -- from the run's meta.json, params.medium.<name>.plantable; concrete, asphalt, roof, water grow nothing`, with no `(!)`: every medium on this site was answered by the run. |
+| `s4-no-run.png` | none -- the bundle alone | The case the fallback exists for. No `meta.json` anywhere, so the line reads `from this viewer's fallback name list, because no run is loaded to ask` and carries `(!)`. The site still draws, and the paths and forecourt still read as paths. |
+| `s4-run-without-the-table.png` | `--run ../ecosim/runs/capitol-s42-grad06 --tick 10000 --overlay surface` | A format-4 run whose `params.medium` is empty, from before shot S2 stopped omitting defaulted sections. The viewer loads it and says `from this viewer's fallback name list, because the run carries no params.medium  (!)` -- and sits directly above V3's height-curve line saying the same thing about `params.tree`, which is what a run that predates two fields is supposed to look like. |
+
+Nothing under `eco-private/` was read or referenced. A private home-scene pass is owed for this shot
+and is the operator's; the HUD gains a line on every frame, so every private picture gains it too.
+
+## The gates
+
+`cargo test --release --no-default-features --test mesh_golden` is **72 pass**, S5's 68 plus four:
+the run deciding against the name list in both directions, a partly-filled table, a table that is
+absent altogether, and the fixture agreement above. `cargo test --release` the same. `cargo fmt
+--check` clean. `cargo clippy --all-targets` is the same three pre-existing `src/bundle.rs` findings
+S5 recorded, with no new one. Release build 22.9 s.
+
+**No golden hash moved and nothing was regenerated.** This shot adds no voxel id and no palette
+slot; it changes where one boolean per medium comes from.
+
+## Two defects in the resumed work in progress, fixed here
+
+S4's first worker died on an API 500 thirteen minutes in, and its tree was committed unverified as
+`fbd4d84`. Reviewing it before finishing found two, both in the one sentence `Plantable::of` builds:
+
+- A run of eighteen spaces inside a `format!` literal, which would have printed to the HUD. `cargo
+  fmt` does not see inside string literals, so the gate would never have caught it -- only looking
+  at the picture would, which is why the screenshots are viewed.
+- A run carrying no `params.medium` at all still read as "from the run's meta.json". Described in
+  DECISIONS.md; `runs/capitol-s42-grad06` is a real run that hits it, and it is now the third
+  screenshot.
+
+## Line budget
+
+`git diff --stat fccc97d -- ecoview-native/` is **494 insertions and 19 deletions, 475 net, against
+the row's 1,500** -- 1,025 to spare, with both write-ups in it. The three PNGs are binary and count
+nothing. `tests/mesh_golden.rs` is 185 of the insertions, the two write-ups 124, `src/voxel.rs` 141,
+`src/main.rs` 24 and `src/run.rs` 20: **185 non-test code, 185 test, 124 write-up**. The 16 deleted
+lines in `src/voxel.rs` are the `grows` field and the four-name `matches!` V4 built it with.

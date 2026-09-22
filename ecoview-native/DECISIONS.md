@@ -832,3 +832,65 @@ that was misleading** -- "pond in depressions" describes the mechanism and leave
 puddles in the lawn -- so it now says both: depression storage is filled everywhere, and only a
 surface the soil cannot drink from still holds it. The four screenshots are the evidence a reader
 can check without running anything: the water is in the gutters, the car park and the paths.
+
+# S4 -- the plantable gate is read from the run, not re-derived from a list of names
+
+## S4 the run directory is an interface, and reading it is not sharing code
+
+Shot V4 decided which ground grows things by matching medium **names** against a list it wrote down
+-- `concrete`, `asphalt`, `roof`, `water` -- and its recorded reason was that the two projects share
+no code. That is the reason to read the file rather than the reason to copy the value. CLAUDE.md
+makes the run directory the whole interface between them, and `meta.json` has carried the answer as
+data since shot G4: `params.medium.<name>.plantable`, false for exactly those four. So the gate now
+reads it. `Plantable::of` is the reading, `VoxelWorld::read_plantable` puts it on the world, and
+`Plantable::grows` is the single call site the cover loop uses.
+
+Nothing about the picture changes -- see MEASUREMENTS.md, where the frame below the HUD is diffed
+pixel for pixel against the same frame from the commit before this shot and comes out identical.
+This is a correctness-of-source fix. What it buys is that the day someone edits `params.toml`, the
+viewer follows the simulator instead of drifting from it, and `the_capitol_run_and_the_name_list_agree`
+goes red on the way rather than after.
+
+## S4 the name list stays as the fallback, because the viewer opens sites with no run
+
+`--world DIR` on its own and `--stress` draw a site with no `meta.json` anywhere, and a site with
+nothing to ask still has to decide whether a lawn grows. The V4 list is kept for exactly that, as
+`SEALED_NAMES`, and it is now reachable from one place instead of being the rule.
+
+Which of the two is in force is on the screen, the way shot V3's height curve and V2's ramp hues
+are: `sealed ground grows nothing -- from the run's meta.json, params.medium.<name>.plantable` when
+it was read, and `from this viewer's fallback name list, because no run is loaded to ask  (!)` when
+it was not. A fallback that does not say it is a fallback is indistinguishable on screen from a
+reading, and the `(!)` is the same marker the other two provenance lines use. `ecoview.stats` gains
+a `plantable` object with the same four facts, so an agent can check it without reading pixels.
+
+## S4 per medium, not all or nothing -- and a run that says nothing is not a source
+
+A run is read medium by medium. If it names eight of the nine, the eight are the run's and only the
+ninth falls back, and the source line names the ones it guessed at. Throwing away eight true answers
+to avoid one guess would be the worse trade.
+
+The edge that matters is the other end of that scale: a run that carries **no** `params.medium` at
+all must not read as "from the run's meta.json", because that credits a file with an answer it never
+gave -- a worse lie than V4's list was, since it names a file a reader could go and check. It is a
+live case, not a defensive one. `ecosim/runs/capitol-s42-grad06` is a format-4 run written before
+shot S2 removed the `skip_serializing_if` that omitted defaulted sections, so its medium table is
+empty; the viewer loads it happily, because the loader's only version rule is format 4. That run now
+reads `from this viewer's fallback name list, because the run carries no params.medium  (!)`, and
+`a_run_with_no_medium_table_is_not_the_source` pins it.
+
+## S4 only `plantable` is deserialised out of `params.medium`
+
+`MediumRow` has one field. The three hydrology numbers beside it in the file -- `infiltration_mm_h`,
+`field_capacity_mm`, `percolation_mm_h` -- are the simulator's business; this viewer draws no
+infiltration, it draws the `water.bin` the simulator already wrote (shot S5). Leaving them out of
+the struct is what keeps that true rather than merely unimplemented. The table itself is a
+`BTreeMap` rather than a struct of nine fields, because the scene contract's media are the
+simulator's to name and a tenth one should arrive here as data rather than as a parse error.
+
+## S4 the gate is re-read on every snapshot, not once at load
+
+`read_plantable` is called from `load_snapshot`, which runs whenever a snapshot is applied, and it
+replaces the value only when it differs. Reading once at startup would be wrong for the case shot E4
+built: the round trip grows a run from the edited site and adopts it mid-session, and a gate read
+before that run existed would still be the fallback's while the HUD claimed otherwise.

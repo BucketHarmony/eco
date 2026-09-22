@@ -2659,6 +2659,33 @@ fn a_run_that_names_only_some_media_is_still_read_for_those() {
     assert!(e.grows(1) && !e.grows(6), "both fell back to the name list");
 }
 
+/// A run with no `params.medium` at all does not get to be called the source.
+///
+/// Every format-1, -2 and -3 run is one of these, and so is any run written before `plantable`
+/// existed. The flags they produce are the same as the fallback's -- there is nothing else they
+/// could be -- but the sentence beside them is not: "from the run's meta.json" over an answer the
+/// run never gave is the one thing this shot exists to stop, and it would be a worse lie here than
+/// the hard-coded list was, because it names a file a reader could go and check.
+#[test]
+fn a_run_with_no_medium_table_is_not_the_source() {
+    let none = meta_with_media("{}");
+    let p = Plantable::of(&media(), &none);
+    assert!(!p.from_meta);
+    assert!(
+        p.source.starts_with(
+            "this viewer's fallback name list, because the run carries no params.medium"
+        ),
+        "{}",
+        p.source
+    );
+    // Same flags as the fallback, and the same four media sealed.
+    let f = Plantable::fallback(&media());
+    assert_eq!(p.sealed(), f.sealed());
+    for code in 0..media().len() as u8 {
+        assert_eq!(p.grows(code), f.grows(code));
+    }
+}
+
 /// The claim that this shot changes no picture, measured on a committed run rather than asserted.
 ///
 /// `ecosim/fixtures/capitol-mini` is a real format-4 run of the reference bundle, committed, and its

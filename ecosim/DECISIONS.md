@@ -2116,3 +2116,12 @@ find a `water` row and take its hues from the run — which changes no pixel, be
 published here are the ones that module already held. Whoever takes it should note that the ramp is
 per run: a site with no deep bowl will publish 100 mm or 1 m rather than 10 m, and a viewer that
 hard-codes four decades of band spacing will need the published `curve` and ends instead.
+
+**The first CI run was 9 of 10 green, and the tenth is the browser flake.** Run 35726551135 on
+e944814: `ecoview` red on `tests/e2e/edit.spec.ts:346`, "Test timeout of 180000ms exceeded while
+setting up context" after `browser.newContext: Protocol error (Browser.setDownloadBehavior): Failed
+to find browser context`. Same file, same protocol error and the same 3.0 min as the red shot S7 met
+and as backlog row C2 describes; 48 of 49 e2e tests and all 116 unit tests passed beside it,
+including every test that reads the three fixtures this shot regenerated. A worker cannot re-run a
+job on this repository (`gh run rerun --failed` answers `Must have admin rights`), so the re-run is a
+push, and this paragraph is it: no source file, test or gate changed.

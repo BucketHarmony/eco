@@ -1668,3 +1668,67 @@ the operator established on 2026-09-21 at 06:17 -- so the only re-run available 
 and this paragraph is it. **Nothing in the shot was changed to make a gate pass**, and nothing could
 have been: an `ecoview-native` shot may not edit `ecoview/` (MASTER.md, component isolation), so the
 alternative to recording the flake here was to record it in a BLOCKED file.
+
+# V10 -- re-pinning the animals fixture after S11 moved the ecology
+
+## What was stale, and what it was measured against
+
+S11 replaced trunk-count crowding with crown overlap, which changed the ecology, which regenerated
+`ecosim/fixtures/capitol-animals-mini`. Five constants in `tests/mesh_golden.rs` are read off that
+fixture at tick 2000 and went stale with it; nothing about the viewer was wrong. `ecoview-native`
+was red on every commit from b330a56 until this one.
+
+Every value below was re-derived here from the committed fixture, by running the failing test and
+reading the value it reported, and each matches the operator's independent count from
+`snap_002000/entities.json` recorded in the V10 row.
+
+| `tests/mesh_golden.rs` | was | is |
+| --- | --- | --- |
+| `total(&grown)` | 9204 | **9169** |
+| `(busiest(&grown), occupied(&grown))` | (95, 869) | **(70, 860)** |
+| the `.position(...)` that locates the busiest patch, and the two `value(Overlay::Crowding, ...)` | 95 | **70** |
+| `clamped.len()` | 5 | **7** |
+| `(min, max)` of the clamped patches | (32, 95) | **(37, 70)** |
+
+**Two more the row's table does not list**, in the same test, found by running it rather than by
+reading the table -- the row named five assertions and there are seven values to move:
+
+| `tests/mesh_golden.rs` | was | is |
+| --- | --- | --- |
+| `distinct(&old_bands)` | 27 | **28** |
+| `distinct(&new_bands)` | 18 | **20** |
+| `(stats.min, stats.max)` | (0.0, 95.0) | **(0.0, 70.0)** |
+
+The last of those is the same 95 as the busiest patch, reached by a different path -- `bands()`
+returns the field's own min and max, so it moves with the fixture and not with the scale.
+
+## The test still says what it was written to say
+
+S7 wrote `the_crowding_ramp_no_longer_flattens_the_patches_it_exists_to_show` to show that the old
+scale drew the top of the field in one colour. Post-S11 the flattened band is **seven patches
+spanning 37 to 70**, where it was five spanning 32 to 95 -- wider in count, narrower in ratio, a
+factor of just under two rather than three. The claim survives: seven patches still stack into one
+old band, the new ramp still spreads them by at least three bands, and there is still headroom
+above the busiest patch. The prose in the doc comment was the test's evidence, so it was rewritten
+to the new numbers rather than left describing a fixture that no longer exists.
+
+The cost line moved the same way: 28 distinct bands become 20, where S7 measured 27 and 18. Both
+ends moved by one and the ratio they exist to show did not.
+
+**Nothing was loosened.** No assertion was widened, removed or turned into an inequality; every one
+of the seven is still an exact equality against a constant, which is what makes the file a tripwire
+on a regeneration that drops the animal tier. Its own doc comment says that is why it exists.
+
+## The gate
+
+| command | result |
+| --- | --- |
+| `cargo test --release --no-default-features --test mesh_golden` | **ok, 88 passed**, 0 failed, 0.06 s |
+| `cargo fmt --check` | clean |
+
+88 is the count the V10 row predicted, and it is unchanged from before S11 -- this shot adds no
+test and deletes none.
+
+## Line budget
+
+22 insertions, 16 deletions in one file: **6 net lines** against the row's 60, plus this write-up.

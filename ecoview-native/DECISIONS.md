@@ -983,3 +983,82 @@ carries `dig_limit_from_run`, the note ends with either `the run's params.bundle
 viewer's default, with no run loaded to ask`, and `ecoview.stats` publishes the flag beside the
 number. `shots/s6-dig-floor.png` and `shots/s6-dig-floor-no-run.png` are the same dig with the two
 wordings, which is why there are four screenshots and not three.
+
+## V8 the held date is an override on the run's day, not a second clock
+
+The viewer could have grown a clock of its own -- a date it owns, with the run's date as a starting
+value -- and that is the shape most "let the user set X" features take. It would have been wrong
+here. The day of the year is the run's (V6, above) because the simulator's temperature and rain
+swing on it, and a viewer that keeps its own date has quietly made the run's date advisory.
+
+So the day is still computed from the tick, every frame, and `Clock::with_day` overrides the one
+number afterwards. Three consequences, all of them wanted:
+
+- `with_day(None)` is the identity, so a viewer holding nothing is bit for bit the viewer of the
+  first seven shots. The test `no_held_date_is_the_clock_the_last_seven_shots_had` is that claim,
+  and it is the sibling of the three golden hashes.
+- Everything else on the clock -- the tick, the `year_len`, `tick_hours`, `years()` -- is untouched
+  and still the run's, so a held frame can still say which tick it is a picture of. That is the
+  whole reason to hold one.
+- The override is releasable. **\\** drops it and the run's own day is underneath, unchanged,
+  because it was never overwritten.
+
+`Clock::from_run` became a method over a three-case `DaySource`, rather than a second bool beside
+it. Two bools would have had a fourth state that cannot happen, and someone would eventually have
+read it.
+
+## V8 a week a press, and a third key to hand the date back
+
+The hour keys move half an hour a press. A day a press would have been the analogous choice and it
+would have been a key that usually does nothing: seasonal colour is quantised into
+`sky::SEASON_STEPS` (V6, above), 5.7 days a step, so a one-day press draws the same frame four times
+out of five. A week always crosses a step, which the test asserts at five points around the year.
+Fifty-two presses walk the whole year, and `--date` is there for the frame you actually want.
+
+**;** and **'** because they are the two keys to the right of **K** and **L**: the hour and the date
+sit next to each other on the keyboard as well as in the HUD. The third key is **\\**, and it earns
+its place -- a frame with a held date is a frame whose date is not the run's, and getting back to the
+honest picture should not mean restarting the viewer.
+
+## V8 the flag counts days from 1 and the clock counts from 0
+
+`--day 1` is 1 January, because every almanac, `date +%j` and spreadsheet in the world calls
+1 January day 1. `Clock::day` is 0-based, because `month_day` walks a table. `parse_date` is the one
+place the two meet and it subtracts the one, which is why the conversion has a test that walks all
+365 days of the table in both directions rather than checking two endpoints.
+
+`--date 6-22` and `--date 6/22` are the same date, and `--day 172` is too. A year field is not
+accepted: the clock has no year, a run is at a tick, and which calendar year a tick is in is not a
+thing this project knows. Anything else -- `366`, `2-30`, `june`, `6-22-2026` -- is fatal rather than
+ignored, for the reason `--overlay` is fatal: a screenshot script that mistypes a date must not
+quietly file the run's own season under the held date's name.
+
+## V8 the date is a flag and a key, and not a BRP method
+
+`ecoview.camera`, `ecoview.edit`, `ecoview.timeline` and `ecoview.sim` exist because an agent cannot
+fly, dig, scrub or run a simulator from a command line. It can set a date from one: the four
+screenshots in this shot are four `--date` flags. So the date is reported over BRP -- `day_source`
+and `day_held` are in every `ecoview.stats` reply -- and not settable there. A method would be a
+second way to do a thing the first way already does, and V0's rule about the remote surface is that
+every method on it is one an agent needs.
+
+## V8 a held frame says so twice, and a third time when nothing draws it
+
+`SkyState::line` already named whose the date was, in one of two ways; it now has a third, and the
+HUD prints a second clause beside the release key. Naming it twice is deliberate. A screenshot
+travels further than the report that came with it, and this is the first frame this viewer can draw
+that is a picture of two moments at once: tick 9000's wood under 21 December's light. One clause
+says whose the date is and the other says the tick did not move, which is the half a reader is most
+likely to get wrong.
+
+The third place is the one where the flag draws nothing. With `--no-sky` there is no sun path and no
+season in the palette, so a held date changes not one pixel -- and the HUD and the console summary
+both say so rather than let a `--date` screenshot look as though the date had been applied.
+
+## V8 `sky_json` exists because two keys hit the `json!` expansion depth
+
+`ecoview.stats` builds its whole reply in one `json!`, and adding `day_source` and `day_held` took
+that macro past the default recursion limit. The compiler's own suggestion is
+`#![recursion_limit = "256"]`; the `sky` object was lifted into `sky_json` instead. A crate-wide
+knob raised to make one function compile is the kind of thing that is never lowered again, and the
+object was the largest thing in that macro anyway.

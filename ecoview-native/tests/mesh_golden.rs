@@ -2146,8 +2146,8 @@ fn the_day_of_the_year_comes_from_the_tick() {
     assert!((Clock::of(Some(6000), year, 10.0).years() - 1.5).abs() < 1e-6);
     // No run, no year: the viewer says whose the date is, and lights the site anyway.
     let none = Clock::of(None, 0, 10.0);
-    assert!(!none.from_run && none.day == SOLSTICE_DAY);
-    assert!(Clock::of(Some(0), year, 10.0).from_run);
+    assert!(!none.from_run() && none.day == SOLSTICE_DAY);
+    assert!(Clock::of(Some(0), year, 10.0).from_run());
     // A `year_len` of zero is a run that did not state one; the shipped default stands in.
     assert_eq!(none.year_len, DEFAULT_YEAR_LEN);
     assert_eq!(Clock::of(Some(0), year, 25.5).hhmm(), "01:30");
@@ -2960,4 +2960,190 @@ fn an_undug_world_still_meshes_to_the_bytes_it_always_did() {
     let w = VoxelWorld::from_bundle(&flat(16, 0.5, 4.0));
     assert_eq!(w.datum_m(), 0.0);
     assert_eq!(mesh_one(&flat(16, 0.5, 4.0)).0, 0x7c23_841c_633d_3d9d);
+}
+
+// ---- shot V8: the date, held over a tick that does not move ----
+//
+// In this file for the reason every block above it is: CI runs exactly one test target.
+//
+// **What is being pinned is a provenance, not a picture.** Holding the date is one override on one
+// number, and the risk in it is not that the arithmetic is wrong -- it is that a frame drawn at a
+// date nobody simulated gets read as a frame the simulator produced. So these check the three
+// things that keep it honest: the tick and everything derived from it do not move, only the living
+// colours do, and the clock, the HUD line and `ecoview.stats` all say whose the date is.
+
+use ecoview_native::sky::{day_of_year, parse_date, DaySource, MONTHS};
+
+/// The whole of the row: the year turns, the tick stands still.
+#[test]
+fn a_held_date_moves_the_year_and_not_the_tick() {
+    let year = 4000u64;
+    // Tick 9000 of the reference run, which is where V6 took `v6-summer.png`: 22 June, 3,867 trees.
+    let summer = Clock::of(Some(9000), year, 10.0);
+    assert_eq!(summer.day_source, DaySource::Run);
+    assert!((summer.day - SOLSTICE_DAY).abs() < 0.1, "{}", summer.day);
+    // The date tick 11000 draws -- `v6-winter.png`, 1,453 trees -- held over tick 9000 instead.
+    let winter_tick = Clock::of(Some(11000), year, 10.0);
+    let held = summer.with_day(Some(winter_tick.day));
+    assert_eq!(held.day, winter_tick.day);
+    assert_eq!(Season::of(held.day).name, "winter");
+    assert_eq!(Season::of(summer.day).name, "summer");
+    // And this is the claim the whole shot rests on: nothing about the run's own clock moved.
+    assert_eq!(held.tick, Some(9000), "the tick is the run's, still");
+    assert_eq!(held.year_len, summer.year_len);
+    assert_eq!(held.tick_hours, summer.tick_hours);
+    assert_eq!(held.years(), summer.years());
+    assert_eq!(held.hour, summer.hour);
+    // The clock says it is held, which is what the HUD and `ecoview.stats` read.
+    assert_eq!(held.day_source, DaySource::Override);
+    assert!(!held.from_run(), "a held day is not the run's day");
+    assert_eq!(held.day_source.name(), "override");
+    assert!(held.day_source.line().contains("the tick has not moved"));
+    assert!(SkyState::of(held, 42.7)
+        .line()
+        .contains("the tick has not moved"));
+    // A held date wraps rather than clamping, because the keys walk the year in both directions.
+    assert_eq!(summer.with_day(Some(DAYS_PER_YEAR + 3.0)).day, 3.0);
+    assert!((summer.with_day(Some(-1.0)).day - (DAYS_PER_YEAR - 1.0)).abs() < 1e-4);
+    // With no run there is nothing to hold it over, and it still holds: `--date` on a bare bundle
+    // is how a site with no run gets photographed in October.
+    let bare = Clock::of(None, 0, 10.0);
+    assert_eq!(bare.day_source, DaySource::Default);
+    assert_eq!(bare.with_day(Some(288.0)).day_source, DaySource::Override);
+}
+
+/// The regression sibling: `with_day(None)` is the identity, so every frame the first seven shots
+/// drew is the frame they drew.
+///
+/// The viewer calls `with_day` on every clock it builds, once per frame, whether a date is held or
+/// not -- so "nothing is held" has to be bit for bit "this shot does not exist". That is what keeps
+/// V6's screenshots, and the three golden hashes at the top of this file, meaning what they meant.
+#[test]
+fn no_held_date_is_the_clock_the_last_seven_shots_had() {
+    let year = 4000u64;
+    for tick in [None, Some(0), Some(1000), Some(9000), Some(20000)] {
+        for hour in [0.0, 10.0, 23.5] {
+            let c = Clock::of(tick, year, hour);
+            assert_eq!(c.with_day(None), c, "tick {tick:?} at {hour}");
+            assert_eq!(
+                SkyState::of(c.with_day(None), 42.7).mesh_key(),
+                SkyState::of(c, 42.7).mesh_key(),
+                "and it cannot remesh anything"
+            );
+        }
+    }
+    // Handing the date back is the same operation, from the other end: what the release key does is
+    // drop the override, and the day underneath it was never touched.
+    let run = Clock::of(Some(9000), year, 10.0);
+    let held = run.with_day(Some(15.0));
+    assert_ne!(held.day, run.day);
+    assert_eq!(Clock::of(held.tick, held.year_len, held.hour), run);
+}
+
+/// `--day` and `--date`, in the three spellings a shot script uses.
+#[test]
+fn a_date_argument_reads_a_day_of_the_year_or_a_calendar_date() {
+    // 1-based in, 0-based out: day 1 is 1 January, the day `month_day` calls ("January", 1).
+    let jan1 = parse_date("1").expect("day one");
+    assert_eq!(jan1, 0.0);
+    assert_eq!(
+        Clock::of(None, 0, 10.0).with_day(Some(jan1)).month_day(),
+        ("January", 1)
+    );
+    // A month and a day of it, in either of the two separators a command line survives.
+    for s in ["6-22", "6/22", " 6 - 22 "] {
+        let d = parse_date(s).unwrap_or_else(|| panic!("{s:?}"));
+        assert_eq!(d, SOLSTICE_DAY, "{s:?} is the solstice this viewer draws");
+        assert_eq!(
+            Clock::of(None, 0, 10.0).with_day(Some(d)).month_day(),
+            ("June", 22)
+        );
+    }
+    // `day_of_year` is `month_day` backwards, on every day of the table.
+    let mut n = 0.0;
+    for (m, (name, len)) in MONTHS.iter().enumerate() {
+        for d in 1..=*len {
+            let day = day_of_year(m as u32 + 1, d).expect("a real date");
+            assert_eq!(day, n, "{name} {d}");
+            assert_eq!(
+                Clock::of(None, 0, 10.0).with_day(Some(day)).month_day(),
+                (*name, d)
+            );
+            n += 1.0;
+        }
+    }
+    assert_eq!(n, 365.0, "the table is a 365-day year");
+    // Nothing that does not parse comes back as a date. The caller makes each of these fatal: a
+    // screenshot script that mistypes a date must not quietly photograph the run's own season.
+    for bad in [
+        "",
+        "0",
+        "366",
+        "-4",
+        "13-1",
+        "2-30",
+        "6-0",
+        "june",
+        "6-",
+        "-6",
+        "6-22-2026",
+        "abc",
+    ] {
+        assert!(parse_date(bad).is_none(), "{bad:?} is not a date");
+    }
+    assert_eq!(day_of_year(2, 29), None, "no leap day on a 365-day table");
+    assert_eq!(day_of_year(12, 31), Some(364.0));
+}
+
+/// What a held date is allowed to change: the leaves and the sun. Not the paving, and not one
+/// number the run published.
+#[test]
+fn turning_the_year_over_one_tick_changes_the_leaves_and_nothing_else() {
+    let year = 4000u64;
+    let tick = Clock::of(Some(9000), year, 12.0);
+    let summer = SkyState::of(tick, 42.7);
+    let winter = SkyState::of(tick.with_day(Some(354.0)), 42.7);
+    // The sun is where December's sun is: lower at noon by about twice the axial tilt.
+    let drop = summer.sun.elevation_deg - winter.sun.elevation_deg;
+    assert!(
+        (drop - 2.0 * AXIAL_TILT_DEG).abs() < 2.0,
+        "{drop:.1} degrees lower at noon"
+    );
+    assert!(winter.sun.is_up(), "and still up, at 42.7 N at noon");
+    // The leaves move, and they are the only thing in the palette that does.
+    let base = palette(Overlay::Surface, None);
+    let (mut a, mut b) = (base.clone(), base.clone());
+    summer.season.tint_palette(&mut a);
+    winter.season.tint_palette(&mut b);
+    assert_ne!(a[CANOPY as usize], b[CANOPY as usize]);
+    assert_ne!(a[GRASS as usize], b[GRASS as usize]);
+    for id in 0..PALETTE_LEN {
+        if ![CANOPY, VINE, SHRUB, GRASS].contains(&(id as u16)) {
+            assert_eq!(a[id], b[id], "id {id} is not alive and has no season");
+        }
+    }
+    // The seasonal palette is the same function of the day whichever way the day was arrived at, so
+    // a frame held at December's date is the frame December's tick would have drawn -- with tick
+    // 9000's trees standing in it instead of tick 11000's. That is the demonstration V6 could not
+    // take, and this is it as arithmetic.
+    let reached = Clock::of(Some(11000), year, 12.0);
+    let held = tick.with_day(Some(reached.day));
+    assert_eq!(
+        SkyState::of(held, 42.7).season,
+        SkyState::of(reached, 42.7).season
+    );
+    assert_eq!(
+        SkyState::of(held, 42.7).sun.declination_deg,
+        SkyState::of(reached, 42.7).sun.declination_deg
+    );
+    assert_eq!(held.tick, Some(9000));
+    assert_eq!(reached.tick, Some(11000));
+    // A week is the key's step, and it always moves the palette: the year is quantised into
+    // `SEASON_STEPS` of 5.7 days, so anything smaller can draw the same picture twice.
+    assert!(7.0 > DAYS_PER_YEAR / SEASON_STEPS as f32);
+    for day in [0.0, 90.0, 172.0, 288.0, 358.0] {
+        let one = SkyState::of(tick.with_day(Some(day)), 42.7).mesh_key();
+        let next = SkyState::of(tick.with_day(Some(day + 7.0)), 42.7).mesh_key();
+        assert_ne!(one, next, "a week from day {day} is a different step");
+    }
 }

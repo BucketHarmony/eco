@@ -27,7 +27,7 @@ pub use overlay::{Fields, Scale};
 pub use palette::Overlay;
 pub use run::Run;
 pub use sim::{SimJob, SimState};
-pub use sky::{Clock, Season, SkyState, Sun};
+pub use sky::{Clock, DaySource, Season, SkyState, Sun};
 pub use tree::{Life, TreeForm};
 pub use voxel::{ChunkPos, EditAction, VoxelWorld};
 

@@ -8,6 +8,7 @@
 //!                [--no-water] [--eye X,Y,Z] [--look X,Y,Z] [--headless] [--frames N]
 //!                [--screenshot PATH]
 //!                [--bench SECS] [--port N] [--no-ao] [--no-sky] [--hour H] [--lat DEG]
+//!                [--day N | --date M-D]
 //!                [--edit X0,Y0,X1,Y1,ACTION[,MEDIUM]]... [--sim] [--sim-ticks N] [--sim-seed N]
 //!                [--sim-root DIR]
 //! ```
@@ -16,8 +17,16 @@
 //! **P** to play or pause; **,** and **.** to step a snapshot; **Home** and **End** for the ends of
 //! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**8** for
 //! the overlay; **V** for the ground cover and vines; **F** for the standing water; **K** and **L**
-//! move the hour of the day
+//! move the hour of the day; **;** and **'** move the date a week without moving the tick and **\\**
+//! hands the date back to the run;
 //! and **O** turns the beauty pass -- ambient occlusion, sky, sun and seasonal colour -- off.
+//!
+//! **The date can be held over a tick that does not move** (shot V8). `--day N`, `--date M-D` or
+//! the two date keys turn the year over one snapshot, so the same wood stands in a summer frame and
+//! a winter one; before this the only way to reach December was to load a December tick, and a
+//! different tick is a different world. It moves the sun and the leaf colour and **nothing else** --
+//! every tree, every millimetre of water and every overlay band on the frame is still the run's,
+//! from the tick the timeline is on, and the HUD says on every frame that the date is not.
 //!
 //! Editing, under the crosshair: **Q** and **Z** raise and lower the ground, **T** and **G** raise
 //! and lower a building, **M** cycles the surface, **U** undoes. **Enter** grows what you have made
@@ -72,7 +81,7 @@ use ecoview_native::overlay::{self, FieldStats, Fields, PondStats, Ponds, Scale}
 use ecoview_native::palette::{palette, Overlay, Ramp, BANDS};
 use ecoview_native::run::Run;
 use ecoview_native::sim::{self, SimJob, SimState};
-use ecoview_native::sky::{self, shaded_palette, Clock, SkyState};
+use ecoview_native::sky::{self, shaded_palette, Clock, SkyState, DAYS_PER_YEAR};
 use ecoview_native::tree::Life;
 use ecoview_native::voxel::{ChunkPos, ColumnBands, EditAction, VoxelWorld};
 use ecoview_native::{brp, stress_world, Bundle, CAPITOL};
@@ -154,6 +163,10 @@ struct Args {
     sky: bool,
     hour: f32,
     lat: f32,
+    /// `--day N` (1-based day of the year) or `--date M-D`: the day of the year **held**, over
+    /// whatever tick the timeline is on (shot V8). `None` leaves the day the run's, which is where
+    /// V6 left it. The keys **;**, **'** and **\** move and release it at runtime.
+    day: Option<f32>,
 }
 
 /// `X0,Y0,X1,Y1,ACTION[,MEDIUM]` in ground cells, inclusive. Fatal when it does not parse, for the
@@ -210,6 +223,7 @@ fn args() -> Args {
         sky: true,
         hour: sky::DEFAULT_HOUR,
         lat: sky::DEFAULT_LATITUDE_DEG,
+        day: None,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -293,6 +307,19 @@ fn args() -> Args {
             }
             "--lat" => {
                 a.lat = next().parse().unwrap_or(sky::DEFAULT_LATITUDE_DEG);
+                i += 1;
+            }
+            // Fatal when it does not parse, for the reason `--overlay` is: these two flags decide
+            // which season a scripted screenshot is taken in, and a silent fall back to the run's
+            // own date would file a summer frame under the winter picture's name.
+            "--day" | "--date" => {
+                let n = next();
+                a.day = Some(sky::parse_date(&n).unwrap_or_else(|| {
+                    panic!(
+                        "cannot read {n:?} as a date; expected a day of the year in 1-365, or M-D \
+                         (6-22 is 22 June)"
+                    )
+                }));
                 i += 1;
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -619,6 +646,9 @@ struct Sky {
     ao: bool,
     hour: f32,
     lat: f32,
+    /// The day of the year held over the run's tick, or `None` to take the run's own (shot V8).
+    /// `--day`/`--date` sets it, **;** and **'** move it, **\** puts it back to `None`.
+    day: Option<f32>,
     state: SkyState,
     /// The `(on, ao, season step)` the drawn world's palette was built for. Anything else is a
     /// remesh, which is why the season is quantised at all (`sky::SEASON_STEPS`).
@@ -637,7 +667,8 @@ impl Sky {
             ao: a.ao,
             hour: a.hour,
             lat: a.lat,
-            state: SkyState::of(Clock::of(None, 0, a.hour), a.lat),
+            day: a.day,
+            state: SkyState::of(Clock::of(None, 0, a.hour).with_day(a.day), a.lat),
             applied: None,
             remesh_chunks: 0,
             remesh_ms: 0.0,
@@ -647,13 +678,21 @@ impl Sky {
         sky
     }
 
-    /// The day of the year is the run's, every time the timeline moves; the hour is the viewer's.
+    /// The day of the year is the run's, every time the timeline moves; the hour is the viewer's;
+    /// and since shot V8 the day can be **held** by the viewer over a tick that does not move.
+    ///
+    /// The override goes on last and changes one number. Everything else about the clock -- the
+    /// tick, the `year_len`, what a tick is worth in hours -- is still read off the run here, so a
+    /// held frame can still say which tick it is a picture of, which is the whole reason to hold it.
     fn recompute(&mut self, t: &Timeline) {
         let (tick, year_len) = match &t.run {
             Some(r) => (Some(r.tick_at(t.index)), r.meta.year_len),
             None => (None, 0),
         };
-        self.state = SkyState::of(Clock::of(tick, year_len, self.hour), self.lat);
+        self.state = SkyState::of(
+            Clock::of(tick, year_len, self.hour).with_day(self.day),
+            self.lat,
+        );
     }
 
     /// What the drawn palette depends on. With the seasonal tint off the year is not one of them,
@@ -1102,6 +1141,10 @@ fn setup(
         sky.state.line(),
         if sky.on {
             ""
+        } else if sky.day.is_some() {
+            // The HUD says this on the frame too (shot V8): with the beauty pass off there is no
+            // sun path and no season in the palette, so a held date is a flag that draws nothing.
+            "  (--no-sky: the fixed 45 degree sun of V0-V5, and nothing draws the held date)"
         } else {
             "  (--no-sky: the fixed 45 degree sun of V0-V5)"
         }
@@ -1976,6 +2019,22 @@ fn sky_update(
             sky.hour = (sky.hour + by).rem_euclid(24.0);
         }
     }
+    // A week a press, on the two keys next to the hour's (shot V8). A week rather than a day because
+    // the palette is quantised into `sky::SEASON_STEPS` -- 5.7 days a step -- so any smaller step
+    // can leave the picture exactly as it was, and a key that sometimes does nothing visible reads
+    // as a broken key. The first press takes the day from whatever is drawn, which is the run's
+    // date when nothing is held yet: the year turns from where the snapshot actually is.
+    for (k, by) in [(KeyCode::Semicolon, -7.0), (KeyCode::Quote, 7.0)] {
+        if keys.just_pressed(k) {
+            sky.day = Some((sky.day.unwrap_or(sky.state.clock.day) + by).rem_euclid(DAYS_PER_YEAR));
+        }
+    }
+    // And **\** hands the date back. The override has to be releasable from the keyboard, because
+    // the frame it is on is a frame whose date is not the run's, and getting back to the honest
+    // picture should not mean restarting the viewer.
+    if keys.just_pressed(KeyCode::Backslash) {
+        sky.day = None;
+    }
     sky.recompute(&timeline);
     let st = sky.state;
     let up = st.sun.dir;
@@ -2246,19 +2305,44 @@ fn hud(
     if sky.on {
         s.push_str(&format!(
             "{}
-  beauty pass on -- ambient occlusion {} levels, season {} ({}/{})                [K] [L] hour  [O] off
+  beauty pass on -- ambient occlusion {}, season {} ({}/{}){}   [K] [L] hour  [;] ['] date  [O] off
 ",
             sky.state.line(),
-            sky::AO_LEVELS,
+            // Read off the switch rather than asserted, in both branches (shot V8). `--no-sky` and
+            // `--no-ao` are separate flags and either can be passed alone, so this line has been
+            // able to say "4 levels" with occlusion off and "no occlusion" with it on since V6. It
+            // is on the frame in `v8-held-no-sky.png`, which is a `--no-sky` frame with occlusion.
+            if sky.ao {
+                format!("{} levels", sky::AO_LEVELS)
+            } else {
+                "off (--no-ao)".to_string()
+            },
             sky.state.season.name,
             sky.state.season.step(),
             sky::SEASON_STEPS,
+            // The held date is named twice on purpose: once in `line()` above, where it says whose
+            // the date is, and once here beside the key that releases it. A frame is read as a
+            // picture of one moment, and a held frame is a picture of two.
+            match sky.day {
+                Some(_) => "  date held, the tick has not moved  [\\] back to the run",
+                None => "",
+            },
         ));
     } else {
-        s.push_str(
-            "beauty pass off -- the fixed 45 degree sun, no occlusion, no season   [O] on
+        s.push_str(&format!(
+            "beauty pass off -- the fixed 45 degree sun, no season, ambient occlusion {}   [O] on
 ",
-        );
+            if sky.ao { "still on" } else { "off too" },
+        ));
+        // A held date with the beauty pass off is a flag that draws nothing: the sun is fixed and
+        // the palette has no season in it. Say so rather than let a `--date` screenshot look as
+        // though the date had been applied (shot V8).
+        if sky.day.is_some() {
+            s.push_str(
+                "  a date is held but nothing draws it while the beauty pass is off   [O] on
+",
+            );
+        }
     }
     s.push_str(&editor_line(&editor, &site, &scene));
     s.push_str(&sim_line(&sim));
@@ -2682,6 +2766,47 @@ fn camera_method(In(params): In<Option<Value>>, mut queue: ResMut<CameraQueue>) 
     Ok(json!({"pos": [pos.x, pos.y, pos.z], "look_at": [look.x, look.y, look.z]}))
 }
 
+/// The `sky` object of an `ecoview.stats` reply (shot V6), lifted out of that reply because shot
+/// V8 added the two keys that took the `json!` macro past its expansion depth. One object, built
+/// in one place, so an agent reading it and a reader reading this see the same thing.
+fn sky_json(sky: &Sky) -> Value {
+    json!({
+        "on": sky.on,
+        "ao": sky.ao,
+        "ao_levels": sky::AO_LEVELS,
+        "hour": sky.state.clock.hour,
+        "latitude_deg": sky.state.latitude_deg,
+        "day_of_year": sky.state.clock.day,
+        "day_from_run": sky.state.clock.from_run(),
+        // Shot V8. `day_from_run` above is still exactly what it was -- false whenever the day
+        // on the frame is not the run's -- and this says which of the two ways it is not:
+        // `default` for no run at all, `override` for a date held over a tick that has not
+        // moved. `day_held` is the number the viewer is holding, and null when it holds none.
+        "day_source": sky.state.clock.day_source.name(),
+        "day_held": sky.day,
+        "tick_hours": sky.state.clock.tick_hours,
+        "sun": {
+            "elevation_deg": sky.state.sun.elevation_deg,
+            "azimuth_deg": sky.state.sun.azimuth_deg,
+            "declination_deg": sky.state.sun.declination_deg,
+            "illuminance": sky.state.sun.illuminance,
+            "up": sky.state.sun.is_up(),
+        },
+        "season": {
+            "name": sky.state.season.name,
+            "step": sky.state.season.step(),
+            "steps": sky::SEASON_STEPS,
+            "senescence": sky.state.season.senescence,
+            "dormancy": sky.state.season.dormancy,
+            "flush": sky.state.season.flush,
+        },
+        "ambient": sky.state.ambient,
+        "remesh_chunks": sky.remesh_chunks,
+        "remesh_ms": sky.remesh_ms,
+        "note": "expression, not simulation: the day of the year is the run's tick over its year_len, and the hour, the latitude and the seasonal hues are the viewer's. The simulator computes light under a fixed 45 degree sun and has no time of day; moving this one changes no number in any run. With day_source = override the date is the viewer's too, held over a tick that has not moved: the sun and the leaf colour follow the held date, and the trees, the water, the burn scars and every overlay band on the frame are still the tick's.",
+    })
+}
+
 /// `ecoview.stats` -- what the world is, what the last edit cost, where the timeline is, and which
 /// overlay is on with what scale.
 fn stats_method(
@@ -2793,37 +2918,10 @@ fn stats_method(
             "error": t.water_error,
             "note": "the run owns every depth here: water.bin is ponded depth on the ground grid, written by ecosim every snapshot. The viewer owns only the lattice -- water under min_drawn_mm is mapped but not drawn, and anything drawn is at least one ground cell deep.",
         },
-        // Shot V6's beauty pass. `day` is the run's and everything beside it is the viewer's, so
-        // an agent reading this gets the provenance the HUD line carries.
-        "sky": {
-            "on": sky.on,
-            "ao": sky.ao,
-            "ao_levels": sky::AO_LEVELS,
-            "hour": sky.state.clock.hour,
-            "latitude_deg": sky.state.latitude_deg,
-            "day_of_year": sky.state.clock.day,
-            "day_from_run": sky.state.clock.from_run,
-            "tick_hours": sky.state.clock.tick_hours,
-            "sun": {
-                "elevation_deg": sky.state.sun.elevation_deg,
-                "azimuth_deg": sky.state.sun.azimuth_deg,
-                "declination_deg": sky.state.sun.declination_deg,
-                "illuminance": sky.state.sun.illuminance,
-                "up": sky.state.sun.is_up(),
-            },
-            "season": {
-                "name": sky.state.season.name,
-                "step": sky.state.season.step(),
-                "steps": sky::SEASON_STEPS,
-                "senescence": sky.state.season.senescence,
-                "dormancy": sky.state.season.dormancy,
-                "flush": sky.state.season.flush,
-            },
-            "ambient": sky.state.ambient,
-            "remesh_chunks": sky.remesh_chunks,
-            "remesh_ms": sky.remesh_ms,
-            "note": "expression, not simulation: the day of the year is the run's tick over its year_len, and the hour, the latitude and the seasonal hues are the viewer's. The simulator computes light under a fixed 45 degree sun and has no time of day; moving this one changes no number in any run.",
-        },
+        // Shot V6's beauty pass, and shot V8's held date. `day_of_year` is the run's unless it
+        // is held, and everything beside it is the viewer's, so an agent reading this gets the
+        // provenance the HUD line carries.
+        "sky": sky_json(&sky),
         "snapshot_chunks": t.last_chunks,
         "snapshot_ms": t.last_ms,
         "overlay": ov.active.name(),

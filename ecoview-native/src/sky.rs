@@ -9,6 +9,7 @@
 //! | What | Where it comes from | Whose it is |
 //! |---|---|---|
 //! | day of the year | the snapshot's tick over `meta.json`'s `year_len`, aligned so the simulator's own temperature peak is the summer solstice | the run's |
+//! | the day **held**, over a tick that does not move | `--day`/`--date` and the **;** and **'** keys, **\\** hands it back | the viewer's, and the HUD says so on every frame |
 //! | hour of the day | the viewer's clock, `--hour` and the **K** and **L** keys | the viewer's |
 //! | latitude | `--lat`, default [`DEFAULT_LATITUDE_DEG`] | the viewer's -- no bundle or run carries one |
 //! | sun elevation and azimuth | the standard solar geometry below, from those three | derived |
@@ -19,6 +20,16 @@
 //! really is 03:09 in the morning. Half of every run's snapshots would then be photographed in the
 //! dark, for a diurnal cycle the simulator does not model. The day of the year is a different case
 //! -- the simulator's temperature and rain both swing on it -- so that half is the run's.
+//!
+//! **The day can be held, though, and that is shot V8.** Until this shot the only way to change the
+//! season was to load a different tick, and a different tick is a different world: V6's own evidence
+//! is `v6-summer.png` at tick 9000 with 3,867 trees and `v6-winter.png` at tick 11000 with 1,453,
+//! two frames that differ mostly by 2,414 missing trees rather than by colour. [`Clock::with_day`]
+//! overrides the day on a tick that does not move, so one snapshot can be turned through the year
+//! with the same wood standing in every frame. **It changes the colour and the sun, and nothing
+//! else**: the trees, the water, the burn scars and every overlay band on the frame are still that
+//! tick's, because they are the run's. Whenever the override is on, the clock says so
+//! ([`DaySource`]), the HUD says so, and `ecoview.stats` says so.
 //!
 //! Like the rest of the library half, this module never mentions Bevy: the shapes it returns are
 //! [`ChunkMesh`] and plain arrays, and the CI gate exercises it with `--no-default-features`.
@@ -121,6 +132,89 @@ fn bump(day: f32, centre: f32, width: f32) -> f32 {
     (-d * d).exp()
 }
 
+/// The calendar the day of the year is named on: a 365-day table, the last quarter day of the
+/// 365.25-day year dropped rather than a leap rule invented for a label.
+pub const MONTHS: [(&str, u32); 12] = [
+    ("January", 31),
+    ("February", 28),
+    ("March", 31),
+    ("April", 30),
+    ("May", 31),
+    ("June", 30),
+    ("July", 31),
+    ("August", 31),
+    ("September", 30),
+    ("October", 31),
+    ("November", 30),
+    ("December", 31),
+];
+
+/// Whose the day of the year on a frame is. Three cases, because two of them are not the run's and
+/// a picture that does not distinguish them is a picture making a claim the run never made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaySource {
+    /// The snapshot's tick over the run's `year_len`. The ordinary case, and the honest one.
+    Run,
+    /// `--day`, `--date` or the **;** and **'** keys: the viewer holding the tick still and turning
+    /// the year over it (shot V8).
+    Override,
+    /// No run is loaded, so there is no year to be anywhere in; the day is [`SOLSTICE_DAY`].
+    Default,
+}
+
+impl DaySource {
+    /// The clause the HUD and every scripted run print. Short, because it is on every frame.
+    pub fn line(&self) -> &'static str {
+        match self {
+            DaySource::Run => "the date is the run's",
+            DaySource::Override => "the date is held by the viewer, the tick has not moved",
+            DaySource::Default => "no run loaded, so the date is the viewer's too",
+        }
+    }
+
+    /// The word `ecoview.stats` reports.
+    pub fn name(&self) -> &'static str {
+        match self {
+            DaySource::Run => "run",
+            DaySource::Override => "override",
+            DaySource::Default => "default",
+        }
+    }
+}
+
+/// A day of the year from a `--day` or `--date` argument, 0-based on the [`MONTHS`] table so it can
+/// go straight into [`Clock::with_day`].
+///
+/// Three spellings, all of them unambiguous: `172` is an ordinary 1-based day of the year, and
+/// `6-22` and `6/22` are a month and a day of that month. There is no year field, because the clock
+/// has no year -- a run is at a tick, and which calendar year that is is not a thing the project
+/// knows. `None` is a string that does not parse, and the caller makes that fatal.
+pub fn parse_date(s: &str) -> Option<f32> {
+    let s = s.trim();
+    if let Some((m, d)) = s
+        .split_once('-')
+        .or_else(|| s.split_once('/'))
+        .filter(|(m, _)| !m.is_empty())
+    {
+        return day_of_year(m.trim().parse().ok()?, d.trim().parse().ok()?);
+    }
+    let n: f32 = s.parse().ok()?;
+    // 1-based in, 0-based out: day 1 is 1 January, which is day 0 on the table. The bound is the
+    // [`MONTHS`] table's 365 days rather than the year's 365.25, because what comes back out of
+    // this is a date with a name on it.
+    (1.0..366.0).contains(&n).then_some(n - 1.0)
+}
+
+/// The 0-based day of the year a calendar date falls on, the inverse of [`Clock::month_day`].
+/// `None` for a month outside 1-12 or a day outside that month.
+pub fn day_of_year(month: u32, day: u32) -> Option<f32> {
+    if !(1..=12).contains(&month) || day < 1 || day > MONTHS[month as usize - 1].1 {
+        return None;
+    }
+    let before: u32 = MONTHS[..month as usize - 1].iter().map(|m| m.1).sum();
+    Some((before + day - 1) as f32)
+}
+
 /// Where a snapshot sits in the year, and what o'clock the viewer is drawing it at.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Clock {
@@ -135,8 +229,9 @@ pub struct Clock {
     pub day: f32,
     /// The viewer's hour of the day, in `[0, 24)`.
     pub hour: f32,
-    /// Did the day come from a run, or is it this module's default?
-    pub from_run: bool,
+    /// Whose the `day` above is. Not a bool since shot V8: a held day is neither the run's nor a
+    /// default, and the frame has to be able to say which of the three it is.
+    pub day_source: DaySource,
 }
 
 impl Clock {
@@ -161,8 +256,36 @@ impl Clock {
             tick_hours: (HOURS_PER_YEAR / year_len as f64) as f32,
             day,
             hour: hour.rem_euclid(24.0),
-            from_run: tick.is_some(),
+            day_source: if tick.is_some() {
+                DaySource::Run
+            } else {
+                DaySource::Default
+            },
         }
+    }
+
+    /// The same clock with the day of the year **held** at `day`, and `None` giving back the clock
+    /// unchanged (shot V8).
+    ///
+    /// An override on a value that already exists, which is all this is: the tick, the `year_len`,
+    /// the hours a tick is worth and [`Clock::years`] are untouched and still the run's, and the
+    /// only things downstream of the day are the sun's declination and the season's colour. That is
+    /// the point -- it is what lets one snapshot be photographed in four seasons with the same
+    /// 3,867 trees standing in all four frames, which V6 could not do.
+    pub fn with_day(self, day: Option<f32>) -> Clock {
+        match day {
+            None => self,
+            Some(d) => Clock {
+                day: d.rem_euclid(DAYS_PER_YEAR),
+                day_source: DaySource::Override,
+                ..self
+            },
+        }
+    }
+
+    /// Is the day on this frame the run's own? False while it is held, and false with no run.
+    pub fn from_run(&self) -> bool {
+        self.day_source == DaySource::Run
     }
 
     /// How many simulated years into the run this tick is.
@@ -170,23 +293,8 @@ impl Clock {
         self.tick.map_or(0.0, |t| t as f32 / self.year_len as f32)
     }
 
-    /// Calendar month and day, on a 365-day table. The year is 365.25 days long, so the last quarter
-    /// day is dropped here rather than a leap rule being invented for a label.
+    /// Calendar month and day, on the [`MONTHS`] table.
     pub fn month_day(&self) -> (&'static str, u32) {
-        const MONTHS: [(&str, u32); 12] = [
-            ("January", 31),
-            ("February", 28),
-            ("March", 31),
-            ("April", 30),
-            ("May", 31),
-            ("June", 30),
-            ("July", 31),
-            ("August", 31),
-            ("September", 30),
-            ("October", 31),
-            ("November", 30),
-            ("December", 31),
-        ];
         let mut n = (self.day as u32).min(364);
         for (name, len) in MONTHS {
             if n < len {
@@ -524,11 +632,7 @@ impl SkyState {
     /// The one line the HUD and every scripted run print, naming whose each half is.
     pub fn line(&self) -> String {
         let (month, day) = self.clock.month_day();
-        let whose = if self.clock.from_run {
-            "the date is the run's"
-        } else {
-            "no run loaded, so the date is the viewer's too"
-        };
+        let whose = self.clock.day_source.line();
         format!(
             "sun {} {:.0} deg up, {:.0} deg from north ({}) -- {day} {month}, {} -- {:.1} N, the hour, the latitude and the hue are the viewer's, {whose}",
             self.clock.hhmm(),

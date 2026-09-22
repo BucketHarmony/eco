@@ -1327,9 +1327,193 @@ touched -- no `ecosim/`, no `ecoview/`, no `CLAUDE.md`, and no run directory reg
 
 S4's write-up recorded that `cargo fmt` cannot see inside a string literal and that `\`-continued
 literals are therefore worth looking at. This shot hit the next version of it: the refusal note was
-edited by a script, and what landed in the source was `` at the end of the line instead of a bare
+edited by a script, and what landed in the source was `
+` at the end of the line instead of a bare
 `\` continuation -- a valid Rust string with a carriage return and 29 spaces inside it. It compiled,
 `cargo fmt --check` passed, all 79 tests passed, and the only thing wrong with it was the picture,
 where the note broke into three ragged lines with a gap. It was found by rendering the frame and
 looking at it, which is the only gate that could have found it, and it is the second time in three
 shots that the picture caught something no test did.
+
+# V8 -- the date, held over a tick that does not move
+
+## The defect, in V6's own numbers
+
+V6 drew a seasonal year and could not photograph it. The only way to reach December was to load a
+December tick, so its two seasonal frames are `v6-summer.png` at tick 9000 and `v6-winter.png` at
+tick 11000, and those two ticks of `runs/capitol-s42` are not the same place:
+
+| | tick 9000 | tick 11000 |
+|---|---|---|
+| trees | **3,867** | **1,453** |
+| wood, leaf voxels | 192,593, 1,827,796 | 36,586, 402,582 |
+| quads drawn | 866,151 | 610,737 |
+| standing water | 3,149 voxels, 146.3 m3 | 37,938 voxels, 379.7 m3 |
+| grass, shrub, vine voxels | 77,335, 210,426, 7,793 | 94,895, 159,456, 10,356 |
+| the run's date | 22 June | 21 December |
+
+A fire takes `total_burnt` from 68 to 258 between them and the wood never comes back within the
+year. So the pair differs by **1,425,214 leaf voxels** and by a season, and a reader cannot tell
+which of the two they are looking at. The operator's measurement that filed this row said the same
+thing from the other side: the colour change is real -- open lawn swings toward yellow-olive and
+loses a third of its brightness -- but it cannot be *shown* while the wood is burning down between
+the shots.
+
+There is a second, sharper version of the same defect, and it is in V6's own write-up above:
+`capitol-s42` snapshots every 1000 ticks against a `year_len` of 4000, so **its 201 snapshots land
+on four dates** -- 22 March, 22 June, 21 September, 21 December -- and repeat. Before this shot the
+whole reference run had four drawable days in it. It now has 64 distinguishable ones at every one of
+the 201 snapshots, because the date no longer has to be reached by moving the tick.
+
+## What a held frame is, and what it is not
+
+The four frames below are the **same snapshot**, tick 9000, with four dates held over it. Every
+number the run published is identical in all four, byte for byte, from the viewer's own console:
+
+- 3,867 trees (592 sapling, 678 young, 2,597 mature), 0.0-20.0 m, median 6.4
+- 192,593 wood and 1,827,796 leaf voxels
+- 77,335 grass, 210,426 shrub and 7,793 vine voxels
+- 3,698 wet ground cells, max 5,063 mm, 146.3 m3, 3,149 water voxels drawn
+- 324 chunks, 93 drawn, **866,151 quads**
+
+What moves is the sun and the living colours, and nothing else:
+
+| Frame | Held date | Sun at 10:00 | Season (step of 64) |
+|---|---|---|---|
+| `v8-run-summer.png` | none -- the run's own 22 June | 59 deg up, 118 deg from north | summer, 30 |
+| `v8-held-spring.png` | 15 May | 55 deg up, 124 deg | spring, 23 |
+| `v8-held-autumn.png` | 15 October | 31 deg up, 145 deg | autumn, 50 |
+| `v8-held-winter.png` | 21 December | 18 deg up, 151 deg | winter, 62 |
+
+The winter row is the demonstration the row asked for. **Its sun line is character for character the
+one tick 11000 prints** -- `sun 10:00 18 deg up, 151 deg from north (up) -- 21 December, winter` --
+so the held frame is lit exactly as the frame reached by scrubbing would be, with 2,414 more trees
+standing in it.
+
+**A held date is the viewer's, and it is not a simulation of anything.** The simulator has no time of
+day at all and computes its light under a fixed 45 degree sun, so no frame this viewer draws is lit
+the way the ecology was computed -- that was already true in V6 and the held date does not make it
+more or less true. What the held date adds is that the *year* on the frame can now also be the
+viewer's, so the HUD names it on every frame, `ecoview.stats` reports `day_source: "override"`, and
+the trees, the water, the burn scars and every overlay band on a held frame are still the tick's.
+
+## The colour swing, measured on the frames
+
+Mean colour of a 200 x 90 px patch of open lawn and a 260 x 150 px patch of canopy, both in the same
+screen position in all four frames, since the geometry does not move:
+
+| Frame | lawn RGB | lawn hue, value | canopy RGB | canopy hue, value |
+|---|---|---|---|---|
+| `v8-held-spring` | 153, 192, 98 | 85 deg, 192 | 105, 136, 73 | 90 deg, 136 |
+| `v8-run-summer` | 137, 188, 94 | 93 deg, 188 | 71, 123, 67 | 116 deg, 123 |
+| `v8-held-autumn` | 141, 161, 76 | 74 deg, 161 | 135, 103, 49 | 38 deg, 135 |
+| `v8-held-winter` | 113, 119, 68 | 68 deg, 119 | 76, 83, 52 | 73 deg, 83 |
+
+The lawn turns 25 degrees of hue from summer to winter and loses **37% of its value**, which is the
+third the operator measured across V6's two frames -- reproduced here with the wood held still. The
+canopy goes 78 degrees the other way into October's orange and then dulls.
+
+**The larger change in these frames is the shadow, not the leaf.** Over the site (every second pixel
+below the HUD), mean per-channel change between `v8-run-summer` and `v8-held-winter` is **32 of 255
+on plant-coloured pixels and 53.8 on the unsaturated ones** -- the paving, the roofs and the
+Capitol, whose palette this shot cannot touch and whose test says so. They change because a 59
+degree sun became an 18 degree one. Sky pixels change by 2.6, which is not zero only because of the
+sun disc: `SkyState` saturates its day factor at 8 degrees of elevation, so the dome is the same
+colour in every one of these four frames by design.
+
+## What it costs
+
+Nothing at load: `--date` is one `rem_euclid` on a number the clock already had, and the four frames
+meshed in 52-55 ms each, against 54 ms for the un-held one.
+
+A date key press costs a **full-site remesh**, because seasonal colour is baked into vertex colours
+-- the same cost V6 measured for crossing a season step, 324 chunks in 395 ms on this site, and the
+same reason the year is quantised into 64 steps. That number is V6's and was not re-measured here:
+this shot changes which day the palette is built for and not how it is built. A press that lands
+inside the current step costs nothing at all, which is why the key steps a week.
+
+## The screenshots
+
+Six, all 1280 x 800, each one viewed. Five are one `ecoview-native --headless --frames 120 --run
+../ecosim/runs/capitol-s42 --tick 9000` with the flag in the table, at the default camera; the sixth
+is the agent gate's own capture.
+
+| File | Flags | What it shows |
+| --- | --- | --- |
+| `v8-run-summer.png` | none | The control, and the honest case: 22 June, `the date is the run's`, sun 59 degrees up and shadows tucked under the crowns. The HUD's beauty-pass line now offers `[;] ['] date` and says nothing else, because nothing is held. |
+| `v8-held-winter.png` | `--date 12-21` | **The shot.** The same 3,867 trees, the same 866,151 quads, in 21 December's light: sun 18 degrees up, shadows reaching half across the lawn, grass gone straw-olive and the canopy dull grey-green. The HUD reads `the date is held by the viewer, the tick has not moved`, and beside the release key, `date held, the tick has not moved  [\] back to the run`. This is `v6-winter.png`'s season with `v6-summer.png`'s wood, which is the frame V6 could not take. |
+| `v8-held-autumn.png` | `--date 10-15` | 15 October, season step 50: the whole canopy has turned orange over a lawn that is still mostly green, which is what the two-bump season model says mid-October is. The clearest frame for reading the leaf model itself, and the one to be careful with -- every leaf is still on the tree, because leaf fall is geometry and the simulator's to model (row G10), not this viewer's. |
+| `v8-held-spring.png` | `--date 5-15` | 15 May, the flush: the canopy pale yellow-green, brighter than its own summer colour, over lawn at its lightest. Sun 55 degrees up, four degrees under June's. |
+| `v8-held-no-sky.png` | `--date 12-21 --no-sky` | The case where the flag draws nothing, photographed rather than described. With the beauty pass off there is no sun path and no season in the palette, so 21 December draws exactly the summer frame's colours under V0-V5's fixed 45 degree sun -- and the HUD says `a date is held but nothing draws it while the beauty pass is off`, with the console summary saying the same. Not V5's picture, though: `--no-ao` was not passed, so the occlusion is still baked in, and the line above it now says so (see below). |
+| `v8-agent-loop.png` | the agent gate's own capture | Unchanged in kind: the gate holds no date, and it is here to show that a viewer that can hold one still answers an agent that does not. Its HUD reads `31 March, summer` and `the date is the run's` on snapshot 2 of the 1,000-tick round trip it just ran, and its `ecoview.stats` reply carries `"day_source":"run","day_held":null` beside V6's `day_from_run`. |
+
+Everything above is from the committed Capitol bundle or from a run of it. Nothing under
+`eco-private/` was read or referenced. **A private home-scene pass is owed for this shot and is the
+operator's**, and it is worth one here: a held date is most useful on a site somebody is planning,
+where the question "what does this bed look like in October" has an answer that is not about trees
+burning down.
+
+## The gates
+
+| Gate | Result |
+| --- | --- |
+| `cargo test --release --no-default-features --test mesh_golden` (the CI gate) | **83 pass**, S6's 79 plus four |
+| `cargo test --release` | 83 pass |
+| `cargo fmt --check` | clean |
+| `cargo clippy --all-targets` | the same three pre-existing `src/bundle.rs` findings S4, S5 and S6 recorded, no new one and no `#[allow]` added |
+| `cargo build --release` | clean |
+| `agent_loop --run ../ecosim/runs/capitol-s42 --out shots/v8-agent-loop.png` | **PASS**, 18 calls, 0 retries, 4.2 s to the first screenshot, 1,645,795 bytes read back |
+
+The four new tests:
+
+- `a_held_date_moves_the_year_and_not_the_tick` -- the row itself: the day moves, the tick,
+  `year_len`, `tick_hours` and `years()` do not, the source says `override`, and the line says the
+  tick has not moved.
+- `no_held_date_is_the_clock_the_last_seven_shots_had` -- the regression sibling. `with_day(None)` is
+  the identity over fifteen tick-and-hour combinations, and cannot change a mesh key.
+- `a_date_argument_reads_a_day_of_the_year_or_a_calendar_date` -- `--day`/`--date` in three
+  spellings, `day_of_year` against `month_day` on all 365 days of the table in both directions, and
+  twelve strings that must not parse.
+- `turning_the_year_over_one_tick_changes_the_leaves_and_nothing_else` -- the noon sun drops by
+  twice the axial tilt, the four living ids change colour and the other forty-four do not, a held
+  December is the same season and the same declination December's tick reaches, and a week always
+  crosses a season step.
+
+## Line budget
+
+`git diff --stat 15f6087 -- ecoview-native/` is **720 insertions and 69 deletions, 651 net against
+the row's 1,500** -- 849 to spare, with both write-ups in it (this paragraph included, which is why
+the figure moved by one while it was being written). The code is `tests/mesh_golden.rs` 188,
+`src/main.rs` 139 against 41 deleted (the `sky_json` lift is most of both), `src/sky.rs` 128 against
+24, and `src/lib.rs` one line each way: **188 test and 268 non-test** insertions. The prose is
+MEASUREMENTS.md 183 and DECISIONS.md 79. The six PNGs are binary and count nothing.
+
+Nothing outside `ecoview-native/` is touched -- no `ecosim/`, no `ecoview/`, no `CLAUDE.md`, no
+workflow, and no run directory regenerated or read for anything but its snapshots.
+
+## One thing this shot changed that it was not asked to
+
+**The beauty-pass line said something false about occlusion, in both of its branches, and it is on
+this shot's own screenshot.** `--no-sky` and `--no-ao` are separate flags and either can be passed
+alone, but the HUD picked its whole sentence off `sky.on`: with `--no-sky` it read `no occlusion`
+while occlusion was baked into every voxel on the frame, and with `--no-ao` alone it read `ambient
+occlusion 4 levels` while there were none. It has read that way since V6.
+
+It is fixed by reading the switch instead of asserting it, which is two lines. It was found by
+rendering `v8-held-no-sky.png` and reading the HUD on it -- the console line three lines away says
+`ambient occlusion: on` for the same frame, which is what made the contradiction visible. **That is
+the third shot in a row where looking at the picture caught something no test did** (S4's string
+literal, S6's line continuation, this).
+
+A frame where the beauty pass is on and occlusion is on -- which is every other screenshot in this
+component -- prints the identical characters it did before, `ambient occlusion 4 levels`, so nothing
+else in `shots/` is stale for this.
+
+## What this shot did not do
+
+Two things a reader of the row might expect and will not find.
+
+The **hour** is still a key and a flag and is still the viewer's; nothing here touches it. And the
+held date does **not** reach the overlays: an overlay band is a number the simulator published at
+that tick, and no date the viewer holds changes one. The test asserts that on the palette, which is
+where it would leak if it ever did.

@@ -153,6 +153,51 @@ pub fn without_traits(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
     }
 }
 
+/// Put a run back on the pre-G5 soil: the nutrient tier off, and `climate.decay_k` at the 6.0 the
+/// file held before shot G5 corrected it. Two things and not one, because the tier's switch does not
+/// cover the decay rate -- the wrong rate was a fact about litter, not about nutrients
+/// (`ecosim/TUNING.md`, shot G5). Every manifest and fixture cut from before G5 needs both to be
+/// reproducible.
+pub fn pre_g5(p: &mut ecosim::Params) {
+    p.npk.enabled = false;
+    p.climate.decay_k = 6.0;
+}
+
+/// [`without_npk`] and then [`without_water`], the cut a pre-G5 run with the water tier off needs.
+/// Order matters: both cut the last six columns of `series.csv`, and the nutrient six are outside
+/// the water six.
+pub fn without_npk_and_water(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    without_water(name, without_npk(name, bytes))
+}
+
+/// A run-directory file of a run with `npk.enabled=false` as the pre-G5 ecosim wrote it: the six
+/// nutrient columns cut from `series.csv`, each asserted to be 0. Nothing else changes, because with
+/// the nutrient tier off no pool is allocated, `npk.bin` is not written and `state.bin` keeps its
+/// pre-G5 layout. The run still has to be made with `climate.decay_k` set back to its pre-G5 6.0:
+/// the tier's switch does not cover that, because the wrong decay rate was a fact about litter and
+/// not about nutrients (`ecosim/TUNING.md`, shot G5).
+pub fn without_npk(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    match name.file_name().and_then(|n| n.to_str()) {
+        Some("series.csv") => {
+            let text = String::from_utf8(bytes).unwrap();
+            let mut out = String::with_capacity(text.len());
+            for (i, line) in text.lines().enumerate() {
+                let f: Vec<&str> = line.split(',').collect();
+                let (keep, npk) = f.split_at(f.len() - 6);
+                if i == 0 {
+                    assert_eq!(npk[0], "soil_n", "series.csv header");
+                } else {
+                    assert!(npk.iter().all(|v| *v == "0.0000"), "nutrients with the tier off: {line}");
+                }
+                out.push_str(&keep.join(","));
+                out.push('\n');
+            }
+            out.into_bytes()
+        }
+        _ => bytes,
+    }
+}
+
 /// A run-directory file of a run with `hydro.enabled=false` as the pre-G4 ecosim wrote it: the six
 /// water columns cut from `series.csv`, each asserted to be 0. Nothing else changes, because with
 /// the water tier off no snapshot file is added and `state.bin` keeps its pre-G4 layout.

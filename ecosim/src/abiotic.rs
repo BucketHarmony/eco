@@ -72,6 +72,7 @@ impl Sim {
             let hours = self.params.schedule.soil_every.max(1) as f64 * crate::hydro::tick_hours(&self.params);
             let drained = self.settle_water(hours);
             self.decay_detritus(&soil, &drained);
+            self.update_npk(&drained);
             return;
         }
         // 1. Rain, uniform unless there is a gradient (checked once, outside the loop)
@@ -108,12 +109,19 @@ impl Sim {
             self.moisture[c] = self.moisture[c].clamp(0.0, 255.0);
         }
         self.decay_detritus(&soil, &[]);
+        self.update_npk(&[]);
     }
 
-    /// Steps 6–7 of the soil update: detritus decays into the fertility of its patch's soil
-    /// columns, leaching takes a share of what a column drained away with it (`hydro.leach_k`, 0
-    /// when the water tier is off, which is what `drained` empty means), and fertility is clamped.
-    fn decay_detritus(&mut self, soil: &[usize], drained: &[f32]) {
+    /// Steps 6–7 of the soil update: detritus decays into the soil under its own patch, leaching
+    /// takes a share of what a column drained away with it (`hydro.leach_k`, 0 when the water tier
+    /// is off, which is what `drained` empty means), and fertility is clamped.
+    ///
+    /// What decay releases depends on the tier that is running. With `npk.enabled` the decayed
+    /// share of the patch's *nutrients* moves into its columns' three pools, and the fertility
+    /// field is not touched at all -- it is derived from those pools (shot G5), so steps 6b and 7
+    /// have nothing left to do and are skipped. With it off, the pre-G5 index gains the decayed
+    /// detritus directly and both steps run as they did.
+    pub(crate) fn decay_detritus(&mut self, soil: &[usize], drained: &[f32]) {
         let d = self.world.dims;
         // 6. Decay detritus into fertility
         let cl = self.params.climate.clone();
@@ -129,11 +137,25 @@ impl Sim {
             let rate = cl.decay_k * dt * (t / cl.decay_temp_full).clamp(0.0, 1.0) * m / 255.0;
             let converted = self.patches[p].detritus * rate;
             self.patches[p].detritus -= converted;
+            if self.npk.is_some() {
+                // The same share of the same pile, so the nutrients follow the mass they were in.
+                let mut released = [0.0f64; 3];
+                let pile = &mut self.npk.as_mut().expect("nutrient tier").detritus[p];
+                for (i, v) in pile.iter_mut().enumerate() {
+                    released[i] = *v * rate as f64;
+                    *v -= released[i];
+                }
+                self.npk_return(p, released);
+                continue;
+            }
             let per = converted / n as f32;
             for i in 0..n {
                 let c = self.world.patch_soil[p][i];
                 self.fertility[c] += per;
             }
+        }
+        if self.npk.is_some() {
+            return;
         }
         // 6b. Leaching: fertility leaves with the water that drained out of the column.
         if !drained.is_empty() {

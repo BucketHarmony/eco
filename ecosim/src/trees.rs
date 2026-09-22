@@ -36,6 +36,14 @@ pub struct Tree {
     pub lifespan: u32,
     /// False once dead; removed at the next compaction.
     pub alive: bool,
+    /// Nitrogen, phosphorus and potassium the tree has taken up, in grams (shot G5).
+    ///
+    /// A tree is the one plant whose nutrient content is stored rather than derived: the ground
+    /// covers have a density the patch already holds, but a tree's size is its age, and what it
+    /// managed to take up out of the soil under it is not a function of its age -- a tree on poor
+    /// ground is the same height as one on good ground and holds less. All of it goes to the
+    /// patch's detritus when it dies.
+    pub npk: [f64; 3],
 }
 
 impl Tree {
@@ -139,7 +147,7 @@ impl Sim {
         let u: f32 = self.rng.gen_range(-1.0..=1.0);
         let lifespan = (mean * (1.0 + jitter * u)).round().max(0.0) as u32;
         self.trunk_at[self.world.dims.cidx(x, y)] = self.trees.len() as u32;
-        self.trees.push(Tree { id, x: x as u8, y: y as u8, age, dry_ticks: 0, lifespan, alive: true });
+        self.trees.push(Tree { id, x: x as u8, y: y as u8, age, dry_ticks: 0, lifespan, alive: true, npk: [0.0; 3] });
         self.refresh_canopy_columns(x as u8, y as u8);
         id
     }
@@ -169,7 +177,11 @@ impl Sim {
         };
         self.log_at(EventKind::TreeDeath, "tree", (x as usize, y as usize), cause, id);
         self.trunk_at[col] = NO_TREE;
-        self.patches[self.world.dims.patch_of(x as usize, y as usize)].detritus += self.params.tree.death_detritus;
+        let p = self.world.dims.patch_of(x as usize, y as usize);
+        self.patches[p].detritus += self.params.tree.death_detritus;
+        // Everything the tree took up goes back to the patch it stood in, as dead wood.
+        let held = std::mem::take(&mut self.trees[i].npk);
+        self.npk_to_detritus(p, held);
         self.refresh_canopy_columns(x, y);
     }
 
@@ -268,7 +280,20 @@ impl Sim {
             }
             let before = self.tree_stage(&self.trees[i]);
             let c = self.trees[i].col(self.world.dims);
+            let h0 = crate::plants::height_of_age(self.trees[i].age, &self.params);
             self.trees[i].age += tp.update_every;
+            if self.npk.is_some() {
+                // A tree buys its height from the soil under its own trunk, `npk.need_*` grams a
+                // metre. It is not cut back when the soil is short -- its height is its age, and
+                // nothing here can un-grow it -- so a starved tree is simply a poorer one, and
+                // returns less when it dies.
+                let grew = (crate::plants::height_of_age(self.trees[i].age, &self.params) - h0).max(0.0) as f64;
+                let needs = tp.npk.needs();
+                let got = self.npk_take_column(c, [0, 1, 2].map(|i| grew * needs[i] as f64));
+                for (v, g) in self.trees[i].npk.iter_mut().zip(got) {
+                    *v += g;
+                }
+            }
             // Transpiration over the update's length, in mm (shot G4b).
             let hours = tp.update_every as f64 * crate::hydro::tick_hours(&self.params);
             self.draw_water_mm(c, (tp.transpiration_mm_h as f64 * hours) as f32);
@@ -283,6 +308,16 @@ impl Sim {
             }
             if self.trees[i].dry_ticks >= ages.dry_death {
                 self.kill_tree(i, "drought");
+                continue;
+            }
+            // Drowned roots (shot G5). The rate check and the waterlogging check both sit outside
+            // the draw, so with the nutrient tier off -- where no column is ever waterlogged --
+            // this reads nothing and leaves the random stream exactly where it was.
+            if tp.waterlog_mortality > 0.0
+                && self.is_waterlogged(c)
+                && self.rng.gen::<f32>() < tp.waterlog_mortality * (1.0 - tp.npk.waterlog_tolerance.clamp(0.0, 1.0))
+            {
+                self.kill_tree(i, "waterlog");
                 continue;
             }
             let after = self.tree_stage(&self.trees[i]);
@@ -1001,7 +1036,16 @@ mod tests {
         // passes through the upper half of b's.
         let mut sim = crown_sim();
         let a = plant(&mut sim, 20, 20, age);
-        sim.trees.push(Tree { id: 999, x: 20, y: 20, age, dry_ticks: 0, lifespan: u32::MAX, alive: true });
+        sim.trees.push(Tree {
+            id: 999,
+            x: 20,
+            y: 20,
+            age,
+            dry_ticks: 0,
+            lifespan: u32::MAX,
+            alive: true,
+            npk: [0.0; 3],
+        });
         sim.trunk_at[cidx(20, 20)] = 1;
         let crowns = sim.crowns();
         let want = libm::expf(-tau * 0.5);
@@ -1009,7 +1053,16 @@ mod tests {
         assert!((got - want).abs() < 1e-5, "{got} vs {want}");
 
         // The same, twice over: two identical crowns overhead multiply to exp(-tau).
-        sim.trees.push(Tree { id: 1000, x: 21, y: 20, age, dry_ticks: 0, lifespan: u32::MAX, alive: true });
+        sim.trees.push(Tree {
+            id: 1000,
+            x: 21,
+            y: 20,
+            age,
+            dry_ticks: 0,
+            lifespan: u32::MAX,
+            alive: true,
+            npk: [0.0; 3],
+        });
         sim.trunk_at[cidx(21, 20)] = 2;
         let crowns = sim.crowns();
         let got = sim.crown_light(a, &crowns);

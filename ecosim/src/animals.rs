@@ -90,6 +90,14 @@ pub struct Animal {
     pub traits: Traits,
     /// Hunter only: updates left in state Handling after a kill (0 when not handling).
     pub handling: u32,
+    /// Nitrogen, phosphorus and potassium in the animal's body, in grams (shot G5).
+    ///
+    /// Every animal starts empty -- placed, born or immigrated -- and a grazer fills up on what it
+    /// crops, passing whatever it cannot hold (`animals.npk_content × energy`) into the dung of
+    /// the patch it is standing on. A hunter never fills up at all: it takes energy from a kill,
+    /// not matter, so a carcass's nutrients go to the ground where it fell rather than into the
+    /// animal that made it (DECISIONS.md, shot G5).
+    pub npk: [f64; 3],
 }
 
 /// The 8 neighbour offsets, in a fixed order so random picks are deterministic.
@@ -118,6 +126,7 @@ impl Animal {
             alive: true,
             traits,
             handling: 0,
+            npk: [0.0; 3],
         }
     }
 
@@ -288,6 +297,23 @@ impl Sim {
         self.grazers_in_patch[p] -= 1;
         grid_remove(&mut self.grazer_grid[c], i);
         self.patches[p].detritus += self.params.grazer.corpse_detritus;
+        let held = std::mem::take(&mut self.grazers[i].npk);
+        self.npk_to_detritus(p, held);
+    }
+
+    /// Move what a grazer just cropped off patch `p` into the grazer, and whatever it cannot hold
+    /// on into the patch's dung. `before` is the patch's grass density as the bite found it.
+    fn graze_npk(&mut self, i: usize, p: usize, before: f32) {
+        let eaten = (before - self.patches[p].grass) as f64 * self.world.patch_soil[p].len() as f64;
+        let needs = self.params.grass.npk.needs();
+        let content = self.params.animals.npk_content;
+        let mut dung = [0.0f64; 3];
+        let g = &mut self.grazers[i];
+        for (k, v) in g.npk.iter_mut().enumerate() {
+            *v += eaten * needs[k] as f64;
+        }
+        crate::npk::excrete(g, content, &mut dung);
+        self.npk_to_detritus(p, dung);
     }
 
     /// Animals phase: grazers in Vec order, then hunters. Newborns act from the next tick.
@@ -395,10 +421,14 @@ impl Sim {
         } else if self.patches[p].grass > gp.eat_min_grass && self.grazers[i].energy < gp.eat_below {
             state = State::Eat;
             let intake = grazing_intake(self.patches[p].grass, gp.intake_max, gp.intake_k);
+            let before = self.patches[p].grass;
             let g = &mut self.grazers[i];
             g.energy = (g.energy + intake).min(100.0);
             let grass = &mut self.patches[p].grass;
             *grass = (*grass - intake * gp.grass_per_energy).max(0.0);
+            if self.npk.is_some() {
+                self.graze_npk(i, p, before);
+            }
         } else {
             let best = self.target_patch(self.grazers[i].id, p, d.cidx(x as usize, y as usize));
             if best != p {
@@ -644,6 +674,8 @@ impl Sim {
         let p = h.patch(d);
         self.hunters_in_patch[p] -= 1;
         self.patches[p].detritus += self.params.hunter.corpse_detritus;
+        let held = std::mem::take(&mut self.hunters[i].npk);
+        self.npk_to_detritus(p, held);
     }
 }
 
@@ -1427,8 +1459,10 @@ mod tests {
 
     #[test]
     fn death_causes_regression_every_cause_in_one_run() {
+        // grazer_cost rose from 0.6 to 1.2 in shot G5: the nutrient tier holds the sward below what
+        // 0.6 could starve a grazer out of in 200 ticks, and this test needs a starvation to count.
         let m =
-            Mortality { grazer_cost: 0.6, grazer_max_age: 1100, hunter_cost: 1.2, hunter_max_age: 900, kill_prob: 0.3 };
+            Mortality { grazer_cost: 1.2, grazer_max_age: 1100, hunter_cost: 1.2, hunter_max_age: 900, kill_prob: 0.3 };
         let [g, h] = death_causes_sum_to_deaths(1, 200, &m).unwrap();
         assert!(g[..3].iter().all(|&n| n > 0), "grazer starved/eaten/old_age {g:?}");
         assert!(h[0] > 0 && h[2] > 0, "hunter starved/old_age {h:?}");

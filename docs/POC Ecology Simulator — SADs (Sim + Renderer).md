@@ -184,6 +184,37 @@ The same shot stopped `meta.json` omitting params sections that were at their de
 
 `series.csv` ends with six water columns, all world means in millimetres: `rain_mm` (rain this tick), `runoff_mm` (the share of it that ran off the cell it fell on), `ponded_mm` and `soil_water_mm` (standing now), `drainage_mm` (percolated below the roots this tick) and `outflow_mm` (left the world). They are 0 on every tick with the tier off. `events.csv` gains a `storm` kind: one row per raining tick, no species, no column, `detail` `"<depth> <runoff> <outflow>"` in millimetres to four decimal places.
 
+#### Nutrients (shot G5)
+
+The nutrient tier (`npk.enabled`, on by default) replaces the 0–255 fertility index with three soil
+pools in grams per square metre: available nitrogen, available phosphorus and available potassium.
+Each snapshot gains one file, written whenever the tier is on:
+
+```
+  snap_000000/
+    npk.bin           x·y × f32 LE × 3, three whole planes in N, P, K order, each in column order
+```
+
+The planes are the ecology grid, not the ground grid, and a column the ecology does not plant (under
+a roof, in open water) is 0 — the same convention `moisture.bin` and `fertility.bin` use. Adding the
+file does not move `format_version`: no reader needs it, and every reader that knew version 4 still
+reads every file it knew.
+
+`fertility.bin` stays, and stays x·y u8, but with the tier on it is no longer a stock. It is
+`round(255 × g)`, where `g` is the growth factor grass would get in that column: Liebig's law of the
+minimum over the three pools, so 0 is soil in which grass cannot grow at all and 255 is soil that does
+not limit it. A fertility overlay drawn from it still answers "how well can plants grow here"; it now
+answers it as a limitation rather than as a quantity. It is refreshed on the soil update, the cadence
+it was always written on. With `npk.enabled = false` the file keeps its pre-G5 meaning.
+
+`series.csv` ends with six more columns after the water six: `soil_n`, `soil_p`, `soil_k` (world
+totals of each available pool, in kilograms), `leached_n` (nitrogen that drained below the roots this
+tick, in grams), `outflow_p` (phosphorus that left the world in runoff this tick, in grams) and
+`waterlogged_frac` (the fraction of plantable columns whose soil has been above `hydro.waterlog_frac`
+× field capacity for at least `hydro.waterlog_ticks` ticks). All six are 0 on every tick with the tier
+off. `events.csv` gains no kind, but `tree_death` gains a cause: `waterlog`, a tree killed by standing
+water at its roots.
+
 ### Debug loop and tests
 
 Claude Code's loop is: `cargo build` → `cargo test` → `ecosim run` on seeds 1, 2, 3 → `ecosim check` on each → read failures → adjust `params.toml` or code → repeat. No step needs a human.

@@ -1,12 +1,12 @@
 //! `state.bin`: the part of a snapshot the other files don't hold exactly, and the restore path that
 //! turns a snapshot directory back into a `Sim` that steps identically to the one that wrote it.
 //!
-//! Layout (version 5), all integers and floats little-endian, no padding:
+//! Layout (version 6), all integers and floats little-endian, no padding:
 //!
 //! | field | type |
 //! |---|---|
 //! | magic | `b"ECOSTATE"` |
-//! | state version | u32 = 5 |
+//! | state version | u32 = 6 |
 //! | tick, next_id, hunter_immigrants | 3 × u32 |
 //! | RNG seed, stream, word position | [u8; 32], u64, u128 |
 //! | deaths this tick | 2 × 5 × u32 (grazers then hunters, `Cause` order) |
@@ -18,20 +18,30 @@
 //! | fire | total_burnt u32, then patches × burning_ticks_left u32 (patch order) |
 //! | traits | per grazer, then per hunter (`Vec` order): energy_cost_mult, flee_distance, repro_threshold f32 |
 //! | handling | per hunter (`Vec` order): handling ticks left u32 |
+//! | water present | u8, version 6 only |
 //! | water | u32 ground cells, then cells × ponded f64 (mm), cols × soil water f64 (mm), 6 × ledger f64, 6 × row f32 |
+//! | nutrients | 3 × cols × soil f64 (g/m², N then P then K), patches × 3 × detritus f64 (g), cols × wet ticks u32, 15 × ledger f64, 6 × row f32, then 3 × f64 per tree and per grazer and per hunter (`Vec` order) |
 //!
 //! Version 2 is version 1 with the fire section appended, version 3 is version 2 with the traits
-//! section appended, version 4 is version 3 with the handling section appended, and version 5 is
-//! version 4 with the water section appended; nothing before any of them moved. The dimensions are
-//! not in the file: they come from the params (`meta.json`) the snapshot is restored with, and a
-//! file of the wrong size for them fails to decode. Version 5 is written when the water tier is on
-//! (`hydro.enabled`), version 4 when it is off and handling is in use (`hunter.handling_ticks`
-//! above 0, or a hunter still handling), and otherwise version 3, byte for byte what the ecosim
-//! before handling wrote; a version-3 file decodes with every hunter's handling 0, and a file
-//! without the water section restores the pre-water moisture path. Animal state 6 is Handling,
-//! which only a version-4 or later file holds. The water stores are f64 in the file as they are in
-//! memory, because the ledger closes to 1e-9 and f32 rounding on every snapshot would not keep it
-//! closed across a fork (DECISIONS.md, "Water in f64").
+//! section appended, version 4 is version 3 with the handling section appended, version 5 is
+//! version 4 with the water section appended, and version 6 is version 5 with the nutrient section
+//! appended; nothing before any of them moved. The dimensions are not in the file: they come from
+//! the params (`meta.json`) the snapshot is restored with, and a file of the wrong size for them
+//! fails to decode. Version 6 is written when the nutrient tier is on (`npk.enabled`), version 5
+//! when it is off and the water tier is on (`hydro.enabled`), version 4 when both are off and
+//! handling is in use (`hunter.handling_ticks` above 0, or a hunter still handling), and otherwise
+//! version 3, byte for byte what the ecosim before handling wrote; a version-3 file decodes with
+//! every hunter's handling 0, and a file without the water section restores the pre-water moisture
+//! path. Animal state 6 is Handling, which only a version-4 or later file holds.
+//!
+//! The two tiers are independent — a run may have nutrients without water — so version 6 cannot
+//! infer the water section from the version number the way version 5 could, and carries a one-byte
+//! flag for it instead. That flag is the only field this layout has ever inserted rather than
+//! appended, and it sits after everything versions 3 to 5 hold, so those files are unaffected.
+//!
+//! The water and nutrient stores are f64 in the file as they are in memory, because their ledgers
+//! close to 1e-9 and 1e-6 and f32 rounding on every snapshot would not keep them closed across a
+//! fork (DECISIONS.md, "Water in f64").
 //!
 //! Entities are stored in `Vec` order, dead ones included, because indices into the Vecs (the trunk
 //! index, the grids) and the update order depend on it. Everything else a `Sim` holds is recomputed
@@ -40,6 +50,7 @@
 use crate::animals::{Animal, Kind, State};
 use crate::heredity::Traits;
 use crate::hydro::{Hydro, Ledger, Water};
+use crate::npk::{Npk, NpkLedger, NpkRow, NPK_FIELDS, NPK_LEDGER_FIELDS};
 use crate::output::WATER_FIELDS;
 use crate::params::Params;
 use crate::sim::{flee_offsets, offsets_within, Deaths, Patch, Sim, NO_TREE};
@@ -52,9 +63,11 @@ use std::path::Path;
 
 /// First bytes of every `state.bin`.
 pub const MAGIC: &[u8; 8] = b"ECOSTATE";
-/// `state.bin` layout version with the water section; `decode` also reads the two older layouts.
-pub const STATE_VERSION: u32 = 5;
-/// The layout written when the water tier is off and handling is in use: version 5 without water.
+/// `state.bin` layout version with the nutrient section; `decode` also reads the three older ones.
+pub const STATE_VERSION: u32 = 6;
+/// The layout written when the nutrient tier is off and the water tier is on.
+pub const STATE_VERSION_WATER: u32 = 5;
+/// The layout written when both tiers are off and handling is in use: version 5 without water.
 pub const STATE_VERSION_HANDLING: u32 = 4;
 /// The layout written when neither is in use: version 4 without the handling section.
 pub const STATE_VERSION_NO_HANDLING: u32 = 3;
@@ -67,10 +80,11 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut b = Vec::with_capacity(64 * 1024);
     b.extend_from_slice(MAGIC);
     let handling = sim.params.hunter.handling_ticks > 0 || sim.hunters.iter().any(|h| h.handling > 0);
-    let version = match (&sim.hydro, handling) {
-        (Some(_), _) => STATE_VERSION,
-        (None, true) => STATE_VERSION_HANDLING,
-        (None, false) => STATE_VERSION_NO_HANDLING,
+    let version = match (&sim.npk, &sim.hydro, handling) {
+        (Some(_), _, _) => STATE_VERSION,
+        (None, Some(_), _) => STATE_VERSION_WATER,
+        (None, None, true) => STATE_VERSION_HANDLING,
+        (None, None, false) => STATE_VERSION_NO_HANDLING,
     };
     for v in [version, sim.tick, sim.next_id, sim.hunter_immigrants] {
         b.extend_from_slice(&v.to_le_bytes());
@@ -131,6 +145,9 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
             b.extend_from_slice(&a.handling.to_le_bytes());
         }
     }
+    if version >= STATE_VERSION {
+        b.push(sim.hydro.is_some() as u8);
+    }
     if let Some(h) = &sim.hydro {
         b.extend_from_slice(&(h.ponded.len() as u32).to_le_bytes());
         for v in h.ponded.iter().chain(&h.soil).chain(&ledger_array(&h.ledger)) {
@@ -140,7 +157,35 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
             b.extend_from_slice(&v.to_le_bytes());
         }
     }
+    if let Some(n) = &sim.npk {
+        for v in n.soil.iter().flatten().chain(n.detritus.iter().flatten()) {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in &n.wet_ticks {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in n.ledger.as_array() {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in n.row.as_array() {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        let held = sim.trees.iter().map(|t| &t.npk).chain(sim.grazers.iter().chain(&sim.hunters).map(|a| &a.npk));
+        for v in held.flatten() {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+    }
     b
+}
+
+/// The nutrient tier's part of a snapshot.
+#[derive(Debug)]
+struct NpkState {
+    soil: [Vec<f64>; 3],
+    detritus: Vec<[f64; 3]>,
+    wet_ticks: Vec<u32>,
+    ledger: NpkLedger,
+    row: NpkRow,
 }
 
 /// The water tier's part of a snapshot.
@@ -226,6 +271,9 @@ struct Decoded {
     /// Ponded water per ground cell, soil water per column, the ledger and this tick's row values;
     /// `None` before version 5.
     water: Option<WaterState>,
+    /// The three soil pools, the patch detritus pools, the waterlogging clock, the ledger and this
+    /// tick's row values; `None` before version 6.
+    npk: Option<NpkState>,
 }
 
 /// Placeholder traits for a decoded animal until the traits section is read.
@@ -244,7 +292,20 @@ fn decode_animals(r: &mut Reader, kind: Kind, d: Dims) -> Result<Vec<Animal>, St
             if !(0.0..d.wx as f32).contains(&x) || !(0.0..d.wy as f32).contains(&y) {
                 return Err(format!("state.bin: animal {id} off the world at ({x}, {y})"));
             }
-            Ok(Animal { id, kind, x, y, energy, age, cooldown, state, alive, traits: NO_TRAITS, handling: 0 })
+            Ok(Animal {
+                id,
+                kind,
+                x,
+                y,
+                energy,
+                age,
+                cooldown,
+                state,
+                alive,
+                traits: NO_TRAITS,
+                handling: 0,
+                npk: [0.0; 3],
+            })
         })
         .collect()
 }
@@ -281,7 +342,7 @@ fn decode(bytes: &[u8], d: Dims) -> Result<Decoded, String> {
         })
         .collect::<Result<Vec<_>, String>>()?;
     let nt = r.count("tree")?;
-    let trees = (0..nt)
+    let mut trees = (0..nt)
         .map(|_| {
             let id = r.u32()?;
             let (x, y) = (r.u8()?, r.u8()?);
@@ -289,7 +350,7 @@ fn decode(bytes: &[u8], d: Dims) -> Result<Decoded, String> {
             if x as usize >= d.wx || y as usize >= d.wy {
                 return Err(format!("state.bin: tree {id} off the world at ({x}, {y})"));
             }
-            Ok(Tree { id, x, y, age, dry_ticks, lifespan, alive: r.flag()? })
+            Ok(Tree { id, x, y, age, dry_ticks, lifespan, alive: r.flag()?, npk: [0.0; 3] })
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut grazers = decode_animals(&mut r, Kind::Grazer, d)?;
@@ -321,7 +382,8 @@ fn decode(bytes: &[u8], d: Dims) -> Result<Decoded, String> {
             h.handling = r.u32()?;
         }
     }
-    let water = if version == STATE_VERSION {
+    let has_water = if version >= STATE_VERSION { r.flag()? } else { version == STATE_VERSION_WATER };
+    let water = if has_water {
         let cells = r.count("ground cell")?;
         let ponded = r.f64s(cells)?;
         let soil = r.f64s(d.cols())?;
@@ -334,6 +396,29 @@ fn decode(bytes: &[u8], d: Dims) -> Result<Decoded, String> {
             *v = r.f32()?;
         }
         Some(WaterState { ponded, soil, ledger, row })
+    } else {
+        None
+    };
+    let npk = if version >= STATE_VERSION {
+        let soil = [r.f64s(d.cols())?, r.f64s(d.cols())?, r.f64s(d.cols())?];
+        let detritus =
+            (0..d.patches()).map(|_| Ok([r.f64()?, r.f64()?, r.f64()?])).collect::<Result<Vec<_>, String>>()?;
+        let wet_ticks = (0..d.cols()).map(|_| r.u32()).collect::<Result<Vec<_>, String>>()?;
+        let mut led = [0.0; NPK_LEDGER_FIELDS];
+        for v in &mut led {
+            *v = r.f64()?;
+        }
+        let mut row = [0.0f32; NPK_FIELDS];
+        for v in &mut row {
+            *v = r.f32()?;
+        }
+        for t in &mut trees {
+            t.npk = [r.f64()?, r.f64()?, r.f64()?];
+        }
+        for a in grazers.iter_mut().chain(&mut hunters) {
+            a.npk = [r.f64()?, r.f64()?, r.f64()?];
+        }
+        Some(NpkState { soil, detritus, wet_ticks, ledger: NpkLedger::from_array(led), row: NpkRow::from_array(row) })
     } else {
         None
     };
@@ -355,6 +440,7 @@ fn decode(bytes: &[u8], d: Dims) -> Result<Decoded, String> {
         grazer_grid,
         total_burnt,
         water,
+        npk,
     })
 }
 
@@ -422,8 +508,10 @@ impl Sim {
             log_events: false,
             events: Vec::new(),
             hydro: None,
+            npk: None,
         };
         sim.restore_water(d.water)?;
+        sim.restore_npk(d.npk)?;
         sim.recompute_derived();
         Ok(sim)
     }
@@ -454,6 +542,35 @@ impl Sim {
             }
             (true, None) => Err("state.bin: no water section, but these params have hydro.enabled".into()),
             (false, Some(_)) => Err("state.bin: has a water section, but these params have hydro off".into()),
+        }
+    }
+
+    /// Put the nutrient tier back. `plantable`, `columns` and the `carry` scratch come from the
+    /// world, and `waterlogged` from the clock the snapshot carried read against the current
+    /// `hydro.waterlog_ticks`, so nothing the file stores is a value the world already fixes.
+    fn restore_npk(&mut self, npk: Option<NpkState>) -> Result<(), String> {
+        match (self.params.npk.enabled, npk) {
+            (false, None) => Ok(()),
+            (true, Some(n)) => {
+                let mut k = Npk::new(&self.world, &self.params);
+                if k.soil[0].len() != n.soil[0].len() || k.detritus.len() != n.detritus.len() {
+                    return Err(format!(
+                        "state.bin: nutrient section holds {} columns and {} patches, the world has {} and {}",
+                        n.soil[0].len(),
+                        n.detritus.len(),
+                        k.soil[0].len(),
+                        k.detritus.len()
+                    ));
+                }
+                let ticks = self.params.hydro.waterlog_ticks;
+                k.waterlogged = n.wet_ticks.iter().map(|&t| t >= ticks).collect();
+                (k.soil, k.detritus, k.wet_ticks) = (n.soil, n.detritus, n.wet_ticks);
+                (k.ledger, k.row) = (n.ledger, n.row);
+                self.npk = Some(k);
+                Ok(())
+            }
+            (true, None) => Err("state.bin: no nutrient section, but these params have npk.enabled".into()),
+            (false, Some(_)) => Err("state.bin: has a nutrient section, but these params have npk off".into()),
         }
     }
 
@@ -572,17 +689,21 @@ mod tests {
         restore_steps_identically(7, 1234).unwrap();
     }
 
-    /// Params with the water tier off, for the tests that check the two older layouts.
+    /// Params with the water and nutrient tiers off, for the tests that check the older layouts.
+    /// Either tier on pins the version at its own number whatever handling does, so both have to be
+    /// off for versions 3 and 4 to be reachable at all.
     fn dry_params() -> Params {
         let mut p = Params::load_square();
         p.hydro.enabled = false;
+        p.npk.enabled = false;
         p
     }
 
     /// With handling on, `state.bin` is version 4 and carries each hunter's handling ticks left, so a
     /// restore taken while hunters are mid-handling steps identically. With it off, the file is
-    /// version 3 and the same size as before handling existed. Both are with the water tier off;
-    /// with it on the file is version 5.
+    /// version 3 and the same size as before handling existed. Both are with the water and nutrient
+    /// tiers off; with water alone the file is version 5, and with nutrients it is version 6
+    /// whatever the rest is doing, which is the layout the run at the defaults writes.
     #[test]
     fn restore_regression_mid_handling() {
         let mut p = dry_params();
@@ -610,8 +731,14 @@ mod tests {
         let bytes = encode(&wet);
         assert_eq!(bytes[8..12], STATE_VERSION.to_le_bytes());
         let h = wet.hydro.as_ref().unwrap();
-        let water = 4 + 8 * (h.ponded.len() + h.soil.len() + 6) + 4 * crate::output::WATER_FIELDS;
-        assert_eq!(bytes.len(), encode_len_without_handling(&wet) + 4 * wet.hunters.len() + water);
+        // Version 6 leads its water section with a one-byte present flag, because the nutrient tier
+        // can be on with the water tier off and the version no longer says which.
+        let water = 1 + 4 + 8 * (h.ponded.len() + h.soil.len() + 6) + 4 * crate::output::WATER_FIELDS;
+        let n = wet.npk.as_ref().unwrap();
+        let held = wet.trees.len() + wet.grazers.len() + wet.hunters.len();
+        let npk = 8 * (3 * COLS + 3 * PATCHES) + 4 * COLS + 8 * NPK_LEDGER_FIELDS + 4 * NPK_FIELDS + 24 * held;
+        assert_eq!(n.soil[0].len(), COLS, "the pools are one plane per element over the columns");
+        assert_eq!(bytes.len(), encode_len_without_handling(&wet) + 4 * wet.hunters.len() + water + npk);
     }
 
     /// Length of `state.bin` without the handling section, from the layout table.

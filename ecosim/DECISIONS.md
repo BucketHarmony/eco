@@ -2257,3 +2257,83 @@ rule from the withdrawn one — and the check passes.
 forced a default. **No sweep and no `FINDINGS.md`**: the row does not invoke the sim-shot rules and
 there is no rate parameter to sweep.
 
+
+## Shot G5 — nitrogen, phosphorus and potassium
+
+**`npk.bin` does not bump `format_version`.** Every version so far only added files, and a reader
+that knows version 4 can read a G5 run: `npk.bin` is one more file in a snapshot directory, and
+nothing it needs was removed or moved. Bumping to 5 would break two readers this shot is not
+allowed to edit — `ecoview-native/src/run.rs` requires exact equality and `ecoview/src/loader.ts`
+whitelists versions — for a file neither of them asks for. The precedent is `meta.json`'s keys,
+which have been added without a bump since shot S2. `fertility.bin` keeps its name, its size and
+its meaning ("how well can plants grow here"); what changed is what it is computed from.
+
+**One switch for the whole tier.** `npk.enabled=false` returns the pre-G5 model exactly: the old
+fertility index, the old decay path, no pools, no `npk.bin`, the version-5 `state.bin` and no RNG
+draw anywhere. The waterlog death check reads `Sim::is_waterlogged` before it draws, so a run with
+the tier off takes the same stream. It is pinned by `npk_off_cuts_to_the_pre_g5_manifest`, which
+compares against a manifest cut from a run of **13c318c**, the commit before this shot, rather than
+regenerated from this one — so `ECOSIM_REGEN_MANIFEST=1` can never quietly rewrite the thing the
+identity is measured against. The one thing the switch does not cover is `climate.decay_k`: the
+10x error was a fact about litter, not about nutrients, so the identity run sets it back by hand
+and the test says why.
+
+**Nutrient content is derived for covers and stored for trees and animals.** A patch's grass and
+shrub hold `need_i × density × columns` by definition, so storing it would be storing a quantity
+the model can already compute — and `Patch` is serialised into `patches.json`, where a new field
+would change the run-directory format for nothing. A tree and an animal are different: what a tree
+holds is the sum of what it bought at every update it lived through, and what a grazer holds is
+what it ate minus what it excreted, neither of which is a function of its current size. Those two
+carry a `[f64; 3]`, which is why `state.bin` needed version 6.
+
+**Hunters take no matter from a kill.** A hunter's `npk` is allocated and always zero: the carcass's
+nutrients go to the ground as detritus at the moment of the kill. Modelling a hunter's own body as a
+nutrient store would need an excretion and a decay path for a pool worth a fraction of a gram a
+square metre, and the prompt's "animal corpses return what the animal held" is satisfied by the
+grazer, which is where the matter actually moves. `animals.npk_content` is documented as a capacity
+and a residence time, not a stock.
+
+**`state.bin` version 6 carries a water-present flag.** Version 5 said "there is water here" by
+being version 5. Version 6 has to encode four combinations, not two — nutrients with or without
+water — so it writes a `u8` before the water section instead of inferring it from the version.
+`decode` reads the flag at version ≥ 6 and falls back to `version == 5` below it, so every older
+file still loads.
+
+**The balance is exact by construction, not by tolerance.** Cover uptake is charged as the demand of
+the growth that actually happened after `Sim::npk_share` cut it, and the litter it sheds is derived
+as `taken − Δ(standing content)` rather than computed again from the litter rate, so soil loss
+equals plant gain plus detritus gain identically. `Sim::npk_spend` makes two passes — an even split
+over the patch's columns, then a sweep for the shortfall — because the share was promised against
+the patch total and a spend that stopped at the even split would leak the difference. The ledger
+closes to 1e-6 relative on every reference run and under `prop_nutrient_balance_closes`.
+
+**Waterlogging is measured above field capacity, not below it.** `Sim::water_fraction` is 1.0 at
+field capacity and unclamped above it, so the threshold that means "no air left in the profile" is
+greater than 1, not less. `hydro.waterlog_frac` is 1.10 (TUNING.md). The first draft's 0.95 logged
+88–99% of a well-drained world.
+
+**The pre-G5 cut chain is replayed, not regenerated.** Five tests compare a run against a manifest
+cut before this shot: the square world, the old hunting economics, tree crowding off, water off and
+the format-2 writer. Every one of them now loads its params and calls `common::pre_g5` — the tier
+off and `climate.decay_k` back at 6.0 — instead of having its manifest rewritten. Regenerating
+would have been one command and would have proved nothing: `tree_crowding_off_cuts_to_its_manifest`
+is documented as not regenerable, and for the other four the manifest *is* the claim that this shot
+moved nothing it did not mean to move. `common::pre_g5` is deliberately applied to the `Params`
+struct rather than through `--set`, so `meta["overrides"]` stays exactly as the manifest recorded
+it. `without_npk_and_water` composes the two column cuts in that order, because the nutrient six
+are outside the water six at the end of `series.csv`.
+
+**Scenario tests that are about something else turn the tier off.** `events.rs`'s `busy_params` and
+`state.rs`'s `dry_params` both set `npk.enabled = false`, as `hydro.enabled` already was. Neither
+is a nutrient test — one wants every event kind in one short run, the other wants a serialisation
+round trip — and leaving the tier on would make both of them re-pin nutrient behaviour by accident,
+in a place nobody would look for it. The default-on tier's event log is covered where it belongs,
+by `tests/sweep.rs`'s `s42_event_log_matches_the_series_and_stays_small` on seed 42.
+
+**One regenerated-fixture assertion was restated, not relaxed.** `the_animals_fixture_carries_what
+_an_animals_off_run_cannot` pinned the busiest patch at more than twice the colour scale's top. The
+regenerated fixture has 61 grazers in its busiest patch against a scale top of 32, so the old form
+is false by one grazer. The exact pair is still asserted with `assert_eq!((32, 61))` and that is the
+real pin; the ratio line exists to say *why* the pair matters — the scale saturates — so it is now
+`2 × busiest > 3 × scale_top`. The history is in the comment: 95 before shot G4, 70 after, 61 now.
+A ratio that has moved three times was never the invariant.

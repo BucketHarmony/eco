@@ -5,6 +5,7 @@ use crate::bundle::Bundle;
 use crate::events::Event;
 use crate::heredity::{trait_stats, TraitStats, Traits, TRAIT_CLAMP};
 use crate::hydro::{Hydro, Water};
+use crate::npk::{Npk, NpkRow};
 use crate::params::Params;
 use crate::plants::PlantImport;
 use crate::profile::{lap, Phase, Profiler};
@@ -67,6 +68,8 @@ pub struct StatsRow {
     pub traits: TraitStats,
     /// The six water columns (shot G4); all zero when the water tier is off.
     pub water: Water,
+    /// The six nutrient columns (shot G5); all zero when the nutrient tier is off.
+    pub npk: NpkRow,
 }
 
 /// Marks a column with no trunk in `Sim::trunk_at`.
@@ -110,6 +113,11 @@ pub struct Sim {
     pub fertility: Vec<f32>,
     /// Surface and soil water, or `None` when `hydro.enabled` is false (shot G4).
     pub hydro: Option<Hydro>,
+    /// The three soil nutrient pools, or `None` when `npk.enabled` is false (shot G5). With it
+    /// `None` the `fertility` field above is the 0-255 index it always was; with it `Some` that
+    /// field is derived from these pools and nothing writes to it but `Sim::refresh_fertility`,
+    /// which lives with the rest of the tier in [`crate::npk`].
+    pub npk: Option<Npk>,
     /// Per-patch state, indexed by patch.
     pub patches: Vec<Patch>,
     /// Trees, live and dead since the last compaction.
@@ -216,6 +224,7 @@ impl Sim {
             moisture,
             fertility,
             hydro: None,
+            npk: None,
             patches,
             trees: Vec::new(),
             grazers: Vec::new(),
@@ -244,6 +253,9 @@ impl Sim {
                 sim.derive_moisture(c);
             }
         }
+        if sim.params.npk.enabled {
+            sim.npk = Some(Npk::new(&sim.world, &sim.params));
+        }
         let import = match bundle {
             None => {
                 sim.place_initial_trees();
@@ -254,6 +266,9 @@ impl Sim {
         sim.place_initial_animals();
         sim.rebuild_grazer_grid();
         sim.update_temperature(0);
+        // Last, so the opening stock counts everything that stands at tick 0 -- the scene's trees
+        // and shrubs included.
+        sim.open_npk_ledger();
         (sim, import)
     }
 
@@ -269,6 +284,7 @@ impl Sim {
         p.grazer.immigration_floor = 0;
         p.tree.immigration_floor = 0;
         p.hydro.enabled = false;
+        p.npk.enabled = false;
         p.heredity.mutation = 0.0;
         p.fire.base_rate = 0.0;
         p.disease.grazer_rate = 0.0;
@@ -457,6 +473,7 @@ impl Sim {
             total_burnt: self.total_burnt,
             traits: [trait_stats(&self.grazers), trait_stats(&self.hunters)],
             water: self.hydro.as_ref().map(|h| h.water).unwrap_or_default(),
+            npk: self.npk.as_ref().map(|n| n.row).unwrap_or_default(),
         }
     }
 }

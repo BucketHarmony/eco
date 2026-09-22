@@ -87,7 +87,7 @@ impl EventKind {
 }
 
 /// Why a tree died (`tree_death` rows).
-pub const TREE_CAUSES: [&str; 4] = ["old_age", "drought", "crowded", "burnt"];
+pub const TREE_CAUSES: [&str; 5] = ["old_age", "drought", "crowded", "burnt", "waterlog"];
 
 /// Species names in the `species` column; the empty string for patch events.
 pub const SPECIES: [&str; 4] = ["grazer", "hunter", "tree", ""];
@@ -331,10 +331,14 @@ mod tests {
 
     fn busy_params(b: &Busy) -> Params {
         let mut p = Params::load_square();
-        // These runs are about what is logged, not about water; the pre-G4 moisture path keeps the
-        // fire and starvation causes reachable inside a few hundred ticks. `storm` rows have their
-        // own test below.
+        // These runs are about what is logged, not about water or nutrients; the pre-G4 moisture
+        // path and the pre-G5 fertility index keep the fire, starvation and birth rows reachable
+        // inside a few hundred ticks, which a sward held down by Liebig's minimum does not -- four
+        // hundred ticks is a tenth of a year and the pools do not turn over in it. `storm` rows have
+        // their own test below, and the event log under both tiers has one in `tests/sweep.rs`
+        // (`s42_event_log_matches_the_series_and_stays_small`, seed 42 at the defaults).
         p.hydro.enabled = false;
+        p.npk.enabled = false;
         p.fire.base_rate = b.fire_rate;
         p.fire.temp_min = -50.0;
         p.fire.temp_full = -40.0;

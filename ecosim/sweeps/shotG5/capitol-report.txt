@@ -1,0 +1,52 @@
+## Event-log cause breakdown
+
+| species | kind | cause | events |
+| --- | --- | --- | --- |
+| - | burnout | - | 2034 |
+| - | spread | - | 1862 |
+| - | storm | - | 646 |
+| - | ignition | - | 172 |
+| tree | germination | - | 11767 |
+| tree | tree_death | crowded | 3682 |
+| tree | tree_death | drought | 3314 |
+| tree | tree_death | burnt | 3144 |
+| tree | tree_death | old_age | 184 |
+
+## Which nutrient limits growth, tick 20000
+
+| species | limited by N | by P | by K | mean Liebig factor |
+| --- | --- | --- | --- | --- |
+| grass | 90.1% | 6.9% | 3.0% | 0.292 |
+| shrub | 90.1% | 6.9% | 3.0% | 0.241 |
+| tree | 90.1% | 6.9% | 3.0% | 0.258 |
+
+Over the 43831 plantable columns of 65536. Growth reads the patch mean, not the column,
+so the same question per patch is the one the sim acts on:
+
+- grass, per patch: N 899 of 905, P 6 of 905, K 0 of 905
+
+## The pools by where the column stands, tick 20000
+
+| group | columns | N g/m2 | available P g/m2 | K g/m2 |
+| --- | --- | --- | --- | --- |
+| roof edge | 2975 | 0.434 | 4.694 | 25.368 |
+| street edge | 5876 | 0.296 | 3.966 | 21.061 |
+| mid-lawn | 24517 | 0.331 | 4.695 | 25.223 |
+| other soil | 10463 | 0.318 | 4.341 | 22.608 |
+| (pipe inlet, 3 m) | 79 | 0.306 | 5.029 | 20.239 |
+
+## Leaching, runoff and waterlogging
+
+| year | leached N g | runoff P g | mean waterlogged frac | max waterlogged frac | end soil N kg |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 30 | 96 | 0.0000 | 0.0000 | 0.419 |
+| 2 | 47 | 23 | 0.0000 | 0.0000 | 0.678 |
+| 3 | 29 | 9 | 0.0000 | 0.0000 | 0.568 |
+| 4 | 40 | 18 | 0.0000 | 0.0000 | 0.524 |
+| 5 | 22 | 17 | 0.0000 | 0.0000 | 0.330 |
+
+wrote sweeps/shotG5\n-20000.png: 256x256 px, north up, log ramp over the 2nd to 98th percentile of the plantable columns, 0.0210 to 0.61 g/m2
+
+wrote sweeps/shotG5\p-20000.png: 256x256 px, north up, log ramp over the 2nd to 98th percentile of the plantable columns, 0.0054 to 53.46 g/m2
+
+wrote sweeps/shotG5\k-20000.png: 256x256 px, north up, log ramp over the 2nd to 98th percentile of the plantable columns, 0.0406 to 35.15 g/m2

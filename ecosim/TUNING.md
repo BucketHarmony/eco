@@ -749,3 +749,36 @@ the crown conditions), and the medians are not monotone in the threshold. The le
 the tick-0 calibration above; the sweep's role was to show the term bites in the right direction
 (crowded rises from a median 34.7% of tree deaths to 46–65%) and does not run away (no replicate
 extinguished the trees). Both tables are in `sweeps/shotS11/FINDINGS.md`.
+
+## Shot G5 — nitrogen, phosphorus and potassium
+
+The 0–255 fertility index became three pools in g/m², so every value below is either new with the
+tier or one the tier made wrong. `fertility` itself is still published, now as
+`255 × min_i(a_i / (a_i + half_sat_i × need_i))` for grass, which is why `ecosim check`'s
+`fertility_band` and `long_fertility` lines are what most of this table is calibrated against.
+
+| Parameter | Before | After | Kind | Why, and the line that forced it |
+|---|---|---|---|---|
+| `climate.decay_k` | 6.0 /yr | **0.45 /yr** | corrected | The one known-wrong value left in UNITS.md (R11): 6.0 a year is a litter turnover of about two months against a published one to three years. 0.45 is a 2.2-year nominal turnover, and the temperature and moisture factors in `Sim::decay_detritus` take the realised rate to roughly a decade on this site. Forced by the backlog row, not by an acceptance line — and it is the reason the rate-0 identity run has to set it back to 6.0 by hand (`npk_off_cuts_to_the_pre_g5_manifest`). |
+| `npk.init_n` | — | 0.012 (1.54 g/m²) | new, calibrated | Mineral nitrogen at tick 0, 15 kg/ha, inside the published 10–50 for a temperate soil. It is the top of the index's range on the reference runs, so it is what `fertility_mean ≤ 220` is set against: at 0.02 the 15-year run peaks at 220.8 and fails. |
+| `npk.init_p`, `npk.init_k` | — | 0.4, 0.3 | new | 51.2 g/m² of total phosphorus at `p_avail_frac` 0.1 in reach, and 38.4 g/m² of exchangeable potassium (UNITS.md R14). Neither binds on this site; both are set so that they can bind where water has moved them. |
+| `npk.init_detritus` | — | [55, 4, 35] g/m² | new, calibrated | The litter the site starts under. **The single value the first working run turned on.** With litter at 0 the mineral pool is mined to build one and never recovers — `fertility_mean` [2.30, 23.36] and `grass_mean` [0.008, 0.125] on seed 1, both failing — because litter here turns over in about a decade and five years is not long enough to fill it. 55 g/m² of nitrogen is also where the 15-year run's own litter settles, so the value is the site's equilibrium rather than a number that makes year 1 look good. |
+| `npk.half_sat` | — | [0.28, 2.5, 1.0] | new, calibrated | Multiplied by grass's needs this is 0.7 g/m² of nitrogen, 0.5 of available phosphorus and 2.0 of potassium at half growth. Nitrogen's is what maps the site's mineral pool onto the published index: the pool runs over about 24x between the first spring and the fifteenth year, and the [40, 220] band is 40x wide, so the value has to sit inside a window about half a decade wide. 0.35 fails the floor (34.2 on seed 2), 0.128 fails both ends of the 15-year run ([23.97, 220.76]). |
+| `npk.n_deposition` | — | 2.5 g/m²/yr | new, calibrated | 25 kg N/ha/yr: the top of the published deposition range for a temperate site near a city, carrying biological fixation with it, since there is no clover in the model and no fertiliser either. **This is the line `long_fertility` turns on**, because in a closed nitrogen economy the mineral pool's floor is set by what comes in: 1.0 gives 22.18 at fifteen years, 1.5 gives 36.42, 2.0 gives 42.60 and 2.5 gives 47.80, against a floor of 40. The 2.0 run also failed `long_band` on the hunters (9 against 21.4); 2.5 passes it at +0.23. |
+| `npk.k_leach_ratio` | — | 0.03 | new | Potassium leaves at 3% of nitrogen's rate: most of it is held on the exchange complex rather than dissolved. At 0.1 the pool falls from 38.4 to 12.9 g/m² in five years, which is a soil losing its potassium an order of magnitude too fast. |
+| `npk.p_avail_frac`, `p_runoff_g_per_mm`, `n_runoff_frac`, `fire_n_volatilised` | — | 0.1, 0.002, 0.1, 0.9 | new | Untouched since they were written: no acceptance line moved them, and `sweeps/shotG5/FINDINGS.md` is where their effect is measured. |
+| `grass.npk` | — | 2.5 / 0.2 / 2.0, tolerance 0.8 | new | A full sward here is ~170 g/m² of dry matter — a mown lawn, not a hay meadow — at 1.5% N, 0.12% P and 1.2% K (UNITS.md R16). The first draft used a 500 g/m² meadow (7.5 / 0.6 / 6.0) and asked for more nitrogen capital than the site has: the whole vegetation, litter included, wanted about 12 g/m² of nitrogen against a 2.6 g/m² pool. |
+| `shrub.npk` | — | 3.3 / 0.27 / 2.7, tolerance 0.7 | new | Grass's composition at a third more standing mass per unit of cover, which is what a woody stem costs. Slightly less tolerant of standing water than grass. |
+| `tree.npk` | — | 3.0 / 0.25 / 2.4, tolerance 0.4 | new | Wood is poorer in nutrients than leaves but there is more of it per unit of growth. The tree is the species meant to mind wet feet, so its tolerance is the lowest of the three. |
+| `tree.waterlog_mortality` | — | 0.01 | new | Per tree update on a waterlogged column, scaled by `1 − tolerance`, so 0.006 for this tree: about a 1-in-160 chance a year of drowning where the profile never drains. No reference run has one. `waterlogged_frac` is identically 0 on all four strip seeds **and on all six Capitol runs**, so both this knob and `hydro.waterlog_ticks` are uncalibrated against anything but the synthetic test that forces them (`forced_tree_extinction_by_waterlogging`); `sweeps/shotG5/FINDINGS.md` says which of the two is the binding one. |
+| `hydro.waterlog_frac` | — | 1.10 | new, corrected in place | The first value was 0.95, which read as "almost no air left". It is wrong: `Sim::water_fraction` is 1.0 **at** field capacity and runs above it while a column drains, so 0.95 logs a soil that is merely moist — 88–99% of the world at every tick on seed 1. 1.10 is a store 10% above field capacity, with `hydro.saturation` capping a column at 1.2. |
+| `hydro.waterlog_ticks` | — | 400 | new | 100 days at `year_len` 4000: long enough that a wet fortnight does not count. |
+| `cover.fertility_full`, `cover.fertility_draw`, `hydro.leach_k`, `fire.ash` | 64, 20, 0.0008, 5 | unchanged | **not touched** | All four are read only with `npk.enabled=false`, which is the pre-G5 path the identity manifest pins. Deleting them would delete the rate-0 switch with them. |
+
+**What the acceptance cost.** Seeds 1, 2 and 3 at 20000 ticks and seed 1 at 60000 all pass every
+`ecosim check` line, with `fertility_mean` at [59.19, 206.44], [88.79, 202.84] and [73.89, 211.62]
+on the strips, [67.41, 205.05] on the Capitol and [47.80, 206.44] over fifteen years. The tightest
+margin in the set is the fertility ceiling at +0.038 (seed 3): the index's top is the first spring,
+when the litter is decaying into a pool no sward has grown into yet, and `npk.init_n` is the knob
+that sets it. Nothing else moved: the nutrient tier costs about 1% of run time (seed 1 at 60000
+ticks, 123.8 s against the pre-G5 binary's 128.5 s on the same machine).

@@ -143,13 +143,27 @@ impl Sim {
         self.log(EventKind::Burnout, "", p, None);
         let fp = self.params.fire.clone();
         let n = self.world.patch_soil[p].len() as f32;
+        let (grass, shrub) = (self.patches[p].grass, self.patches[p].shrub);
         let pa = &mut self.patches[p];
         pa.detritus += fp.detritus_yield * (pa.grass + pa.shrub) * n;
         pa.grass = 0.0;
         pa.shrub = 0.0;
-        for i in 0..self.world.patch_soil[p].len() {
-            let c = self.world.patch_soil[p][i];
-            self.fertility[c] = (self.fertility[c] + fp.ash).clamp(0.0, 255.0);
+        if self.npk.is_some() {
+            // The sward's nitrogen goes up as smoke, all but `npk.fire_n_volatilised`; what is
+            // left of it and all of the phosphorus and potassium land on the patch as ash. The
+            // fertility field is derived here, so `fire.ash` has nothing to add to.
+            let (ng, ns) = (self.params.grass.npk.needs(), self.params.shrub.npk.needs());
+            let burnt = [0, 1, 2].map(|i| n as f64 * (grass as f64 * ng[i] as f64 + shrub as f64 * ns[i] as f64));
+            let up = burnt[crate::npk::N] * self.params.npk.fire_n_volatilised.clamp(0.0, 1.0) as f64;
+            let mut ash = burnt;
+            ash[crate::npk::N] -= up;
+            self.npk.as_mut().expect("nutrient tier").ledger.volatilised[crate::npk::N] += up;
+            self.npk_return(p, ash);
+        } else {
+            for i in 0..self.world.patch_soil[p].len() {
+                let c = self.world.patch_soil[p][i];
+                self.fertility[c] = (self.fertility[c] + fp.ash).clamp(0.0, 255.0);
+            }
         }
         if fp.tree_kill > 0.0 {
             for i in 0..self.trees.len() {

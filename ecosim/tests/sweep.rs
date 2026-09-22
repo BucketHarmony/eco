@@ -177,10 +177,11 @@ fn assert_same_manifest(want: &BTreeMap<String, String>, got: &BTreeMap<String, 
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn fresh_s42_matches_committed_manifest() {
     let got = hash_run(fresh_s42(), |_, b| b);
-    // 10 files per snapshot since the water tier added water.bin and soil_water.bin (shot G4, which
-    // also made every run format_version 4 and so gave it the four `world/` files); events.csv
-    // since version 3.
-    assert_eq!(got.len(), 2 + 201 * 10 + 4);
+    // 11 files per snapshot: the water tier added water.bin and soil_water.bin (shot G4, which also
+    // made every run format_version 4 and so gave it the four `world/` files) and the nutrient tier
+    // added npk.bin (shot G5, which did not move the version because nothing has to read it);
+    // events.csv since version 3.
+    assert_eq!(got.len(), 2 + 201 * 11 + 4);
     assert!(got.contains_key(EVENTS_FILE));
     assert_eq!(got.keys().filter(|k| k.ends_with("/state.bin")).count(), 201);
     assert_manifest("s42-manifest.sha256", &got);
@@ -260,8 +261,12 @@ fn s42_event_log_matches_the_series_and_stays_small() {
     assert_eq!(from_events, rows);
     assert_eq!(extinctions(&from_events, true), extinctions(&rows, true));
     assert_eq!(unlit_burnout(&events), None);
-    for c in TREE_CAUSES {
-        assert!(events.iter().any(|e| e.kind == EventKind::TreeDeath && e.cause == c), "tree {c}");
+    // Every tree cause but `waterlog`: the strip drains, so no column on it stays above field
+    // capacity for the `hydro.waterlog_ticks` a drowning needs, and no seed-42 tree ever drowns
+    // (`sweeps/shotG5/FINDINGS.md` measures `waterlogged_frac` at 0 on every reference run). The
+    // cause is exercised in `integration.rs`'s `forced_tree_extinction_by_waterlogging`.
+    for c in TREE_CAUSES.iter().filter(|c| **c != "waterlog") {
+        assert!(events.iter().any(|e| e.kind == EventKind::TreeDeath && e.cause == *c), "tree {c}");
     }
 }
 
@@ -276,10 +281,14 @@ fn s42_event_log_matches_the_series_and_stays_small() {
 fn square_world_reproduces_its_manifest() {
     let dir = tmp("s42_square");
     let set = common::square_set(&["world.depth=64", "world.height=32", "world.patch=8", "hydro.enabled=false"]);
-    run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
+    // The pre-G5 soil is set on the loaded params rather than through `--set`, so the `overrides`
+    // this run records stay the ones the manifest was cut with.
+    let mut p = Params::load_with(&params_path(), &set).unwrap();
+    common::pre_g5(&mut p);
+    run(p, 42, 20_000, 100, &set, &dir).unwrap();
     let meta: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["dims"], serde_json::json!({"x": 64, "y": 64, "z": 32, "patch": 8}));
-    assert_manifest("s42-manifest-g4b-64.sha256", &hash_run(&dir, common::without_water));
+    assert_manifest("s42-manifest-g4b-64.sha256", &hash_run(&dir, common::without_npk_and_water));
 }
 
 /// Identity case for food-limited hunters (shots 14a and 14a-rev): the pre-shot hunting economics set
@@ -298,8 +307,10 @@ fn old_hunting_economics_via_set_reproduce_the_square_manifest() {
         "hunter.handling_ticks=0",
         "hydro.enabled=false",
     ]);
-    run(Params::load_with(&params_path(), &set).unwrap(), 42, 20_000, 100, &set, &dir).unwrap();
-    let got = hash_run(&dir, common::without_water);
+    let mut p = Params::load_with(&params_path(), &set).unwrap();
+    common::pre_g5(&mut p);
+    run(p, 42, 20_000, 100, &set, &dir).unwrap();
+    let got = hash_run(&dir, common::without_npk_and_water);
     assert_eq!(got.len(), 2 + 201 * 8);
     assert_manifest("s42-manifest-g4b-64.sha256", &got);
 }
@@ -312,10 +323,14 @@ fn pre_shot_11() -> Params {
     p
 }
 
-/// Default params on the square world with the water tier off: the pre-G4 moisture update.
+/// Default params on the square world with the water tier off: the pre-G4 moisture update. Since
+/// shot G5 it also puts the soil back to the pre-G5 one (`common::pre_g5`), because every manifest
+/// it feeds was cut from a binary that had no nutrient pools and a litter decay rate ten times too
+/// fast, and a run that keeps either cannot reproduce those bytes.
 fn pre_g4() -> Params {
     let mut p = common::square();
     p.hydro.enabled = false;
+    common::pre_g5(&mut p);
     p
 }
 
@@ -330,7 +345,7 @@ fn pre_g4() -> Params {
 fn heredity_off_cuts_to_its_manifest() {
     let dir = tmp("s42_heredity_off");
     run(pre_shot_11(), 42, 20_000, 100, &[], &dir).unwrap();
-    let got = hash_run(&dir, |f, b| common::without_traits(f, common::without_water(f, b)));
+    let got = hash_run(&dir, |f, b| common::without_traits(f, common::without_npk_and_water(f, b)));
     assert_eq!(got.len(), 2 + 201 * 8);
     assert_manifest("s42-manifest-g4b-heredity-off.sha256", &got);
 }
@@ -355,7 +370,7 @@ fn pre_shot_10() -> Params {
 fn crowding_off_cuts_to_its_manifest() {
     let dir = tmp("s42_crowding_off");
     run(pre_shot_10(), 42, 20_000, 100, &[], &dir).unwrap();
-    let got = hash_run(&dir, |f, b| common::without_traits(f, common::without_water(f, b)));
+    let got = hash_run(&dir, |f, b| common::without_traits(f, common::without_npk_and_water(f, b)));
     assert_eq!(got.len(), 2 + 201 * 8);
     assert_manifest("s42-manifest-g4b-crowding-off.sha256", &got);
 }
@@ -371,15 +386,18 @@ fn crowding_off_cuts_to_its_manifest() {
 ///
 /// It is deliberately **not** regenerable. Every other manifest in this file is rewritten by
 /// `ECOSIM_REGEN_MANIFEST=1`, and this one holds bytes that a later run of this code cannot produce
-/// again if it is wrong — a regeneration would quietly replace the evidence with the claim.
+/// again if it is wrong — a regeneration would quietly replace the evidence with the claim. Which is why shot G5 put this
+/// run back on the pre-G5 soil (`common::pre_g5`) rather than re-cutting the file: the S11 binary
+/// had no nutrient pools, so the identity only survives with the tier off.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn tree_crowding_off_cuts_to_its_manifest() {
     let dir = tmp("s42_tree_crowding_off");
     let mut p = Params::load_default();
     p.tree.crowding_mortality = 0.0;
+    common::pre_g5(&mut p);
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
-    let got = hash_run(&dir, |_, b| b);
+    let got = hash_run(&dir, common::without_npk);
     assert_eq!(got.len(), 2 + 201 * 10 + 4);
     assert_same_manifest(&read_manifest("s42-manifest-S11-tree-crowding-off.sha256"), &got);
 }
@@ -396,7 +414,8 @@ fn fire_off_cuts_to_its_manifest() {
     let mut p = pre_shot_10();
     p.fire.base_rate = 0.0;
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
-    let got = hash_run(&dir, |f, b| common::without_fire(f, common::without_traits(f, common::without_water(f, b))));
+    let got =
+        hash_run(&dir, |f, b| common::without_fire(f, common::without_traits(f, common::without_npk_and_water(f, b))));
     assert_eq!(got.len(), 2 + 201 * 8);
     assert_manifest("s42-manifest-g4b-fire-off.sha256", &got);
 }
@@ -407,19 +426,45 @@ fn fire_off_cuts_to_its_manifest() {
 /// is still `format_version` 3. Until shot G4b the manifest was the pre-G4 one, which made this an
 /// identity with the code that predated the tier (`the_pre_conversion_manifests_are_kept_as_history`);
 /// the converted plant draws speak in millimetres, which the pre-G4 moisture index cannot reproduce.
+/// Since shot G5 the run is also put back on the pre-G5 soil and the nutrient columns come off with
+/// the water ones (`common::without_npk_and_water`), so the manifest is still the one G4b cut.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
 fn water_off_cuts_to_its_manifest() {
     let dir = tmp("s42_water_off");
     let mut p = Params::load_default();
     p.hydro.enabled = false;
+    common::pre_g5(&mut p);
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
     let meta: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["format_version"], 3);
     assert!(!dir.join("world").exists(), "no world directory without the water tier");
-    let got = hash_run(&dir, common::without_water);
+    let got = hash_run(&dir, common::without_npk_and_water);
     assert_eq!(got.len(), 2 + 201 * 8);
     assert_manifest("s42-manifest-g4b-water-off.sha256", &got);
+}
+
+/// The nutrient tier off (shot G5): with `npk.enabled=false` and `climate.decay_k` put back to the
+/// 6.0 the shot corrected, seed 42 on the reference strip reproduces the run the pre-G5 ecosim
+/// wrote, byte for byte, once the six nutrient columns are cut (`common::without_npk`, which asserts
+/// every cut value is 0). That is the claim that the whole of G5 sits behind one switch and one
+/// number: no other draw, order or rounding in the tick moved, and a run with the tier off still
+/// writes no `npk.bin` and the version-5 `state.bin`.
+///
+/// `s42-manifest-preG5.sha256` was cut from a run of the commit before this shot, not regenerated
+/// from this one, so `assert_same_manifest` is called here rather than `assert_manifest`:
+/// `ECOSIM_REGEN_MANIFEST=1` must never overwrite the thing this test compares against.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn npk_off_cuts_to_the_pre_g5_manifest() {
+    let dir = tmp("s42_npk_off");
+    let mut p = Params::load_default();
+    p.npk.enabled = false;
+    p.climate.decay_k = 6.0;
+    run(p, 42, 20_000, 100, &[], &dir).unwrap();
+    assert!(!dir.join("snap_000000").join("npk.bin").exists(), "no nutrient field with the tier off");
+    let got = hash_run(&dir, common::without_npk);
+    assert_same_manifest(&read_manifest("s42-manifest-preG5.sha256"), &got);
 }
 
 /// A 2-value × 1-seed × 500-tick sweep writes 2 rows and 2 cell CSVs, and each cell equals a

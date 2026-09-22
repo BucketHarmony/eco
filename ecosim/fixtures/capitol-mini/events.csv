@@ -18,7 +18,7 @@ tick,kind,species,patch_x,patch_y,x,y,cause,detail
 50,germination,tree,21,31,168,254,,95
 69,storm,,0,0,,,,3.2087 1.0109 0.1324
 71,storm,,0,0,,,,6.9960 2.4111 0.9362
-72,storm,,0,0,,,,9.3744 3.3921 2.0318
+72,storm,,0,0,,,,9.3744 3.3921 2.0322
 100,germination,tree,5,3,45,31,,96
 100,germination,tree,3,3,24,27,,97
 100,germination,tree,18,6,151,53,,98

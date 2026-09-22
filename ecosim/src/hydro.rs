@@ -16,6 +16,7 @@
 
 use crate::bundle::Medium;
 use crate::events::{Detail, EventKind};
+use crate::npk::{N, P};
 use crate::params::Params;
 use crate::sim::Sim;
 use crate::world::{ColClass, World};
@@ -490,11 +491,23 @@ impl Sim {
         let tick_h = tick_hours(&self.params);
         let gradient = self.params.climate.rain_gradient;
         let width = self.world.dims.wx;
+        let np = self.params.npk;
         let h = self.hydro.as_mut().expect("water tier");
         let (area, per_col) = (h.flow.cell_area, h.flow.per_col);
         let (mut rain, mut runoff, mut outflow) = (0.0f64, 0.0f64, 0.0f64);
         for i in 0..h.runon.len() {
             h.runon[i] = 0.0;
+        }
+        // The nutrient load the same water carries (shot G5): phosphorus lifted off the ground it
+        // runs over, and the share of a column's nitrogen that sits in the layer it mixes with.
+        // Both ride the flow graph the water already built, which is why this is here and not in
+        // `npk.rs` -- the order cells are visited in is what makes a load land downhill of where
+        // it started.
+        let mut npk = self.npk.as_mut();
+        let mut out_npk = [0.0f64; 2];
+        if let Some(n) = npk.as_deref_mut() {
+            n.carry.clear();
+            n.carry.resize(h.runon.len(), [0.0; 2]);
         }
         for k in 0..h.flow.order.len() {
             let i = h.flow.order[k] as usize;
@@ -516,6 +529,44 @@ impl Sim {
             let store = w.min(free);
             h.ponded[i] += store;
             w -= store;
+            if let Some(n) = npk.as_deref_mut() {
+                let arrived = std::mem::take(&mut n.carry[i]);
+                let present = fall + h.runon[i];
+                // What the cell keeps of the load that reached it is what it kept of the water.
+                let kept = if present > 0.0 { ((take + store) / present).clamp(0.0, 1.0) } else { 1.0 };
+                // `carry` and `moving` hold phosphorus at 0 and nitrogen at 1, in that order.
+                let mut moving = arrived;
+                if n.plantable[c] {
+                    for (slot, element) in [P, N].into_iter().enumerate() {
+                        n.soil[element][c] += arrived[slot] * kept;
+                        moving[slot] = arrived[slot] * (1.0 - kept);
+                    }
+                }
+                // On a sealed surface nothing soaks in, so the whole load stays in the water.
+                if w > 0.0 && n.plantable[c] {
+                    // Phosphorus goes with the soil the water lifts, so many grams a square metre
+                    // per millimetre, capped at this cell's share of the column's pool.
+                    let lift = (np.p_runoff_g_per_mm as f64 * w * area).min(n.soil[P][c].max(0.0) / per_col);
+                    n.soil[P][c] -= lift;
+                    moving[0] += lift;
+                    // Dissolved nitrogen mixes with the column's own store, and only the share in
+                    // the top of the profile is in reach of water that never gets in.
+                    let mix = (np.n_runoff_frac as f64 * w / (w + h.soil[c])).clamp(0.0, 1.0);
+                    let gone = n.soil[N][c].max(0.0) / per_col * mix;
+                    n.soil[N][c] -= gone;
+                    moving[1] += gone;
+                }
+                match h.flow.recv[i] {
+                    OUT => {
+                        out_npk[0] += moving[0];
+                        out_npk[1] += moving[1];
+                    }
+                    r => {
+                        n.carry[r as usize][0] += moving[0];
+                        n.carry[r as usize][1] += moving[1];
+                    }
+                }
+            }
             if w > 0.0 {
                 // The share of what leaves that the cell's own rain paid for (see `Water::runoff_mm`).
                 runoff += w * fall / (fall + h.runon[i]);
@@ -524,6 +575,11 @@ impl Sim {
                     r => h.runon[r as usize] += w,
                 }
             }
+        }
+        if let Some(n) = npk {
+            n.ledger.outflow[P] += out_npk[0];
+            n.ledger.outflow[N] += out_npk[1];
+            n.row.outflow_p = (out_npk[0] / n.columns.max(1) as f64) as f32;
         }
         h.ledger.rain += rain * area;
         h.ledger.outflow += outflow * area;

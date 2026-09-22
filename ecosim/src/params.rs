@@ -28,6 +28,10 @@ pub struct Params {
     pub rain: RainParams,
     /// `[hydro]`
     pub hydro: HydroParams,
+    /// `[npk]`. Always written to `meta.json`, even at its defaults (shot S2's rule, shot G5's
+    /// section).
+    #[serde(default)]
+    pub npk: NpkParams,
     /// `[medium.*]`
     pub medium: MediaParams,
     /// `[season]`
@@ -251,7 +255,93 @@ pub struct HydroParams {
     /// capacity is the part that percolates away as drainage.
     pub saturation: f32,
     /// Fertility leached per millimetre drained out of the bottom of a column. 0 turns it off.
+    /// Read only on the pre-G5 fertility path: with `npk.enabled` the three nutrient pools leach
+    /// by the mixing rule in [`crate::npk`] instead, which needs no coefficient.
     pub leach_k: f32,
+    /// Soil water above this fraction of field capacity is waterlogging (shot G5).
+    #[serde(default = "waterlog_frac_default")]
+    pub waterlog_frac: f32,
+    /// Ticks a column must stay that wet before it counts as waterlogged. 0 would make every wet
+    /// tick count, so the mechanism's off switch is `npk.enabled`, not this.
+    #[serde(default = "waterlog_ticks_default")]
+    pub waterlog_ticks: u32,
+}
+
+fn waterlog_frac_default() -> f32 {
+    0.95
+}
+
+fn waterlog_ticks_default() -> u32 {
+    400
+}
+
+/// Soil nitrogen, phosphorus and potassium (shot G5): the three pools that replace the 0-255
+/// fertility index.
+///
+/// `enabled` is the shot's one rate switch, and it covers everything the shot adds -- the three
+/// pools, Liebig-limited growth, nutrient leaching and runoff, and waterlogging. With it false the
+/// pre-G5 fertility index runs instead, exactly as `hydro.enabled` false runs the pre-G4 moisture
+/// update, and a run is byte-identical to one written before this shot apart from the six new
+/// always-zero `series.csv` columns (DECISIONS.md, "One switch for the whole of G5").
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NpkParams {
+    /// Whether the nutrient tier runs at all. False restores the fertility index.
+    pub enabled: bool,
+    /// Grams of nitrogen per square metre, per unit of `climate.initial_fertility`, at tick 0.
+    /// Plant-available (mineral) nitrogen only, which in a temperate soil is a small fraction of
+    /// the total: 0.02 × 128 is 2.6 g/m², about 26 kg/ha (UNITS.md R14).
+    pub init_n: f32,
+    /// Grams of phosphorus per square metre per unit of initial fertility, at tick 0. This is the
+    /// whole pool, nearly all of it bound to soil particles; `p_avail_frac` of it is what a plant
+    /// can reach.
+    pub init_p: f32,
+    /// Grams of potassium per square metre per unit of initial fertility, at tick 0.
+    pub init_k: f32,
+    /// Nitrogen, phosphorus and potassium in the litter each square metre of plantable ground
+    /// starts under, in g/m². The organic stock the mineral pool is fed from, not part of it.
+    #[serde(default = "init_detritus_default")]
+    pub init_detritus: [f32; 3],
+    /// The share of the phosphorus pool a plant can take up and runoff can carry.
+    pub p_avail_frac: f32,
+    /// Half-saturation multipliers, N, P, K. Growth's nutrient factor is
+    /// `min_i(a_i / (a_i + half_sat_i × need_i))` over the available pools `a_i`, so
+    /// `half_sat_i × need_i` is the pool at which that nutrient alone halves growth: the unit is
+    /// units-of-growth, and a larger number is a hungrier plant.
+    pub half_sat: [f32; 3],
+    /// Nitrogen deposited from the atmosphere, g/m² per year, spread over every plantable column.
+    /// The only external input any of the three pools has.
+    pub n_deposition: f32,
+    /// Potassium leaches at this multiple of the nitrogen rate.
+    pub k_leach_ratio: f32,
+    /// Grams of phosphorus one millimetre of runoff lifts off a square metre of ground, capped at
+    /// the available phosphorus under it.
+    pub p_runoff_g_per_mm: f32,
+    /// The share of a column's nitrogen that sits in the layer runoff mixes with.
+    pub n_runoff_frac: f32,
+    /// The share of a burnt plant's nitrogen that goes up as smoke. What is left of it, and all of
+    /// its phosphorus and potassium, lands on the patch as ash. Fire is the only sink any of the
+    /// three pools has that water does not open.
+    pub fire_n_volatilised: f32,
+}
+
+impl Default for NpkParams {
+    fn default() -> Self {
+        NpkParams {
+            enabled: true,
+            init_n: 0.012,
+            init_p: 0.4,
+            init_k: 0.3,
+            init_detritus: init_detritus_default(),
+            p_avail_frac: 0.1,
+            half_sat: [0.28, 2.5, 1.0],
+            n_deposition: 2.5,
+            k_leach_ratio: 0.03,
+            p_runoff_g_per_mm: 0.002,
+            n_runoff_frac: 0.1,
+            fire_n_volatilised: 0.9,
+        }
+    }
 }
 
 /// One row of the media table: what a surface does with water, and whether anything grows in it.
@@ -359,6 +449,44 @@ pub struct CoverSpecies {
     pub moisture: Curve,
     /// Suitability over patch temperature.
     pub temp: Curve,
+    /// Nutrient needs and waterlogging tolerance (shot G5), `[grass.npk]` and `[shrub.npk]`.
+    #[serde(default)]
+    pub npk: SpeciesNpk,
+}
+
+/// What one producer species does with nitrogen, phosphorus, potassium and standing water
+/// (shot G5).
+///
+/// The three needs are grams of the element per unit of growth, where a unit of growth is one unit
+/// of cover density over one square metre for the two ground covers, and one metre of height for
+/// the tree. They are both the species' demand and the composition of its litter: what a plant
+/// takes up per unit of growth is what its dead tissue returns per unit of death, so the plant pool
+/// is `need × biomass` exactly and never has to be tracked alongside it (DECISIONS.md, shot G5).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpeciesNpk {
+    /// Grams of nitrogen per unit of growth.
+    pub need_n: f32,
+    /// Grams of phosphorus per unit of growth.
+    pub need_p: f32,
+    /// Grams of potassium per unit of growth.
+    pub need_k: f32,
+    /// Growth on a waterlogged column is multiplied by this, in [0, 1]: 0 is a species that stops
+    /// dead in standing water and 1 one that does not notice it.
+    pub waterlog_tolerance: f32,
+}
+
+impl Default for SpeciesNpk {
+    fn default() -> Self {
+        SpeciesNpk { need_n: 2.5, need_p: 0.2, need_k: 2.0, waterlog_tolerance: 0.8 }
+    }
+}
+
+impl SpeciesNpk {
+    /// The three needs in N, P, K order.
+    pub fn needs(&self) -> [f32; 3] {
+        [self.need_n, self.need_p, self.need_k]
+    }
 }
 
 /// The tree species.
@@ -425,6 +553,14 @@ pub struct TreeParams {
     /// `crown_radius_frac` it fixes the crown envelope, and so how deep a neighbour's crown a ray
     /// to this one's middle passes through.
     pub crown_base_frac: f32,
+    /// Nutrient needs per metre of height growth and waterlogging tolerance (shot G5), `[tree.npk]`.
+    #[serde(default)]
+    pub npk: SpeciesNpk,
+    /// Chance per tree update that a tree on a waterlogged column dies, before its tolerance: the
+    /// roll is `waterlog_mortality × (1 − tolerance)` and the death is logged with cause
+    /// `waterlog` (shot G5). 0 leaves the roll out and touches no RNG.
+    #[serde(default = "tree_waterlog_mortality_default")]
+    pub waterlog_mortality: f32,
     /// Germination suitability over surface light, as a fraction of full sun (low-opt replaced by
     /// `sapling_light`).
     pub light: Curve,
@@ -451,12 +587,33 @@ pub struct AnimalsParams {
     /// False leaves every grazer and hunter out: none are placed, none immigrate, and the animal
     /// phase is skipped, so it draws nothing from the RNG.
     pub enabled: bool,
+    /// Grams of nitrogen, phosphorus and potassium an animal's body can hold per unit of energy
+    /// (shot G5). Every animal is born, placed and immigrates empty and fills up by eating;
+    /// whatever it eats above this it passes straight through into the dung of the patch it is
+    /// standing on, and whatever is left in it at death goes to that patch as a corpse. So the
+    /// number is a residence time, not a stock: raise it and the herd holds the site's nitrogen
+    /// for longer before the soil gets it back.
+    #[serde(default = "animal_npk_default")]
+    pub npk_content: [f32; 3],
+}
+
+/// Starting litter: 55 g/m² of nitrogen, 4 of phosphorus and 35 of potassium.
+fn init_detritus_default() -> [f32; 3] {
+    [55.0, 4.0, 35.0]
+}
+
+fn animal_npk_default() -> [f32; 3] {
+    [0.02, 0.002, 0.015]
 }
 
 impl Default for AnimalsParams {
     fn default() -> Self {
-        AnimalsParams { enabled: true }
+        AnimalsParams { enabled: true, npk_content: animal_npk_default() }
     }
+}
+
+fn tree_waterlog_mortality_default() -> f32 {
+    0.01
 }
 
 /// The grazer species.

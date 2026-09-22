@@ -30,11 +30,15 @@ pub const BUNDLE_FORMAT_VERSION: u32 = 4;
 /// standard deviation of each heritable trait, grazers then hunters (`TraitStats` order); the last
 /// 6 are the water columns (shot G4), world means in millimetres, all zero when the water tier is
 /// off. `rain_mm`, `runoff_mm`, `drainage_mm` and `outflow_mm` are this tick's amounts;
-/// `ponded_mm` and `soil_water_mm` are what is in store at the end of it.
-pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt,patches_burning,total_burnt,grazer_energy_cost_mult_mean,grazer_energy_cost_mult_sd,grazer_flee_distance_mean,grazer_flee_distance_sd,grazer_repro_threshold_mean,grazer_repro_threshold_sd,hunter_energy_cost_mult_mean,hunter_energy_cost_mult_sd,hunter_flee_distance_mean,hunter_flee_distance_sd,hunter_repro_threshold_mean,hunter_repro_threshold_sd,rain_mm,runoff_mm,ponded_mm,soil_water_mm,drainage_mm,outflow_mm";
+/// `ponded_mm` and `soil_water_mm` are what is in store at the end of it. The 6 after those are
+/// the nutrient columns (shot G5), all zero when the nutrient tier is off: the three pools are
+/// means over plantable columns in g/m², `leached_n` and `outflow_p` are what the latest soil
+/// update and the latest storm took away per plantable column, and `waterlogged_frac` is the share
+/// of plantable columns standing wet.
+pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt,patches_burning,total_burnt,grazer_energy_cost_mult_mean,grazer_energy_cost_mult_sd,grazer_flee_distance_mean,grazer_flee_distance_sd,grazer_repro_threshold_mean,grazer_repro_threshold_sd,hunter_energy_cost_mult_mean,hunter_energy_cost_mult_sd,hunter_flee_distance_mean,hunter_flee_distance_sd,hunter_repro_threshold_mean,hunter_repro_threshold_sd,rain_mm,runoff_mm,ponded_mm,soil_water_mm,drainage_mm,outflow_mm,soil_n,soil_p,soil_k,leached_n,outflow_p,waterlogged_frac";
 
 /// Number of fields in a `series.csv` line.
-pub const SERIES_FIELDS: usize = 41;
+pub const SERIES_FIELDS: usize = 47;
 
 /// Number of water columns at the end of a `series.csv` line.
 pub const WATER_FIELDS: usize = 6;
@@ -324,7 +328,25 @@ pub fn format_row(r: &StatsRow) -> String {
     for v in [w.rain_mm, w.runoff_mm, w.ponded_mm, w.soil_water_mm, w.drainage_mm, w.outflow_mm] {
         let _ = write!(line, ",{v:.4}");
     }
+    for v in r.npk.as_array() {
+        let _ = write!(line, ",{v:.4}");
+    }
     line
+}
+
+/// The three nutrient pools as `npk.bin` stores them: f32 little-endian grams per square metre,
+/// three whole planes in N, P, K order, each in column order. Non-plantable columns are 0, the
+/// same convention `surface_u8` uses.
+fn npk_f32(sim: &Sim) -> Vec<u8> {
+    let n = sim.npk.as_ref().expect("nutrient tier");
+    let cols = sim.world.dims.cols();
+    let mut out = Vec::with_capacity(cols * 3 * 4);
+    for plane in &n.soil {
+        for &v in plane.iter().take(cols) {
+            out.extend_from_slice(&(v as f32).to_le_bytes());
+        }
+    }
+    out
 }
 
 /// Ponded water as `water.bin` stores it: u16 little-endian, in tenths of a millimetre, saturating.
@@ -422,6 +444,21 @@ pub fn write_snapshot(sim: &Sim, run_dir: &Path, state: bool, water: bool) -> io
             fs::write(dir.join("soil_water.bin"), soil_water_f32(sim))?;
         }
     }
+    if sim.npk.is_some() {
+        // The nutrient balance, checked where the water balance is and for the same reason: a run
+        // whose ledger has stopped closing is wrong, so it fails rather than finishing quietly.
+        let e = sim.npk_balance_error();
+        if let Some((i, v)) = e.iter().enumerate().find(|(_, v)| v.abs() >= NPK_BALANCE_EPS) {
+            return Err(io::Error::other(format!(
+                "tick {}: the {} ledger is off by {v:e} relative, over {NPK_BALANCE_EPS:e}",
+                sim.tick,
+                ["nitrogen", "phosphorus", "potassium"][i]
+            )));
+        }
+        // `npk.bin` is additive: no reader needs it, so it does not move `format_version` and it
+        // is written at whatever version the run is (DECISIONS.md, shot G5).
+        fs::write(dir.join("npk.bin"), npk_f32(sim))?;
+    }
     fs::write(dir.join("patches.json"), serde_json::to_vec(&sim.patches)?)?;
     fs::write(dir.join("entities.json"), serde_json::to_vec(&entities(sim))?)?;
     if state {
@@ -433,6 +470,11 @@ pub fn write_snapshot(sim: &Sim, run_dir: &Path, state: bool, water: bool) -> io
 /// How far the water ledger may be from closing at a snapshot, relative to the rain that has
 /// fallen. The acceptance of shot G4 asks for 1e-9.
 pub const WATER_BALANCE_EPS: f64 = 1e-9;
+
+/// How far a nutrient ledger may be from closing at a snapshot, relative to everything that has
+/// entered the world. The acceptance of shot G5 asks for 1e-6; the pools hold it to about 1e-13,
+/// because every flux is charged against the same f64 arithmetic that moves it.
+pub const NPK_BALANCE_EPS: f64 = 1e-6;
 
 /// Write `meta.json`: format version, dimensions, run settings, the palette (species colours and
 /// overlay ramps), params and overrides.
@@ -1018,10 +1060,11 @@ mod tests {
     #[test]
     fn fork_can_switch_handling_on() {
         let (parent, child, grandchild) = (scratch_dir(), scratch_dir(), scratch_dir());
-        // The water tier is off here: with it on every `state.bin` is version 5, whatever handling
-        // does, and this test is about the handling section.
+        // Both tiers are off here: with water on every `state.bin` is version 5 and with nutrients
+        // on it is version 6, whatever handling does, and this test is about the handling section.
         let mut p = Params::load_square();
         p.hydro.enabled = false;
+        p.npk.enabled = false;
         run(p, 3, 400, 100, &[], &parent).unwrap();
         assert_eq!(meta(&parent)["params"]["hunter"]["handling_ticks"], 0, "handling off is written, not omitted");
         let set = ["hunter.handling_ticks=60".to_string()];
@@ -1096,9 +1139,9 @@ mod tests {
     /// skips it from the expectation too.
     #[test]
     fn meta_json_names_every_params_section() {
-        const SECTIONS: [&str; 19] = [
+        const SECTIONS: [&str; 20] = [
             "animals", "bundle", "climate", "cover", "disease", "fire", "grass", "grazer", "heredity", "hunter",
-            "hydro", "medium", "rain", "rng", "schedule", "season", "shrub", "tree", "world",
+            "hydro", "medium", "npk", "rain", "rng", "schedule", "season", "shrub", "tree", "world",
         ];
         let dir = scratch_dir();
         run(Params::load_square(), 7, 100, 100, &[], &dir).unwrap();

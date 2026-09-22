@@ -34,8 +34,13 @@ evap_base = 2.0
 evap_div = 8.0
 pond_moisture = 255.0
 diffusion = 0.10
-# Detritus decay, per year (shot G4b: 0.015 per 10-tick soil update is 6.0 a year).
-decay_k = 6.0
+# Detritus decay, per year. 0.45 is the middle of a published 0.3-0.6 for temperate litter, which
+# is a turnover of 1.5-3 years (UNITS.md R11). It was 6.0 -- a two-month turnover, a 10x error with
+# no time-scale excuse, carried since shot G4b converted the per-update 0.015 without checking it
+# against anything. Shot G5 fixed it because the nutrient tier made it matter: with decay feeding
+# three pools that have one small input, a litter layer that vanished in two months short-circuited
+# the whole cycle (TUNING.md, shot G5).
+decay_k = 0.45
 decay_temp_full = 30.0
 initial_moisture = 128.0
 initial_fertility = 128.0
@@ -89,6 +94,58 @@ saturation = 1.2
 # leaches 26% of a column's fertility a year, which is the published range for nitrate loss from a
 # humid temperate soil; 0.0002 was set against the pre-G4b rain of 4000 mm a year (UNITS.md R13).
 leach_k = 0.0008
+# Waterlogging (shot G5). A column whose soil water is at or above waterlog_frac of field capacity
+# for waterlog_ticks ticks in a row is waterlogged: growth there is multiplied by each species'
+# waterlog_tolerance, and a tree on one may drown (tree.waterlog_mortality). 0.95 of field capacity
+# is a store 10% above field capacity: every pore the soil can drain is full and more than half of
+# the drainable space above it is too (hydro.saturation caps a column at 1.2). 400 ticks is 100 days
+# at year_len 4000, long enough that a wet fortnight does not count and a badly drained corner does.
+waterlog_frac = 1.10
+waterlog_ticks = 400
+
+[npk]
+# Soil nitrogen, phosphorus and potassium (shot G5). false leaves the whole nutrient tier out: the
+# pre-G5 0-255 fertility index runs instead, no pool is allocated, npk.bin is not written and
+# nothing waterlogs, so a run is byte-identical to the pre-G5 one apart from the six always-zero
+# nutrient columns of series.csv.
+enabled = true
+# Grams per square metre per unit of climate.initial_fertility, at tick 0 (128 units of it here).
+# init_n is plant-available mineral nitrogen only -- 1.54 g/m², 15 kg/ha, which is what a temperate
+# soil carries as nitrate and ammonium at any moment against an organic stock ~100x larger.
+# init_detritus is that organic stock's near end: the litter layer, 55 g/m² of nitrogen, 4 of
+# phosphorus and 35 of potassium. The mineral pool is a few weeks of supply and the litter is the
+# bank behind it, so a site that started with bare ground would strip the mineral pool building a
+# litter layer it cannot finish inside five years (TUNING.md, shot G5).
+# init_p is the whole phosphorus pool, 51.2 g/m², of which p_avail_frac is in reach; init_k is
+# exchangeable potassium, 38.4 g/m² (UNITS.md R14).
+init_n = 0.012
+init_p = 0.4
+init_k = 0.3
+init_detritus = [55.0, 4.0, 35.0]
+p_avail_frac = 0.1
+# Growth's nutrient factor is min over the three of a / (a + half_sat × need), so half_sat × need
+# is the available pool at which that one nutrient halves growth: 0.7 g/m² of nitrogen, 0.5 g/m² of
+# available phosphorus and 2.0 g/m² of potassium against grass's needs. Nitrogen is the one meant to
+# bind on this site; the other two are set well below their starting pools so that they bind only
+# where water has moved them away.
+half_sat = [0.28, 2.5, 1.0]
+# New nitrogen, g/m² a year, on every plantable column: 25 kg/ha. That is the top of the published
+# deposition range for a temperate site near a city, and it is carrying biological fixation too --
+# the clover in a lawn is worth as much again (UNITS.md R15). It is the only input any of the three
+# pools has: there is no fertiliser in this model, which is why potassium can only ever decline.
+# `sweeps/shotG5/FINDINGS.md` is what the site does at 0, 0.5, 1, 2.5 and 5.
+n_deposition = 2.5
+# Potassium leaches at this multiple of the nitrogen rate. Most of it is held on the clay and
+# organic exchange complex rather than dissolved, so it moves an order of magnitude more slowly.
+k_leach_ratio = 0.03
+# Phosphorus goes with the soil that runoff lifts, so many grams a square metre per millimetre of
+# runoff, capped at what is under the cell; dissolved nitrogen goes with the same water, but only
+# the n_runoff_frac of a column's pool that sits in the layer surface water mixes with.
+p_runoff_g_per_mm = 0.002
+n_runoff_frac = 0.1
+# The share of a burnt plant's nitrogen that leaves as smoke. What is left of it, and all of its
+# phosphorus and potassium, lands on the patch as ash.
+fire_n_volatilised = 0.9
 
 # The nine media of the scene contract (docs/SCENE-CONTRACT.md), one table each (shot G4).
 # infiltration_mm_h is how fast water soaks in, field_capacity_mm how much plant-available water a
@@ -181,6 +238,17 @@ light = [0.3922, 0.7843, 1.0, 1.0039]
 moisture = [0.0784, 0.3137, 1.0, 1.004]
 temp = [0.0, 5.0, 30.0, 35.0]
 
+# Grams of each element per unit of cover density per square metre, and how much of its growth a
+# waterlogged column leaves it (shot G5). A full sward here is ~170 g/m² of dry matter -- a mown
+# lawn, not a hay meadow -- at 1.5% N, 0.12% P and 1.2% K, which is where 2.5, 0.2 and 2.0 come from
+# (UNITS.md R16). Grass is the shallow-rooted species and the one that shrugs standing water off
+# best.
+[grass.npk]
+need_n = 2.5
+need_p = 0.2
+need_k = 2.0
+waterlog_tolerance = 0.8
+
 [shrub]
 r = 4.0
 g = 1.6
@@ -189,6 +257,13 @@ initial = 0.02
 light = [0.1569, 0.3922, 0.7843, 0.9961]
 moisture = [0.0588, 0.2353, 1.0, 1.004]
 temp = [-5.0, 0.0, 28.0, 33.0]
+
+# Woodier tissue than grass: more of everything per unit of cover, and less happy in standing water.
+[shrub.npk]
+need_n = 3.3
+need_p = 0.27
+need_k = 2.7
+waterlog_tolerance = 0.7
 
 [tree]
 initial_count = 12
@@ -249,6 +324,20 @@ immigration_floor = 0
 # clock, not a tree's age. At immigration_floor = 0 no check ever plants anything, so this is the
 # cadence at which the model asks whether the population has fallen too low.
 immigrants_per_year = 8.0
+# Chance per tree update that a tree standing on a waterlogged column drowns, before its tolerance
+# is applied: the roll is waterlog_mortality × (1 − tree.npk.waterlog_tolerance), so at the values
+# here a tree on a column that has stood wet for 100 days dies with chance 0.006 per 50-tick
+# update, about 0.48 a year. Deaths are logged with cause `waterlog`.
+waterlog_mortality = 0.01
+
+# Grams of each element per metre of height growth, and the tree's tolerance of standing water
+# (shot G5). A tree is the deepest-rooted species here and the one that suffers most when the
+# profile fills up, which is the whole reason the tolerances differ.
+[tree.npk]
+need_n = 3.0
+need_p = 0.25
+need_k = 2.4
+waterlog_tolerance = 0.4
 
 [bundle]
 # A world loaded from a bundle (shot G1, `../docs/SCENE-CONTRACT.md`). These keys are ignored by a
@@ -281,6 +370,11 @@ tree_move_radius = 2.0
 # placed, none immigrate, and the animal phase is skipped, so it draws nothing from the RNG.
 # true is the default, and the section is written to meta.json either way (shot S2).
 enabled = true
+# Grams of N, P and K an animal's body holds per unit of energy (shot G5). Every animal is born,
+# placed and immigrates empty; a grazer fills up on what it crops and passes the rest straight
+# through as dung, so at 100 energy a grazer carries at most 2 g of nitrogen and the rest of a
+# day's grazing is back on the patch within the tick. The number is a residence time, not a stock.
+npk_content = [0.02, 0.002, 0.015]
 
 [grazer]
 start_count = 300

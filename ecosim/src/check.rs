@@ -5,6 +5,7 @@ use crate::animals::{Cause, CAUSES};
 use crate::bundle::{Ground, Medium, ECO_CELL_M};
 use crate::events::{deaths_per_tick, parse_events, EVENTS_FILE};
 use crate::hydro::Water;
+use crate::npk::{NpkRow, NPK_FIELDS};
 use crate::output::{snapshot_dir_name, SERIES_FIELDS, SERIES_HEADER, TRAIT_FIELDS, WATER_FIELDS};
 use crate::sim::StatsRow;
 use std::collections::BTreeSet;
@@ -99,13 +100,15 @@ pub fn read_series_for_stats(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
 /// Parse `series.csv` text. Sweeps parse their own in-memory CSV through this too, so a sweep cell
 /// is evaluated on exactly the values a run directory would hold.
 ///
-/// Runs written before the trait columns (shot 11) or before fire (shot 9) as well still parse, with
-/// the missing columns read as 0.
+/// Runs written before the nutrient columns (shot G5), before the water columns (shot G4), before
+/// the trait columns (shot 11) or before fire (shot 9) as well still parse, with the missing
+/// columns read as 0.
 pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
     let mut lines = text.lines();
     let header = lines.next().ok_or("unexpected header")?;
-    let dry = SERIES_FIELDS - WATER_FIELDS;
-    let fields = [SERIES_FIELDS, dry, dry - TRAIT_FIELDS, dry - TRAIT_FIELDS - FIRE_FIELDS]
+    let nonutrient = SERIES_FIELDS - NPK_FIELDS;
+    let dry = nonutrient - WATER_FIELDS;
+    let fields = [SERIES_FIELDS, nonutrient, dry, dry - TRAIT_FIELDS, dry - TRAIT_FIELDS - FIRE_FIELDS]
         .into_iter()
         .find(|&n| header_without(SERIES_FIELDS - n) == header)
         .ok_or("unexpected header")?;
@@ -142,7 +145,7 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                 } else {
                     Default::default()
                 },
-                water: if fields == SERIES_FIELDS {
+                water: if fields >= nonutrient {
                     Water {
                         rain_mm: x(dry)?,
                         runoff_mm: x(dry + 1)?,
@@ -153,6 +156,15 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                     }
                 } else {
                     Water::default()
+                },
+                npk: if fields == SERIES_FIELDS {
+                    let mut v = [0.0f32; NPK_FIELDS];
+                    for (k, w) in v.iter_mut().enumerate() {
+                        *w = x(nonutrient + k)?;
+                    }
+                    NpkRow::from_array(v)
+                } else {
+                    NpkRow::default()
                 },
             })
         })
@@ -1266,6 +1278,7 @@ mod tests {
     fn rows_from(grazers: impl Fn(usize) -> u32, n: usize) -> Vec<StatsRow> {
         (0..n)
             .map(|t| StatsRow {
+                npk: NpkRow::default(),
                 tick: t as u32,
                 grazers: grazers(t),
                 hunters: 5,
@@ -1572,6 +1585,7 @@ mod tests {
     fn build(h: &Healthy) -> Series {
         let rows = (0..=20_000u32)
             .map(|t| StatsRow {
+                npk: NpkRow::default(),
                 tick: t,
                 grazers: (h.base + h.amp * libm::sin(t as f64 * std::f64::consts::TAU / h.period)).round() as u32,
                 hunters: h.hunters,

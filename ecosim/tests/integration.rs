@@ -343,6 +343,96 @@ fn forced_tree_extinction_by_crowding_runs_to_the_end() {
     assert!(crowded * 2 > deaths.len(), "crowded is {crowded} of {} tree deaths", deaths.len());
 }
 
+/// Forced extinction by starvation of the soil (shot G5): a world with no nitrogen in its soil at
+/// all -- none in the mineral pool, none in the litter, none falling out of the sky -- has a growth
+/// factor of essentially 0 for every plant, because Liebig's minimum is a minimum. The grass the
+/// grazers live on never grows back, so the grazers starve and the hunters follow them. Fire is off
+/// so the cause is unambiguous. The run still completes 20000 ticks with valid snapshots.
+///
+/// The cause the event log names is not the obvious one, and the assertions below are written to
+/// what happens rather than to what a starved soil sounds like it should do. The grazers die
+/// `crowded` more often than `starved` (559 to 326 after the sward crosses below 5% cover): the
+/// sward does not go everywhere at once, so the herd concentrates onto the patches that still carry
+/// grass and the density cap kills it there. Both are the empty soil killing it, which is why they
+/// are asserted together against predation. The hunters have no such last green patch to crowd onto
+/// and simply starve -- 32 of their 36 deaths.
+///
+/// "Essentially" rather than "exactly" because the world is created with a standing crop on it, and
+/// that tissue holds nitrogen the soil never held: as the founding animals and the initial cover
+/// die, their corpses and litter mineralise it. Nothing creates any -- [`ecosim::npk`]'s balance
+/// tests pin that -- so the pool is bounded by what the founders were made of, which on this world
+/// is 0.0007 kg against the 0.196 kg a default start puts in the mineral pool, a 0.4% residue. It
+/// buys the sward nothing: `grass_mean` still ends below 0.01.
+#[test]
+fn forced_extinction_by_a_soil_with_no_nitrogen() {
+    let dir = tmp("forced_nitrogen_extinction");
+    let last = run_with(
+        &dir,
+        &[
+            "npk.init_n=0".to_string(),
+            "npk.init_detritus=[0.0,3.0,25.0]".to_string(),
+            "npk.n_deposition=0".to_string(),
+            "fire.base_rate=0".to_string(),
+        ],
+    );
+    assert_eq!((last.grazers, last.hunters), (0, 0), "both animal species extinct by the end");
+    assert!(last.npk.soil_n < 0.01, "only the founders' own tissue can be there, not {}", last.npk.soil_n);
+    assert!(last.grass_mean < 0.01, "the sward is gone, not {}", last.grass_mean);
+    let text = assert_valid_run(&dir);
+    assert!(text.contains("extinction: grazers at tick"), "{text}");
+    assert!(text.contains("extinction: hunters at tick"), "{text}");
+    let events = ecosim::events::parse_events(&fs::read_to_string(dir.join("events.csv")).unwrap()).unwrap();
+    let causes = |species: &str| -> Vec<&str> {
+        events
+            .iter()
+            .filter(|e| e.kind == ecosim::events::EventKind::Death && e.species == species)
+            .map(|e| e.cause)
+            .collect()
+    };
+    let count = |v: &[&str], c: &str| v.iter().filter(|x| **x == c).count();
+    let grazers = causes("grazer");
+    let (starved, crowded, eaten) = (count(&grazers, "starved"), count(&grazers, "crowded"), count(&grazers, "eaten"));
+    assert!(
+        starved + crowded > 2 * eaten,
+        "the empty soil killed {starved} starved + {crowded} crowded against {eaten} eaten"
+    );
+    let hunters = causes("hunter");
+    let hs = count(&hunters, "starved");
+    assert!(hs * 2 > hunters.len(), "starved is {hs} of {} hunter deaths", hunters.len());
+}
+
+/// Forced extinction by waterlogging (shot G5): `hydro.waterlog_frac=0` makes every column count as
+/// waterlogged from its first soil update -- a profile with no air in it anywhere -- and a tree that
+/// tolerates none of it (`tree.npk.waterlog_tolerance=0`) drowns at its next update with
+/// `tree.waterlog_mortality=1.0`. Only mature trees seed, and no tree lives long enough to mature,
+/// so the species is gone at the first tree update. Fire is off so the cause is unambiguous. This is
+/// also where the `waterlog` tree-death cause is asserted to exist: the noise strip drains, so no
+/// reference run has one (`sweep.rs`, `s42_event_log_matches_the_series_and_stays_small`).
+#[test]
+fn forced_tree_extinction_by_waterlogging() {
+    let dir = tmp("forced_waterlog_extinction");
+    let last = run_with(
+        &dir,
+        &[
+            "hydro.waterlog_frac=0".to_string(),
+            "hydro.waterlog_ticks=0".to_string(),
+            "tree.waterlog_mortality=1.0".to_string(),
+            "tree.npk.waterlog_tolerance=0".to_string(),
+            "fire.base_rate=0".to_string(),
+        ],
+    );
+    assert_eq!(last.trees, 0, "the trees are gone by the end");
+    assert_eq!(last.npk.waterlogged_frac, 1.0, "every column is waterlogged");
+    let text = assert_valid_run(&dir);
+    assert!(text.contains("extinction: trees at tick"), "{text}");
+    let events = ecosim::events::parse_events(&fs::read_to_string(dir.join("events.csv")).unwrap()).unwrap();
+    let deaths: Vec<&str> =
+        events.iter().filter(|e| e.kind == ecosim::events::EventKind::TreeDeath).map(|e| e.cause).collect();
+    assert!(!deaths.is_empty(), "no tree died");
+    let drowned = deaths.iter().filter(|c| **c == "waterlog").count();
+    assert!(drowned * 2 > deaths.len(), "waterlog is {drowned} of {} tree deaths", deaths.len());
+}
+
 /// Forced extinction by fire: every patch with fuel can ignite at any temperature and fire kills any
 /// animal in one tick, so both animal species burn out on seed 1 in the first few hundred ticks.
 /// Ignition is scaled by the square of dryness, and the water tier keeps a good part of the soil's
@@ -569,7 +659,7 @@ fn without_crown(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
 /// with fire, crowding and mutation off, the hunter refractory at the old cooldown and the water tier
 /// off, on the square world (`common::SQUARE`) the fixtures were made on, is compared with the v1
 /// fixture after the trait and fire additions are cut (`common::without_traits`,
-/// `common::without_fire`, `common::without_water`).
+/// `common::without_fire`, `common::without_water`, `common::without_npk`).
 ///
 /// Shot G4b ended the byte-for-byte half of this comparison, and did not replace it with a rewritten
 /// fixture: converting a per-tick rate to a rate per hour changes the numbers a run produces, and the
@@ -600,10 +690,11 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     p.hunter.refractory = 5000;
     p.heredity.mutation = 0.0;
     p.hydro.enabled = false;
+    common::pre_g5(&mut p);
     run(p, 42, 100, 100, &[], &fresh).unwrap();
     let cut = |rel: &str| {
         let f = Path::new(rel);
-        let b = common::without_water(f, fs::read(fresh.join(rel)).unwrap());
+        let b = common::without_npk_and_water(f, fs::read(fresh.join(rel)).unwrap());
         without_crown(f, common::without_fire(f, common::without_traits(f, b)))
     };
     let text = |b: Vec<u8>| String::from_utf8(b).unwrap();
@@ -813,7 +904,7 @@ fn animals_off_run_has_no_animals_and_marks_the_animal_invariants_na() {
 
     let meta = read_json(&dir.join("meta.json"));
     assert_eq!(meta["animals"], serde_json::json!(false));
-    assert_eq!(meta["params"]["animals"], serde_json::json!({ "enabled": false }));
+    assert_eq!(meta["params"]["animals"], serde_json::json!({ "enabled": false, "npk_content": [0.02, 0.002, 0.015] }));
     // The water tier makes every run format version 4 (shot G4); the animals switch is not itself a
     // format change.
     assert_eq!(meta["format_version"], BUNDLE_FORMAT_VERSION);

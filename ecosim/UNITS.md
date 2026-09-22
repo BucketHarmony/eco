@@ -1,4 +1,4 @@
-# Units audit (shots G4b, G4c, G4e)
+# Units audit (shots G4b, G4c, G4e, G5)
 
 Every parameter in `params.toml` and every unit-bearing constant in the code, with the unit it is
 actually in today, the unit it should be in, and where its value comes from. Written before any
@@ -7,9 +7,10 @@ has to be split across shots.
 
 **This audit is complete for the garden direction (shot G4e).** Every parameter the garden series
 reads is in the declared system of section 1, and **every row still marked `deferred` is deferred by
-a decision with a named owner**, listed in section 6: the fertility and detritus group is G5's, the
-animal tier and its six `SIG_*` constants belong to whatever shot unparks the tier, and the legacy
-non-water moisture path is **retired in place and converts never**. Nothing here is outstanding for
+a decision with a named owner**, listed in section 6: the animal tier and its six `SIG_*` constants
+belong to whatever shot unparks the tier, and the legacy non-water moisture path is **retired in
+place and converts never**. The fertility and detritus group was the third, and **shot G5 closed
+it** (section 6.1). Nothing here is outstanding for
 want of time. This file is now a record, not a work list; the two findings it hands on are
 mechanisms, not units (section 7's two time scales, and deciduous phenology, which is backlog row
 G10).
@@ -50,7 +51,8 @@ shot calibrates against, and a public location.
 | rates | **per hour** for water, **per year** for everything biological; a staggered update multiplies the rate by its own duration, so changing a cadence does not change an annual total | `schedule.*` |
 | light | **dimensionless fraction of full sun**, 0–1, which every light curve is now in; the `light` voxel field and `light.bin` hold `255 x` that fraction as a display index (`converted`, G4c) | `world.canopy_k`, `world.canopy_lai`, `world::FULL_SUN` |
 | soil water index (`moisture`) | **dimensionless 0–255 index** = 255 x (soil water / available water capacity). A **display** scale: no rule reads it after this shot | `Sim::moisture` |
-| fertility | **dimensionless 0–255 index** — not yet physical (`deferred`; shot G5 replaces the field with N, P and K) | `Sim::fertility` |
+| nutrients | **g/m2** of nitrogen, phosphorus and potassium per ecology column, in `f64` pools with a ledger (`converted`, G5) | `Npk::soil`, `Npk::detritus` |
+| fertility | **dimensionless 0–255 index**, now **derived** and published only: `255 x min_i(a_i / (a_i + half_sat_i x need_i))` for grass, the share of its growth the soil allows. A display scale on top of the pools above, not a stock (`converted`, G5) | `Sim::fertility` |
 | animal energy | **dimensionless 0–100 index** — not yet physical (`deferred`; the animal tier is parked) | `Animal::energy` |
 
 Two consequences worth stating plainly.
@@ -81,9 +83,9 @@ the largest single finding of the audit; see section 7.
 | `[hydro]` | 6 | the water tier's rates and stores | 3 converted, 1 unchanged, 2 dimensionless |
 | `[medium.*]` | 9 x 4 | infiltration, AWC, percolation, plantability per medium | 27 unchanged, 9 dimensionless |
 | `[season]` | 1 | temperature amplitude, °C | unchanged |
-| `[cover]` | 7 | ground-cover water, litter and fertility | 1 converted, 4 dimensionless, 2 deferred |
+| `[cover]` | 7 | ground-cover water, litter and fertility | 1 converted, 6 dimensionless (2 of them closed by G5, and 3 read only with `npk.enabled=false`) |
 | `[grass]`, `[shrub]` | 6 each | the two ground-cover species | 2 converted each, 1 dimensionless, 3 curves (2 converted — the light curve in G4c — 1 deferred) |
-| `[tree]` | 21 | the tree species | 12 converted (8 in G4c: the light curve, `sapling_light`, the four ages, `seed_every`, `dry_death_ticks`; 1 in G4e: `immigration_interval`), 2 unchanged, 6 dimensionless, 1 deferred (`death_detritus`, with the fertility group — section 6) |
+| `[tree]` | 21 | the tree species | 12 converted (8 in G4c: the light curve, `sapling_light`, the four ages, `seed_every`, `dry_death_ticks`; 1 in G4e: `immigration_interval`), 2 unchanged, 7 dimensionless (`death_detritus` closed by G5, section 6.1), and 5 new `[tree.npk]` and `waterlog_mortality` keys in g per unit of growth and per tree update |
 | `[bundle]` | 6 | how a scene becomes a world | 2 converted (G4c), 3 unchanged, 1 dimensionless |
 | `[animals]` | 1 | the animal tier's switch | dimensionless |
 | `[grazer]`, `[hunter]` | 22, 23 | the animal tier | deferred (the tier is parked) |
@@ -129,7 +131,7 @@ Smaller storms also shed less runoff, which matters on a site that is a third pa
 | `hydro.evap_mm_h` | 0.05 | mm/h from ponded water | same | 0.08 | R5 | converted |
 | `hydro.initial_fill` | 0.5 | fraction of AWC at tick 0 | same | 0.5 | model | dimensionless |
 | `hydro.saturation` | 1.2 | multiple of AWC the store holds | same | 1.2 | model | unchanged |
-| `hydro.leach_k` | 0.0002 | fertility fraction lost per mm drained | same | 0.0008 | R13 | converted |
+| `hydro.leach_k` | 0.0002 | fertility fraction lost per mm drained | same | 0.0008 | R13 | converted; read only with `npk.enabled=false` since G5 |
 | `hydro.enabled` | true | switch | — | — | — | dimensionless |
 | `medium.*.infiltration_mm_h` | 0–60 | mm/h | mm/h | unchanged | R6 | unchanged |
 | `medium.*.field_capacity_mm` | 0–200 | mm — **is AWC of the rooting zone** | mm of AWC | unchanged | R7 | unchanged |
@@ -158,7 +160,7 @@ AWC reading above — a documentation change, not a numeric one.
 | `grass.r`, `shrub.r` | 0.05, 0.01 | cover fraction gained per producer update | **per year** | 20.0, 4.0 | model | converted |
 | `grass.g`, `shrub.g` | 0.005, 0.004 | cover fraction lost per producer update | **per year** | 2.0, 1.6 | model | converted |
 | `grass.moisture`, `shrub.moisture`, `tree.moisture` | 0–256 curves | breakpoints on the 0–255 index | **fraction of AWC** | old / 255 | model | converted |
-| `cover.litter_factor` | 20.0 | detritus per unit of cover lost per column | unchanged (detritus is dimensionless) | 20.0 | model | deferred |
+| `cover.litter_factor` | 20.0 | detritus per unit of cover lost per column | unchanged (detritus is dimensionless) | 20.0 | model | dimensionless (G5, section 6.1) |
 
 Three things here, in order of how much they matter.
 
@@ -198,7 +200,7 @@ reads the soil water index directly and that index is one of the quantities this
 | `fire.temp_min`, `temp_full` | 15.0, 30.0 | °C | °C | unchanged | model | unchanged |
 | `fire.duration` | 3 | ticks alight | ticks (about 6.6 h) | unchanged | model | deferred |
 | `fire.spread` | 0.1 | probability per tick per neighbour | per tick | unchanged | model | deferred |
-| `fire.detritus_weight`, `canopy_weight`, `tree_kill`, `detritus_yield`, `ash`, `animal_damage` | — | dimensionless, or on the fertility, detritus and energy scales | — | unchanged | model | dimensionless / deferred |
+| `fire.detritus_weight`, `canopy_weight`, `tree_kill`, `detritus_yield`, `ash`, `animal_damage` | — | dimensionless, or on the detritus and energy scales | — | unchanged | model | dimensionless (`ash` is read only with `npk.enabled=false` since G5) |
 
 The dryness term `1 - moisture/255` is exactly `1 - soil_water / AWC` and is now written that way:
 the same number, read from the physical quantity rather than from the display index.
@@ -357,35 +359,44 @@ that resolves it, and one of them names nobody on purpose.
 
 | what | why it is not converting | who resolves it |
 | --- | --- | --- |
-| The fertility and detritus indices — `fertility` (0–255), `Patch::detritus`, `cover.fertility_draw`, `cover.fertility_full`, `cover.litter_factor`, `climate.initial_fertility`, `tree.death_detritus`, `fire.ash`, `fire.detritus_yield`, `fire.detritus_weight`, `grazer.corpse_detritus`, `hunter.corpse_detritus` | converting them would be work thrown away | **G5**, which deletes the field and replaces it with nitrogen, phosphorus and potassium, and which also owns `climate.decay_k`'s 10x error |
 | The animal tier — all 45 keys of `[grazer]` and `[hunter]`, `[disease]`'s two rates, the 0–100 animal energy index, the two animal `immigration_interval` keys and the six `SIG_*` constants of `check.rs` | the tier is parked by the operator's direction of 2026-09-19 | **whatever shot unparks the tier**, and nothing before it |
 | The legacy non-water moisture path — `climate.rain_base`, `rain_amp`, `evap_base`, `evap_div`, `pond_moisture`, `initial_moisture`, `climate.diffusion` | it is the pre-water-tier model, kept only so that runs pinned to it still reproduce; converting it would defeat the one reason it still exists | **nobody. It is retired in place**, and converts never |
+
+### 6.1 Closed by shot G5 — the fertility and detritus group
+
+`fertility` is no longer a stock in old units: the quantity is three `f64` pools in g/m2
+(`Npk::soil`), and the 0–255 field that kept the name is **derived** from them for display, which is
+section 1's `derived` case and not a deferral. `Patch::detritus` and the coefficients that act on it
+— `cover.litter_factor`, `tree.death_detritus`, `fire.detritus_yield`, `fire.detritus_weight`,
+`grazer.corpse_detritus`, `hunter.corpse_detritus` — stay a **dimensionless mass proxy**, and that is
+now a statement rather than a deferral: the nutrients the litter carries are tracked in g/m2 beside
+it in `Npk::detritus`, so the proxy no longer stands in for a quantity anything needs in units.
+`cover.fertility_draw`, `cover.fertility_full`, `climate.initial_fertility` and `fire.ash` are read
+only with `npk.enabled=false`; they are the pre-G5 path the identity manifest pins, which is why
+they are still in `params.toml` and why converting them would be converting a museum piece.
 
 The third row is the one a reader cannot work out from the backlog, because it is the only one whose
 answer is "never": there is no shot to wait for and none is coming. If the pinned runs are ever
 dropped, the path goes with them rather than being converted.
 
-**Nutrients (subsystem 5, mostly deferred).** `cover.fertility_draw` = 20,
-`cover.fertility_full` = 64, `cover.litter_factor` = 20, `climate.initial_fertility` = 128,
-`fire.ash`, `fire.detritus_yield`, `fire.detritus_weight`, `tree.death_detritus`,
-`grazer.corpse_detritus`, `hunter.corpse_detritus` and the `Patch::detritus` pool itself stay on
-the 0–255 fertility index or the arbitrary detritus scale. Shot **G5 replaces this field
-outright** with nitrogen, phosphorus and potassium, so converting the index here would be
-converting a quantity that is about to be deleted.
-
-`tree.death_detritus` = 40 is named here a second time because it is the one `deferred` row left in
-`[tree]`, where every other key is now converted or dimensionless, and it belongs to this group
-rather than to the tree tier: it is a quantity **on the detritus scale**, which is the fertility
-index in another coat. G5 owns it with the rest of the scale.
+**Nutrients (subsystem 5, closed by shot G5).** This paragraph used to defer the whole group;
+section 6.1 is what replaced it. `tree.death_detritus` = 40 was named here twice, as the one
+`deferred` row left in `[tree]`, because it is a quantity on the detritus scale rather than a tree
+age. It is dimensionless with the rest of that scale now, and the nitrogen, phosphorus and potassium
+a dead tree returns are `tree.npk` times what it grew, in g/m2, which is a different quantity in a
+different place.
 
 The two rates that read a clock or a water flow were converted anyway, because leaving them on
 the old cadence would contradict section 2: a rate is per hour or per year whatever index it
 acts on.
 
-- `climate.decay_k`: 0.015 per soil update becomes **6.0 per year**, the same behaviour written
-  in the declared unit. The value is deliberately not touched, so the audit finding stands: 6.0 a
-  year is a litter turnover of about 2 months against a published 1–3 years (R11), a 10x error
-  handed to G5 with the field it acts on.
+- `climate.decay_k`: 0.015 per soil update became **6.0 per year** in G4b, the same behaviour
+  written in the declared unit, with the 10x error left standing and handed to G5. **Shot G5 fixed
+  it: 0.45 per year**, the middle of R11's 0.3–0.6, a nominal half-life of 1.5 years. The rate the
+  model charges is lower again, because `Sim::decay_detritus` multiplies it by a temperature and a
+  moisture factor, which on this site take the realised turnover to about a decade — a litter and
+  duff layer rather than a leaf on a lawn. It is the one value in this file that changed behaviour
+  rather than notation, and `TUNING.md` carries it with the rest of G5's table.
 - `hydro.leach_k`: 0.0002 becomes **0.0008** per millimetre drained, and this one is a value
   change, because the old value was set against the pre-G4b rain of 4000 mm a year. It is the
   mobile share of a soil nutrient pool divided by the rooting zone's water capacity, and at the
@@ -455,7 +466,7 @@ Under that tick:
 | tree reaches 20 m | 3000 ticks = 0.75 yr | 40–60 yr (R12) | ~60x |
 | tree lifespan | 6000 ticks = 1.5 yr | 60–150 yr (R12) | ~60x |
 | a reference run | 20000 ticks = 5 yr | the succession it shows is decades | ~10x |
-| litter turnover | about 2 months | 1–3 yr (R11) | ~10x |
+| litter turnover | 2.2 yr nominal, ~10 yr realised (G5) | 1–3 yr (R11) | ~1x |
 | grazer lifespan | 5000 ticks = 1.25 yr | plausible for a small herbivore | ~1x |
 
 So the animal tier and the water tier agree on the tick, and the plant demography does not. Three
@@ -568,3 +579,11 @@ during the shot. One significant figure is all any of them should be trusted to.
   **20 m at 40–60 yr**; lifespan **60–150 yr** in an open urban setting.
 - **R13** Nitrate leaching from a humid temperate soil under vegetation: **15–40%** of the
   mineral pool a year, higher under bare or fertilised ground.
+- **R14** Temperate topsoil pools: **mineral nitrogen 10–50 kg/ha** (1–5 g/m2) at any moment
+  against an organic stock ~100x larger; **total phosphorus 400–1000 kg/ha**, of which **5–15%**
+  is plant-available; **exchangeable potassium 200–600 kg/ha**.
+- **R15** Atmospheric nitrogen deposition on a temperate site near a city: **5–25 kg/ha/yr**.
+  Biological fixation in a mixed sward adds of the same order again where clover is present.
+- **R16** Plant tissue composition, dry matter: **1.5–3% N, 0.1–0.3% P, 1–2.5% K** for grass and
+  herbaceous leaves; woody tissue is poorer in all three. Standing dry matter of a mown amenity
+  lawn: **150–250 g/m2**; an unmown meadow reaches **400–600**.

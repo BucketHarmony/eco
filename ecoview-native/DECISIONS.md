@@ -1521,3 +1521,74 @@ line (rows 323-390, columns 324-354): the HUD's `remesh ... in N ms`, a wall-clo
 is left alone because the timing is what it is for. The check band starts below it, so it cannot
 move a verdict. Warm, the whole set takes 15 s. The first build of the heartbeat took 11-13 minutes,
 because a new dependency rebuilt the viewer's tree.
+
+## V12 the three nutrients are three overlays on one key
+
+Worked from the BACKLOG row; V12 has no prompt file. `nitrogen`, `phosphorus` and `potassium` are
+overlays 9 to 11 in `Overlay::ALL`, read from `npk.bin` (three f32 planes per ecology column, N, P,
+K) and coloured and scaled from the rows `ecosim` shot G13 published. The viewer reads, bands and
+draws them. It models no nutrients, and the HUD says so on every frame a nutrient map is on:
+`npk.bin as the simulator computed it; the viewer models no nutrients`. Phosphorus adds `the whole
+stored pool, not the tenth of it growth can reach`, which G13 found the SAD getting wrong.
+
+**The key is 9, pressed again to cycle N, P and K.** Keys 1 to 8 were taken and 0 is the exposure's.
+The three maps answer one question, which element limits growth here, so they share one key and
+are compared by pressing it repeatedly. `--overlay nitrogen` and the BRP `ecoview.overlay` method
+take the names, as for every other overlay.
+
+**Band 0 is "no soil", off the ramp.** `npk.bin` writes 0 in a column the ecology does not plant
+(roof, paving, open water). On a log ramp, 0 is not a small amount of nitrogen. It is off the scale
+entirely. So it gets its own category, the neutral grey that dry ground and empty patches already
+use, and a nonzero value below the ramp clamps to band 1, the palest tint. For the same reason the
+field's min, max and mean are taken over soil columns only; otherwise every minimum would be 0 and
+every mean would be diluted by the paved third of the Capitol. The HUD line says `over the columns
+with soil`.
+
+**A run without `npk.bin` does not draw a nutrient map.** The overlay switches off with the
+reason on screen. The alternative, drawing the whole site as "no soil", would be a false picture of a
+run that simply did not compute nutrients. Tested by `npk_bin_is_read_plane_by_plane` (snapshot 0
+has no file) and seen on `runs/capitol-s42-preG5`.
+
+## V12 published scales are read, water's included, and only log10 is drawn
+
+`OverlayColors` gains `scale`, and `Scale::of` reads it for `water` and the three nutrients through
+one function, `overlay::published`. This fixes the false claim V13 found: until now the water
+legend said `(!) meta.json has no scale` while the run had published one since S10. The numbers
+agreed, so no picture changes. Only the source line does.
+
+The viewer draws only `curve: "log10"`. Every published scale today is log10. A `linear` one would
+be drawn wrong on log bands, so it is refused by name, and the overlay falls back with the reason in
+its source line (`...scale is linear, and this viewer draws log10 only`), which the tests check.
+Drawing the wrong curve silently is the failure being avoided. A run older than G13 that carries
+`npk.bin` falls back to `NUTRIENT_RAMP_G_M2`, which is G13's published numbers copied and named as
+the viewer's own. G13's hues are copied the same way, because `ecoview` has no nutrient legend to
+fall back on.
+
+Numbers on screen now print with three significant figures below 0.1 (`overlay::sig`).
+Phosphorus's scale starts at 0.001 g/m2, and two decimals printed that as `0.00`, a ramp from
+nothing.
+
+## V12 what the three maps show, measured
+
+`ecosim/runs/capitol-s42` was regenerated at 1536022 so that its `meta.json` carries G13's rows. The
+old copy is `runs/capitol-s42-preG13`. G13 changed `meta.json` only: `npk.bin`, `water.bin` and
+`series.csv` are byte-identical between the two. On that run at tick 10000, over the 43,831 soil
+columns (21,705 have none):
+
+| pool | p2 | median | p98 | median under a standing tree | elsewhere |
+| --- | --- | --- | --- | --- | --- |
+| N g/m2 | 0.0138 | 2.93 | 5.64 | **0.0143** | 2.94 |
+| P g/m2 | 0.0557 | 51.4 | 52.9 | 50.6 | 51.4 |
+| K g/m2 | 1.82 | 34.1 | 41.6 | **26.8** | 34.1 |
+
+As G5 said, these are three different pictures, and they can be told apart without a caption:
+- **Nitrogen is speckled.** Of the 3,317 columns under 0.1 g/m2, 2,048 have held a tree at some
+  point by tick 10000. The east lawns are also paler in patch-grid squares.
+- **Phosphorus is nearly uniform and dark**, with the drainage network etched pale: runoff flow
+  lines stripped of particulate P. The p2-to-p98 spread is 3% of the median.
+- **Potassium is in between**: an even orange with pale specks. 1,434 of the 1,560 columns under
+  10 g/m2 have held a tree. Nothing in the model adds potassium, so a tree's column stays drawn down
+  after the tree has gone.
+
+The heartbeat gains `top-nitrogen`, `top-phosphorus` and `top-potassium`. Each must differ from
+`top-surface` and from the view before it; they differ from each other by 35.6-35.9% of pixels.

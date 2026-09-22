@@ -50,14 +50,14 @@ struct View {
     flat: bool,
     /// The views this one has to differ from, and what each difference proves. Every overlay is
     /// checked against the surface and against the overlay before it: against the surface alone, all
-    /// four top-down overlays differ from it by the same 47%, because an overlay also hides the
+    /// the top-down overlays differ from it by the same 47%, because an overlay also hides the
     /// ground cover, so a palette that drew every overlay alike would still pass.
     differs_from: &'static [(&'static str, &'static str)],
     shows: &'static str,
     wrong_if: &'static str,
 }
 
-const VIEWS: [View; 8] = [
+const VIEWS: [View; 11] = [
     View {
         name: "iso-surface",
         pose: Pose::Iso,
@@ -167,6 +167,52 @@ const VIEWS: [View; 8] = [
         shows: "Ponded depth from above, on a log ramp: the ground grey where nothing stands, \
                 light-blue flecks of standing water along the roads and paths, none on the roofs.",
         wrong_if: "It looks like top-surface or top-fertility, or water stands on a roof.",
+    },
+    // Shot V12: the three soil pools of `npk.bin`. Each has to differ from the one before it as well
+    // as from the surface, for the reason every overlay does, and here the reason is sharper: G5
+    // measured three genuinely different maps, and one palette drawn three times would pass the
+    // surface comparison alone.
+    View {
+        name: "top-nitrogen",
+        pose: Pose::Top,
+        overlay: "nitrogen",
+        run: true,
+        flat: true,
+        differs_from: &[
+            ("top-surface", "the nitrogen palette reaches the screen"),
+            ("top-water", "nitrogen is not drawn with water's colours"),
+        ],
+        shows: "Nitrogen from above, on the run's ramp, pale where the soil is poor and green where                 it is rich: lawns in soft patch-grid squares, paler on the east half, and pale specks                 where a tree stands or has stood and drew its own square metre down. Paving, roads                 and roofs grey, which is no soil at all.",
+        wrong_if: "It looks like top-phosphorus or top-potassium, the lawns are one flat colour with                    no specks, or a roof is coloured.",
+    },
+    View {
+        name: "top-phosphorus",
+        pose: Pose::Top,
+        overlay: "phosphorus",
+        run: true,
+        flat: true,
+        differs_from: &[
+            ("top-surface", "the phosphorus palette reaches the screen"),
+            ("top-nitrogen", "phosphorus is not nitrogen's plane or colours"),
+        ],
+        shows: "Phosphorus from above: nearly uniform dark purple, because the median column holds                 51 g/m2 of a pool that barely moves, with the drainage network etched pale across                 it -- the flow lines runoff has stripped of particulate P. The whole stored pool,                 not the tenth of it growth can reach.",
+        wrong_if: "It is speckled like top-nitrogen, the pale flow lines are missing, or the lawns                    are pale and the lines dark (the ramp read the wrong way round).",
+    },
+    View {
+        name: "top-potassium",
+        pose: Pose::Top,
+        overlay: "potassium",
+        run: true,
+        flat: true,
+        differs_from: &[
+            ("top-surface", "the potassium palette reaches the screen"),
+            (
+                "top-phosphorus",
+                "potassium is not phosphorus's plane or colours",
+            ),
+        ],
+        shows: "Potassium from above, between the other two: an even orange, with pale specks                 where trees stand or have stood. Nothing adds potassium in this model, so a column a                 tree drew down stays drawn down after the tree is gone.",
+        wrong_if: "It looks like top-nitrogen's patch squares or top-phosphorus's flow lines, or it                    has no specks.",
     },
 ];
 

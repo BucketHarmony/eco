@@ -450,6 +450,20 @@ fn write_overlay_run(dir: &std::path::Path, n: usize, patch: usize, with_params:
         }
         let raw: Vec<u8> = water.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(sd.join("water.bin"), raw).unwrap();
+        // Shot V12: `npk.bin`, three f32 planes in N, P, K order, **in the second snapshot only**, so
+        // the first is a run without the tier. Column 0 is 0 in all three -- a roof -- and each
+        // plane is otherwise its own shape, so a reader that takes the wrong plane is caught: N
+        // rises with the column, P is flat at 50 but for one stripped column, K is flat at 38.4.
+        if i == 1 {
+            let mut npk = vec![0f32; cols * 3];
+            for c in 1..cols {
+                npk[c] = 0.01 * c as f32;
+                npk[cols + c] = if c == 3 { 0.0005 } else { 50.0 };
+                npk[2 * cols + c] = 38.4;
+            }
+            let raw: Vec<u8> = npk.iter().flat_map(|v| v.to_le_bytes()).collect();
+            std::fs::write(sd.join("npk.bin"), raw).unwrap();
+        }
         // Light is sampled one voxel above the surface, so the value that matters is at z = 3.
         let mut light = vec![0u8; cols * z];
         for c in 0..cols {
@@ -527,16 +541,27 @@ fn the_scale_and_the_species_colours_come_from_meta_json() {
     // not a hole in it, and the test asserts the fallback rather than skipping the overlay.
     // Crowding joined water on the viewer's side of that line in shot S7, for the same reason and
     // not a weaker one: `meta.json` publishes no number saying how many grazers a patch holds.
+    //
+    // Since shot V12 water's and the three nutrients' scales are read from `meta.json` when the run
+    // publishes them (`ecosim` S10 and G13). This run is older than both -- seven rows, no `scale`
+    // -- so all four fall back here and say so; the published half is
+    // `the_published_scales_are_read_from_meta_json`.
+    let late = [
+        Overlay::Water,
+        Overlay::Nitrogen,
+        Overlay::Phosphorus,
+        Overlay::Potassium,
+    ];
     for o in Overlay::ALL
         .into_iter()
-        .filter(|o| o.is_field() && *o != Overlay::Water && *o != Overlay::Crowding)
+        .filter(|o| o.is_field() && !late.contains(o) && *o != Overlay::Crowding)
     {
         let s = Scale::of(o, m);
         assert!(s.from_meta(), "{}: {}", o.name(), s.source);
     }
     let w = Scale::of(Overlay::Water, m);
     assert!(!w.from_meta(), "{}", w.source);
-    assert!(w.source.contains("ponded depth"), "{}", w.source);
+    assert!(w.source.contains("overlays.water"), "{}", w.source);
     assert_eq!((w.lo, w.hi), ecoview_native::overlay::WATER_RAMP_MM);
     let c = Scale::of(Overlay::Crowding, m);
     assert!(!c.from_meta(), "{}", c.source);
@@ -579,7 +604,7 @@ fn the_overlay_ramp_hues_come_from_meta_json() {
     assert!(r.from_meta(), "{}", r.source);
     for o in Overlay::ALL
         .into_iter()
-        .filter(|o| o.is_field() && *o != Overlay::Water)
+        .filter(|o| o.is_field() && *o != Overlay::Water && o.nutrient().is_none())
     {
         assert!(
             o.ramp(Some(m)).from_meta(),
@@ -1306,6 +1331,7 @@ fn drivers(d: Dims, grass: f32, shrub: f32, moisture: u8, light: u8) -> Fields {
         burnt: vec![false; d.patch_count()],
         grass: vec![grass; d.patch_count()],
         shrub: vec![shrub; d.patch_count()],
+        npk: None,
     }
 }
 
@@ -3993,4 +4019,169 @@ fn the_season_word_moved_and_the_leaf_colour_did_not() {
     }
     .tint_palette(&mut b);
     assert_eq!(a, b, "the word is not an input to the colour");
+}
+
+// ---- shot V12: nitrogen, phosphorus and potassium ----
+//
+// The three soil pools of `npk.bin` (`ecosim` G5), coloured and scaled from the rows G13 published.
+// The viewer reads, scales and bands them; it models none of it.
+
+use ecoview_native::overlay::{log10_band, published, sig, NUTRIENT_RAMP_G_M2};
+use ecoview_native::palette::NUTRIENT_NONE;
+
+/// Rewrites the test run's `overlays` the way a run at today's defaults carries them: water and the
+/// three nutrients with a `scale`. Every number is deliberately **not** G13's or S10's, so a scale
+/// that comes out this way can only have been read from the file; potassium's curve is `linear`,
+/// which this viewer does not draw and must refuse by name.
+fn publish_late_rows(dir: &std::path::Path) {
+    let path = dir.join("meta.json");
+    let meta = std::fs::read_to_string(&path).unwrap();
+    let late = r##"{"name":"traits","lo":"#1f5bff","mid":"#ffffff","hi":"#ff1f1f"},
+        {"name":"water","lo":"#9fe8ff","hi":"#08246b",
+         "scale":{"lo":1.0,"hi":1000.0,"unit":"mm","curve":"log10"}},
+        {"name":"nitrogen","lo":"#0a0b01","hi":"#0a0b02",
+         "scale":{"lo":0.02,"hi":20.0,"unit":"g/m2","curve":"log10"}},
+        {"name":"phosphorus","lo":"#0a0b03","hi":"#0a0b04",
+         "scale":{"lo":0.001,"hi":100.0,"unit":"g/m2","curve":"log10"}},
+        {"name":"potassium","lo":"#0a0b05","hi":"#0a0b06",
+         "scale":{"lo":0.01,"hi":100.0,"unit":"g/m2","curve":"linear"}}"##;
+    let old = r##"{"name":"traits","lo":"#1f5bff","mid":"#ffffff","hi":"#ff1f1f"}"##;
+    assert!(meta.contains(old));
+    std::fs::write(&path, meta.replace(old, late)).unwrap();
+}
+
+/// Water's scale (`ecosim` S10) and the nutrients' (G13) are the run's when it publishes them. Water's
+/// used to be the viewer's every time, and the HUD said the run had none when it did (V13 found it).
+#[test]
+fn the_published_scales_are_read_from_meta_json() {
+    let dir = tmp("npk-scales");
+    write_overlay_run(&dir, 8, 4, true);
+    publish_late_rows(&dir);
+    let m = &Run::load(&dir).unwrap().meta;
+
+    let w = Scale::of(Overlay::Water, m);
+    assert_eq!((w.lo, w.hi), (1.0, 1000.0), "not WATER_RAMP_MM's 10000");
+    assert!(w.from_meta(), "{}", w.source);
+    let n = Scale::of(Overlay::Nitrogen, m);
+    assert_eq!((n.lo, n.hi), (0.02, 20.0));
+    assert!(n.from_meta() && n.source.contains("overlays.nitrogen.scale"));
+    assert!(Scale::of(Overlay::Phosphorus, m).from_meta());
+    // A curve this viewer cannot draw is refused by name, and the fallback is G13's constant.
+    let k = Scale::of(Overlay::Potassium, m);
+    assert!(!k.from_meta(), "{}", k.source);
+    assert!(k.source.contains("linear"), "{}", k.source);
+    assert_eq!((k.lo, k.hi), NUTRIENT_RAMP_G_M2[2]);
+    assert!(
+        published(Overlay::Light, m).is_err(),
+        "light publishes no scale"
+    );
+
+    // The hues are the run's too: `#0a0b01` is nowhere in this viewer.
+    for o in [Overlay::Nitrogen, Overlay::Phosphorus, Overlay::Potassium] {
+        assert!(o.ramp(Some(m)).from_meta(), "{}", o.name());
+    }
+    let p = palette(Overlay::Nitrogen, Some(m));
+    assert_eq!(
+        p[ID_COUNT + 1],
+        linear_rgba("#0a0b01"),
+        "band 1 is the poorest soil"
+    );
+    assert_eq!(p[ID_COUNT + BANDS - 1], linear_rgba("#0a0b02"));
+    // Band 0 is "no soil", off the ramp, in the neutral dry ground and empty patches share.
+    assert_eq!(
+        p[ID_COUNT + NUTRIENT_NONE as usize],
+        palette(Overlay::Water, Some(m))[ID_COUNT]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A run older than G13 has no rows: it still draws, on G13's numbers, and says they are copied.
+#[test]
+fn a_run_without_nutrient_rows_falls_back_and_says_so() {
+    let dir = tmp("npk-old");
+    write_overlay_run(&dir, 8, 4, true);
+    let m = &Run::load(&dir).unwrap().meta;
+    for (k, o) in [Overlay::Nitrogen, Overlay::Phosphorus, Overlay::Potassium]
+        .into_iter()
+        .enumerate()
+    {
+        let s = Scale::of(o, m);
+        assert_eq!((s.lo, s.hi), NUTRIENT_RAMP_G_M2[k]);
+        assert!(!s.from_meta(), "{}", s.source);
+        assert!(!o.ramp(Some(m)).from_meta());
+        assert_eq!(Overlay::parse(o.name()), Some(o));
+    }
+    assert_eq!((Scale::of(Overlay::Water, m).hi), WATER_RAMP_MM.1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `npk.bin` is read plane by plane, banded on a log ramp above a "no soil" band, and its stats
+/// leave the unplanted columns out.
+#[test]
+fn npk_bin_is_read_plane_by_plane() {
+    let dir = tmp("npk-read");
+    write_overlay_run(&dir, 8, 4, true);
+    publish_late_rows(&dir);
+    let run = Run::load(&dir).unwrap();
+    let (m, d) = (&run.meta, run.meta.dims);
+    assert!(
+        run.fields_at(0).unwrap().npk.is_none(),
+        "no file is no tier, not an error"
+    );
+    let f = run.fields_at(1).unwrap();
+    assert_eq!(f.npk.as_ref().unwrap().len(), 3 * d.columns());
+    assert_eq!(f.value(Overlay::Nitrogen, &d, 5, 0), 0.01 * 5.0);
+    assert_eq!(f.value(Overlay::Phosphorus, &d, 5, 0), 50.0);
+    assert_eq!(f.value(Overlay::Potassium, &d, 5, 0), 38.4);
+    assert_eq!(
+        f.value(Overlay::Potassium, &d, 0, 0),
+        0.0,
+        "column 0 is a roof"
+    );
+
+    let s = Scale::of(Overlay::Phosphorus, m);
+    let (bands, st) = f.bands(Overlay::Phosphorus, &d, &s);
+    assert_eq!(bands[0], NUTRIENT_NONE, "no soil is off the ramp");
+    assert_eq!(
+        bands[3], 1,
+        "below the ramp clamps to its bottom, not to no-soil"
+    );
+    assert_eq!(bands[5], log10_band(50.0, &s));
+    assert!(
+        bands[5] > 25,
+        "50 of 0.001..100 is high on a log ramp: {}",
+        bands[5]
+    );
+    assert_eq!(
+        (st.min, st.max),
+        (0.0005, 50.0),
+        "the roof is not the minimum"
+    );
+    let (nb, _) = f.bands(Overlay::Nitrogen, &d, &Scale::of(Overlay::Nitrogen, m));
+    assert!(
+        nb[63] > nb[2] && nb[2] >= 1,
+        "nitrogen rises with the column"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A short `npk.bin` is a corrupt run and refused, not read as three shorter planes.
+#[test]
+fn a_short_npk_bin_is_refused() {
+    let dir = tmp("npk-short");
+    write_overlay_run(&dir, 8, 4, true);
+    std::fs::write(dir.join("snap_000100").join("npk.bin"), vec![0u8; 64 * 4]).unwrap();
+    let e = Run::load(&dir).unwrap().fields_at(1).unwrap_err();
+    assert!(e.to_string().contains("npk.bin"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Phosphorus's scale starts at a thousandth, which two decimals print as a ramp from nothing.
+#[test]
+fn small_numbers_keep_their_digits_on_screen() {
+    assert_eq!(sig(0.001), "0.00100");
+    assert_eq!(sig(0.0137), "0.0137");
+    assert_eq!(sig(0.5), "0.50");
+    assert_eq!(sig(10000.0), "10000.00");
+    assert_eq!(sig(0.0), "0.00");
 }

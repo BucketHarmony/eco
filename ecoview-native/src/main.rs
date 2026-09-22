@@ -16,9 +16,9 @@
 //! Keys: WASD, Space and Shift to fly; right mouse to look; wheel for speed; **R** to reset the view;
 //! **P** to play or pause; **,** and **.** to step a snapshot; **Home** and **End** for the ends of
 //! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**8** for
-//! the overlay; **V** for the ground cover and vines; **F** for the standing water; **K** and **L**
-//! move the hour of the day; **;** and **'** move the date a week without moving the tick and **\\**
-//! hands the date back to the run; **-** and **=** move the exposure and **0** hands it back to
+//! the overlay and **9** for the nutrients, N, P and K in turn; **V** for the ground cover and
+//! vines; **F** for the standing water; **K** and **L** move the hour of the day; **;** and **'**
+//! move the date a week without moving the tick and **\\** hands the date back to the run; **-** and **=** move the exposure and **0** hands it back to
 //! the measurement;
 //! and **O** turns the beauty pass -- ambient occlusion, sky, sun and seasonal colour -- off.
 //!
@@ -630,6 +630,16 @@ fn apply_overlay_bands(
                 }
             } else {
                 match fields {
+                    // A run with the nutrient tier off writes no `npk.bin`. Say so rather than draw
+                    // the whole site as "no soil".
+                    Some(Ok(f)) if ov.active.nutrient().is_some() && f.npk.is_none() => {
+                        ov.error = Some(
+                            "this snapshot has no npk.bin (the run's nutrient tier is off, \
+                             or it predates ecosim shot G5)"
+                                .into(),
+                        );
+                        None
+                    }
                     Some(Ok(f)) => {
                         let d = run.meta.dims;
                         let (bands, stats) = f.bands(ov.active, &d, &scale);
@@ -1246,15 +1256,15 @@ fn setup(
     };
     match (&overlays.scale, overlays.stats, &overlays.error) {
         (Some(sc), Some(st), _) => println!(
-            "overlay {}: {:.2}..{:.2} {} from {}; field {:.2}..{:.2} mean {:.2}{ramp}{fire}",
+            "overlay {}: {}..{} {} from {}; field {}..{} mean {}{ramp}{fire}",
             overlays.active.name(),
-            sc.lo,
-            sc.hi,
+            overlay::sig(sc.lo),
+            overlay::sig(sc.hi),
             sc.unit,
             sc.source,
-            st.min,
-            st.max,
-            st.mean
+            overlay::sig(st.min),
+            overlay::sig(st.max),
+            overlay::sig(st.mean)
         ),
         (_, _, Some(e)) => println!("overlay {}: off -- {e}", overlays.active.name()),
         _ => println!("overlay {}", overlays.active.name()),
@@ -2033,8 +2043,8 @@ fn apply_world_state(
     }
 }
 
-/// **1**-**8** pick the overlay, in `Overlay::ALL` order; **V** turns the cover and vines on and
-/// off, and **F** the standing water.
+/// **1**-**8** pick the overlay, in `Overlay::ALL` order, and **9** cycles the nutrients; **V**
+/// turns the cover and vines on and off, and **F** the standing water.
 fn overlay_keys(
     keys: Res<ButtonInput<KeyCode>>,
     mut ov: ResMut<OverlayState>,
@@ -2060,6 +2070,16 @@ fn overlay_keys(
         if keys.just_pressed(*k) {
             ov.active = Overlay::ALL[i];
         }
+    }
+    // **9** is the three soil pools (shot V12): nitrogen first, then round through P and K. Three
+    // more digits do not exist -- **0** is the exposure's -- and the three maps are one question,
+    // which element limits here, so they share a key and are compared by pressing it.
+    if keys.just_pressed(KeyCode::Digit9) {
+        ov.active = match ov.active {
+            Overlay::Nitrogen => Overlay::Phosphorus,
+            Overlay::Phosphorus => Overlay::Potassium,
+            _ => Overlay::Nitrogen,
+        };
     }
 }
 
@@ -2288,7 +2308,12 @@ fn hud(
         }
     }
     let legend_text = match scale {
-        Some(s) => format!("{:.2} to {:.2} {}", s.lo, s.hi, s.unit),
+        Some(s) => format!(
+            "{} to {} {}",
+            overlay::sig(s.lo),
+            overlay::sig(s.hi),
+            s.unit
+        ),
         None => String::new(),
     };
     for (mut t, mut node) in &mut label {
@@ -2314,7 +2339,7 @@ fn hud(
     }
     let mut s = format!("fly {speed:.1} m/s   [wheel] speed  [R] reset view\n");
     s.push_str(&format!(
-        "overlay {} ({} of {})   [1-8] switch\n",
+        "overlay {} ({} of {})   [1-8] switch  [9] N, P, K\n",
         overlays.active.name(),
         Overlay::ALL
             .iter()
@@ -2333,9 +2358,28 @@ fn hud(
         ));
         if let Some(st) = overlays.stats {
             s.push_str(&format!(
-                "  field {:.2} to {:.2}, mean {:.2} {}\n",
-                st.min, st.max, st.mean, sc.unit
+                "  field {} to {}, mean {} {}{}\n",
+                overlay::sig(st.min),
+                overlay::sig(st.max),
+                overlay::sig(st.mean),
+                sc.unit,
+                if overlays.active.nutrient().is_some() {
+                    " over the columns with soil"
+                } else {
+                    ""
+                }
             ));
+        }
+        // The nutrient maps are the simulator's pools, read from `npk.bin`; the viewer models none of
+        // it, and a picture this persuasive has to say so on its face (row V12).
+        if overlays.active.nutrient().is_some() {
+            s.push_str(
+                "  npk.bin as the simulator computed it; the viewer models no nutrients. \
+                 grey: no soil (roof, paving, water)\n",
+            );
+            if overlays.active == Overlay::Phosphorus {
+                s.push_str("  the whole stored pool, not the tenth of it growth can reach\n");
+            }
         }
         // And where the two colours came from, on the same terms as the numbers above them.
         if let Some(r) = &overlays.ramp {

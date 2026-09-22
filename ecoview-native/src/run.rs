@@ -107,6 +107,11 @@ pub struct Species {
 /// the simulator says what wet ground looks like, the viewer says how wet the wettest column is.
 /// `mid` (only on `traits`, which this viewer has no overlay for) and `burnt` (only on `fire`) are
 /// off the ramp, and both are optional.
+///
+/// `scale` is the exception to that division, and it is the simulator's to make: on `water` since
+/// `ecosim` shot S10 and on the three nutrients since G13, because no parameter in the run says how
+/// deep a deep pond is or how much nitrogen is a lot. It is absent when the tier that writes the
+/// field is off, and on every other row.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OverlayColors {
     pub name: String,
@@ -116,6 +121,17 @@ pub struct OverlayColors {
     pub mid: Option<String>,
     #[serde(default)]
     pub burnt: Option<String>,
+    #[serde(default)]
+    pub scale: Option<PublishedScale>,
+}
+
+/// An `overlays` row's `scale`: `{lo, hi, unit, curve}`, `curve` either `log10` or `linear`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PublishedScale {
+    pub lo: f32,
+    pub hi: f32,
+    pub unit: String,
+    pub curve: String,
 }
 
 /// A species' temperature tolerance curve: the four breakpoints in °C.

@@ -5,13 +5,15 @@
 //! scales and bands. **Every number in a scale that the run publishes comes from the run's own
 //! `meta.json`**, and where the file does not carry one the [`Scale`] says so in words rather than
 //! substituting a constant silently (DECISIONS.md, "V2: what meta.json owns and what it does not").
-//! Two scales are the viewer's because there is no number in the run to read: standing water's
-//! depth ramp (S5) and, since shot S7, crowding's -- see [`CROWDING_RAMP`].
+//! One scale is the viewer's because there is no number in the run to read: crowding's, since shot
+//! S7 -- see [`CROWDING_RAMP`]. Standing water's was the viewer's too until `ecosim` shot S10
+//! published it; since shot V12 it is read from `meta.json`, and so are the three nutrient scales
+//! G13 published for `npk.bin` ([`published`]).
 //!
 //! Like the rest of the library half this module never mentions Bevy.
 
 use crate::palette::{Overlay, BANDS, CROWDING_EMPTY, FIRE_BURNT, FIRE_QUIET, WATER_DRY};
-use crate::run::{Dims, Params, Run, RunMeta};
+use crate::run::{Dims, Params, PublishedScale, Run, RunMeta};
 use serde::Deserialize;
 use std::io;
 use std::path::Path;
@@ -130,6 +132,78 @@ pub const WATER_TENTHS_MM: f32 = 10.0;
 /// scale taken from each snapshot's own maximum would not be (MEASUREMENTS.md, S5).
 pub const WATER_RAMP_MM: (f32, f32) = (1.0, 10_000.0);
 
+/// The three nutrient ramps, in g/m2 and log10, for a run that carries `npk.bin` but was written
+/// before `ecosim` shot G13 published a scale for it. They are G13's published numbers -- the 2nd to
+/// 98th percentile of G5's runs, rounded outward to decades (ecosim/DECISIONS.md, G13) -- copied, and
+/// the source line says so. In N, P, K order, the file's.
+pub const NUTRIENT_RAMP_G_M2: [(f32, f32); 3] = [(0.01, 10.0), (0.001, 100.0), (0.01, 100.0)];
+
+/// `npk.bin` is three whole f32 planes per ecology column (SAD 1, "Nutrients").
+pub const NPK_PLANES: usize = 3;
+
+/// The `scale` a run publishes for an overlay, if it publishes one this viewer can draw.
+///
+/// Only `log10` is drawn: every overlay that carries a scale today is a log ramp, and a published
+/// `linear` one would be drawn wrong on this viewer's log bands, so it is refused by name instead
+/// ([`Scale::of`] falls back and says why) rather than drawn on the wrong curve in silence.
+pub fn published(o: Overlay, meta: &RunMeta) -> Result<&PublishedScale, String> {
+    let row = meta
+        .overlays
+        .iter()
+        .find(|r| r.name == o.name())
+        .ok_or_else(|| format!("meta.json has no overlays.{}", o.name()))?;
+    let s = row
+        .scale
+        .as_ref()
+        .ok_or_else(|| format!("meta.json overlays.{} has no scale", o.name()))?;
+    if s.curve != "log10" {
+        return Err(format!(
+            "meta.json overlays.{}.scale is {}, and this viewer draws log10 only",
+            o.name(),
+            s.curve
+        ));
+    }
+    if !(s.lo > 0.0 && s.hi > s.lo) {
+        return Err(format!(
+            "meta.json overlays.{}.scale runs {}..{}, not a log range",
+            o.name(),
+            s.lo,
+            s.hi
+        ));
+    }
+    Ok(s)
+}
+
+/// A number for the HUD and the stdout line: two decimals, as every overlay has always printed, and
+/// three significant figures below a tenth. Phosphorus's scale starts at 0.001 g/m2, which two
+/// decimals print as `0.00` -- a ramp from nothing, which it is not (shot V12).
+pub fn sig(v: f32) -> String {
+    if v == 0.0 || v.abs() >= 0.1 || !v.is_finite() {
+        format!("{v:.2}")
+    } else {
+        let places = (2 - v.abs().log10().floor() as i32).max(0) as usize;
+        format!("{v:.places$}")
+    }
+}
+
+/// A log10 scale from the run if it publishes one, else the viewer's constant with the reason.
+fn log_scale(o: Overlay, meta: &RunMeta, fallback: (f32, f32), unit: &'static str) -> Scale {
+    match published(o, meta) {
+        Ok(p) => Scale {
+            lo: p.lo,
+            hi: p.hi,
+            unit,
+            source: format!("meta.json overlays.{}.scale", o.name()),
+        },
+        Err(why) => Scale {
+            lo: fallback.0,
+            hi: fallback.1,
+            unit,
+            source: format!("this viewer's fallback: {why}"),
+        },
+    }
+}
+
 /// The shallowest standing water drawn as a **voxel**, in mm.
 ///
 /// The overlay maps every wet cell, including a film a tenth of a millimetre deep. Geometry cannot:
@@ -235,15 +309,16 @@ impl Scale {
                 },
             },
             // Ponded depth, on a **logarithmic** ramp: see `WATER_RAMP_MM` for the measurement
-            // that rules a linear one out. Neither end is the run's -- `meta.json` carries no scale
-            // for standing water and no `overlays.water` row either -- so both say so, in the words
-            // every other guessed number here uses.
-            Overlay::Water => Scale {
-                lo: WATER_RAMP_MM.0,
-                hi: WATER_RAMP_MM.1,
-                unit: "mm standing, log10",
-                source: viewer_fallback("scale for ponded depth (water.bin is in 0.1 mm)"),
-            },
+            // that rules a linear one out. `ecosim` shot S10 publishes the ends in
+            // `overlays.water.scale`; until shot V12 this viewer never read them and said on screen
+            // that the run had none, which was false (DECISIONS.md, V13). A run older than S10 gets
+            // `WATER_RAMP_MM`, named as the fallback it is.
+            Overlay::Water => log_scale(o, meta, WATER_RAMP_MM, "mm standing, log10"),
+            // The three soil pools, in g/m2 on the log10 ramps G13 measured (shot V12).
+            Overlay::Nitrogen | Overlay::Phosphorus | Overlay::Potassium => {
+                let k = o.nutrient().unwrap_or(0);
+                log_scale(o, meta, NUTRIENT_RAMP_G_M2[k], "g/m2, log10")
+            }
             Overlay::Surface => Scale {
                 lo: 0.0,
                 hi: 0.0,
@@ -297,6 +372,11 @@ pub struct Fields {
     /// they come out of the same file on the same grid, so they are read on the same pass.
     pub grass: Vec<f32>,
     pub shrub: Vec<f32>,
+    /// `npk.bin`: nitrogen, phosphorus and potassium in g/m2, three whole planes of one value per
+    /// ecology column, in that order (shot V12). `None` when the snapshot has no such file, which is
+    /// a run with the nutrient tier off or one older than `ecosim` shot G5 -- not an error until a
+    /// nutrient overlay asks for it.
+    pub npk: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,6 +479,22 @@ impl Run {
             }
         }
 
+        // Absent is allowed and short is not: a missing `npk.bin` is a run without the tier, while a
+        // file of the wrong length is a corrupt one and would draw one pool over another's columns.
+        let npk_path = dir.join("npk.bin");
+        let npk = if npk_path.exists() {
+            let raw = read_exact_len(&npk_path, cols * NPK_PLANES * 4)?;
+            Some(
+                raw.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
         Ok(Fields {
             moisture,
             fertility,
@@ -409,6 +505,7 @@ impl Run {
             burnt,
             grass,
             shrub,
+            npk,
         })
     }
 }
@@ -457,6 +554,14 @@ impl Fields {
             Overlay::Temperature => self.temperature.get(p).copied().unwrap_or(0.0),
             Overlay::Crowding => self.grazers.get(p).map_or(0.0, |v| *v as f32),
             Overlay::Fire => self.burning.get(p).map_or(0.0, |v| *v as f32),
+            Overlay::Nitrogen | Overlay::Phosphorus | Overlay::Potassium => {
+                let k = o.nutrient().unwrap_or(0);
+                self.npk
+                    .as_ref()
+                    .and_then(|v| v.get(k * d.columns() + c))
+                    .copied()
+                    .unwrap_or(0.0)
+            }
             // Standing water is not in `Fields` and never can be: it is per **ground cell**, on the
             // bundle's finer grid, and every field here is per ecology column. [`Ponds`] reads it,
             // and `apply_world_state` routes the water overlay there instead of here.
@@ -468,26 +573,36 @@ impl Fields {
     ///
     /// Fire does not ramp from its own bottom: band 0 is ground that is neither alight nor freshly
     /// burnt and band 1 is ground that burnt out since the previous snapshot, so the ramp above them
-    /// is burning only. The other five overlays are a plain linear ramp over [`Scale`].
+    /// is burning only. The nutrients (shot V12) are a log10 ramp above a categorical "no soil" band,
+    /// and their stats are over the columns that have soil: a roof holds no nitrogen, and counting
+    /// it would put every minimum at zero and pull every mean down by the paved share of the site.
+    /// The other five overlays are a plain linear ramp over [`Scale`].
     pub fn bands(&self, o: Overlay, d: &Dims, s: &Scale) -> (Vec<u8>, FieldStats) {
         let mut out = vec![0u8; d.columns()];
         let (mut min, mut max, mut sum) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f64);
+        let mut n = 0usize;
+        let nutrient = o.nutrient().is_some();
         for y in 0..d.y {
             for x in 0..d.x {
                 let v = self.value(o, d, x, y);
-                min = min.min(v);
-                max = max.max(v);
-                sum += v as f64;
+                if !nutrient || v > 0.0 {
+                    min = min.min(v);
+                    max = max.max(v);
+                    sum += v as f64;
+                    n += 1;
+                }
                 out[x + d.x * y] = match o {
                     Overlay::Fire => self.fire_band(d, x, y, s),
                     // Crowding is the third overlay with a categorical bottom band and a ramp above
                     // it, and it is log (shot S7, [`crowding_band`]).
                     Overlay::Crowding => crowding_band(v, s),
+                    // The nutrients are water's shape: none is off the ramp, the rest log10.
+                    _ if nutrient => log10_band(v, s),
                     _ => band_of(v, s),
                 };
             }
         }
-        let n = d.columns().max(1);
+        let n = n.max(1);
         (
             out,
             FieldStats {
@@ -693,14 +808,21 @@ impl Ponds {
 /// Dry is exactly zero, not "less than the bottom of the ramp": the simulator either put water here
 /// or it did not, and that distinction is the whole point of the map.
 pub fn water_band(mm: f32, s: &Scale) -> u8 {
-    if mm <= 0.0 {
+    log10_band(mm, s)
+}
+
+/// Band 0 for nothing at all, and a log10 ramp over `s` from band 1 up. Water's shape (S5), which the
+/// three nutrients share (V12): their band 0 is [`crate::palette::NUTRIENT_NONE`], a column with no
+/// soil, and it is the same band index as [`WATER_DRY`].
+pub fn log10_band(v: f32, s: &Scale) -> u8 {
+    if v <= 0.0 {
         return WATER_DRY;
     }
     let first = WATER_DRY as usize + 1;
     let span = (BANDS - first - 1) as f32;
     let (lo, hi) = (s.lo.max(f32::MIN_POSITIVE), s.hi);
     let t = if hi > lo {
-        (mm.max(lo).log10() - lo.log10()) / (hi.log10() - lo.log10())
+        (v.max(lo).log10() - lo.log10()) / (hi.log10() - lo.log10())
     } else {
         1.0
     };

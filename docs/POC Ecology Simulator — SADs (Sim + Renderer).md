@@ -172,7 +172,11 @@ to that division: ponded depth has no range in `params` or in the file format fo
 so the `water` entry carries a `scale` — `{lo, hi, unit, curve}` in millimetres, `curve` `log10` —
 whose top is the deepest water the site's ground can hold, rounded up to a decade. A run with
 `hydro.enabled` false writes no `water.bin` and the entry then has no `scale`.
-`docs/SAD-addendum.md` lists the eight entries and their values.
+Sim shot G13 added three more, `nitrogen`, `phosphorus` and `potassium`, for the pools in `npk.bin`,
+and they carry a `scale` for the same reason: nothing else says how much of a nutrient is a lot. Their
+scales are in g/m², `log10`, constants measured from the shot G5 runs rather than computed per run;
+with `npk.enabled` false the three entries have no `scale`.
+`docs/SAD-addendum.md` lists the eleven entries and their values.
 
 Surface media and buildings are not in `overlays`: they are scene geometry rather than ecology and
 belong to the world bundle and whatever draws it. `format_version` does not change for either
@@ -187,7 +191,9 @@ The same shot stopped `meta.json` omitting params sections that were at their de
 #### Nutrients (shot G5)
 
 The nutrient tier (`npk.enabled`, on by default) replaces the 0–255 fertility index with three soil
-pools in grams per square metre: available nitrogen, available phosphorus and available potassium.
+pools in grams per square metre: available nitrogen, total phosphorus and exchangeable potassium.
+Growth sees `npk.p_avail_frac` of the phosphorus pool; `npk.bin` holds the whole of it (corrected in
+sim shot G13, which found this line saying "available").
 Each snapshot gains one file, written whenever the tier is on:
 
 ```

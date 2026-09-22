@@ -112,8 +112,9 @@ struct Species {
 /// of the legend and two renderers of the same run could disagree about what wet ground looks like.
 /// `lo` is the colour of the bottom of the scale `params` defines and `hi` the colour of the top;
 /// what those two numbers *are* is the renderer's own reading of the fields (SAD 1, "The palette in
-/// `meta.json`") -- except on the one overlay whose numbers are nowhere in `params` to be read, which
-/// since shot S10 carries a [`OverlayScale`] saying what they are.
+/// `meta.json`") -- except on the overlays whose numbers are nowhere in `params` to be read, which
+/// carry an [`OverlayScale`] saying what they are: `water` since shot S10, the three nutrients since
+/// shot G13.
 ///
 /// Surface media and buildings are not here: they are scene geometry, not ecology, and they belong to
 /// the world bundle and its renderer (DECISIONS.md, shot G7).
@@ -137,12 +138,14 @@ struct OverlayColors {
 /// The numbers behind an overlay's two colours: where its ramp starts, where it ends, in what unit,
 /// and whether it runs by equal steps or by decades.
 ///
-/// Only `water` carries one. Every other overlay's range is already published somewhere a reader can
-/// find it -- `light` and `moisture` are fractions the file format fixes, `fire` counts down
+/// `water` and the three nutrients carry one. Every other overlay's range is already published
+/// somewhere a reader can find it -- `light` and `moisture` are fractions the file format fixes, `fire` counts down
 /// `params.fire.duration`, `temperature` runs over the species tolerance curves in `params` -- so
 /// repeating them here would give a reader two sources for one number and no rule for which wins.
 /// Ponded depth has none: `water.bin` is in tenths of a millimetre and how deep this site's water
 /// gets is a property of its ground, not of the format (see [`crate::hydro::Flow::pond_ramp_mm`]).
+/// Nor do the nutrient pools: `npk.bin` is in g/m² and how rich a soil gets is where five years of
+/// the model take it (see [`NPK_RAMP_G_M2`]).
 ///
 /// `curve` is `"log10"` or `"linear"` and is always written, because a ramp four decades wide drawn
 /// linearly is a picture of an empty site and nothing else in the entry would have said so.
@@ -167,6 +170,8 @@ struct OverlayScale {
 /// palette, so ponded depth -- the one field a run writes every snapshot that had no entry here --
 /// was left to the renderer to colour and to scale on its own. It goes at the end rather than beside
 /// `moisture`, so that no row already published changes position; the array is read by name.
+/// `nitrogen`, `phosphorus` and `potassium` follow it for the same reason (shot G13): G5 wrote
+/// `npk.bin` and left it, like ponded depth before S10, with no entry here.
 fn overlay_colors(sim: &Sim) -> Vec<OverlayColors> {
     let o = |name, lo, hi| OverlayColors { name, lo, hi, mid: None, burnt: None, scale: None };
     vec![
@@ -184,7 +189,33 @@ fn overlay_colors(sim: &Sim) -> Vec<OverlayColors> {
         // recognisable as which. Dry ground is not the bottom of this ramp but a category off it,
         // which stays the renderer's, the way fire's quiet ground did in shot S2.
         OverlayColors { scale: water_scale(sim), ..o("water", "#9fe8ff", "#08246b") },
+        // The three soil pools, pale where the soil is poor and dark where it is rich, one hue each
+        // so a screenshot says which element it is: nitrogen the green of leaf growth, phosphorus
+        // the purple a starved leaf turns, potassium the orange of potash. None of them is
+        // fertility's white-to-brown, which since shot G5 is a growth factor and not a stock.
+        OverlayColors { scale: npk_scale(sim, NPK_RAMP_G_M2[0]), ..o("nitrogen", "#f5f2d6", "#1d5e20") },
+        OverlayColors { scale: npk_scale(sim, NPK_RAMP_G_M2[1]), ..o("phosphorus", "#f6eef8", "#5b1a8c") },
+        OverlayColors { scale: npk_scale(sim, NPK_RAMP_G_M2[2]), ..o("potassium", "#fff3e0", "#b85400") },
     ]
+}
+
+/// The published ends of the nitrogen, phosphorus and potassium ramps, g/m², in N, P, K order.
+///
+/// Shot G13. Unlike ponded depth, a pool's range is not a fact about the ground that can be computed
+/// at load: it is where five years of deposition, uptake, leaching and runoff take it. So the ends are
+/// measured, not derived -- the 2nd to 98th percentile of every plantable column of `npk.bin` at ticks
+/// 10000 and 20000, over the Capitol at the default deposition and strip seeds 1-3, rounded outward to
+/// whole decades (DECISIONS.md, shot G13, has the table). They are constants on purpose: a scale that
+/// moved with the run would make two runs' maps incomparable, which is the thing an overlay is for.
+const NPK_RAMP_G_M2: [(f32, f32); 3] = [(0.01, 10.0), (0.001, 100.0), (0.01, 100.0)];
+
+/// A nutrient overlay's scale, or `None` when the run has no nutrient tier.
+///
+/// `npk.enabled = false` writes no `npk.bin`, so there is no pool for the scale to be about -- the
+/// same reason [`water_scale`] is `None` without a water tier. The hues stay either way.
+fn npk_scale(sim: &Sim, (lo, hi): (f32, f32)) -> Option<OverlayScale> {
+    sim.npk.as_ref()?;
+    Some(OverlayScale { lo, hi, unit: "g/m2", curve: "log10" })
 }
 
 /// The ponded-depth scale of this run's world, or `None` when there is no water tier to scale.
@@ -1174,7 +1205,19 @@ mod tests {
         let names: Vec<&str> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["light", "moisture", "fertility", "temperature", "crowding", "fire", "traits", "water"],
+            [
+                "light",
+                "moisture",
+                "fertility",
+                "temperature",
+                "crowding",
+                "fire",
+                "traits",
+                "water",
+                "nitrogen",
+                "phosphorus",
+                "potassium"
+            ],
             "the ecological overlays, in order"
         );
         let hex = |v: &serde_json::Value| {
@@ -1188,7 +1231,8 @@ mod tests {
             let name = r["name"].as_str().unwrap();
             assert_eq!(r.get("mid").is_some(), name == "traits", "mid on {name}");
             assert_eq!(r.get("burnt").is_some(), name == "fire", "burnt on {name}");
-            assert_eq!(r.get("scale").is_some(), name == "water", "scale on {name}");
+            let scaled = ["water", "nitrogen", "phosphorus", "potassium"].contains(&name);
+            assert_eq!(r.get("scale").is_some(), scaled, "scale on {name}");
             if let Some(mid) = r.get("mid") {
                 hex(mid);
             }
@@ -1204,6 +1248,44 @@ mod tests {
         assert_eq!(scale["curve"], "log10");
         let hi = scale["hi"].as_f64().unwrap();
         assert!(hi >= 100.0 && format!("{hi:e}").starts_with("1e"), "a decade, not {hi}");
+        // The three nutrient scales (shot G13): whole decades in g/m², by decades, and the soil every
+        // run starts from sits on its ramp rather than off one end of it.
+        let npk = fs::read(dir.join("snap_000000/npk.bin")).unwrap();
+        let plane = npk.len() / 12;
+        for (i, name) in ["nitrogen", "phosphorus", "potassium"].into_iter().enumerate() {
+            let scale = &rows[8 + i]["scale"];
+            assert_eq!(rows[8 + i]["name"], name);
+            assert_eq!(scale["unit"], "g/m2", "{name}");
+            assert_eq!(scale["curve"], "log10", "{name}");
+            let (lo, hi) = (scale["lo"].as_f64().unwrap(), scale["hi"].as_f64().unwrap());
+            for end in [lo, hi] {
+                assert!(format!("{end:e}").starts_with("1e"), "{name}: a decade, not {end}");
+            }
+            let start = (0..plane)
+                .map(|c| f32::from_le_bytes(npk[4 * (i * plane + c)..][..4].try_into().unwrap()))
+                .fold(0.0f32, f32::max) as f64;
+            assert!(lo < start && start < hi, "{name}: the starting pool {start} is off [{lo}, {hi}]");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A run with the nutrient tier off publishes the three nutrient hues and no nutrient scale.
+    ///
+    /// Shot G13, the same rule as the water row: `npk.enabled = false` writes no `npk.bin`, so a
+    /// scale would describe a field the run does not contain.
+    #[test]
+    fn a_run_without_the_nutrient_tier_publishes_no_nutrient_scale() {
+        let dir = scratch_dir();
+        let mut p = Params::load_square();
+        p.npk.enabled = false;
+        run(p, 9, 100, 100, &[], &dir).unwrap();
+        let m = meta(&dir);
+        for name in ["nitrogen", "phosphorus", "potassium"] {
+            let row = m["overlays"].as_array().unwrap().iter().find(|r| r["name"] == name).unwrap();
+            assert!(row.get("scale").is_none(), "no scale without a nutrient tier: {row}");
+            assert!(row["lo"].is_string() && row["hi"].is_string(), "{row}");
+        }
+        assert!(!dir.join("snap_000000/npk.bin").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 

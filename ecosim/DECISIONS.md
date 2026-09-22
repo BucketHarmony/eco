@@ -2337,3 +2337,64 @@ is false by one grazer. The exact pair is still asserted with `assert_eq!((32, 6
 real pin; the ratio line exists to say *why* the pair matters — the scale saturates — so it is now
 `2 × busiest > 3 × scale_top`. The history is in the comment: 95 before shot G4, 70 after, 61 now.
 A ratio that has moved three times was never the invariant.
+
+## Shot G13 — the three nutrient overlays are published, and their scales are measured
+
+Worked from the BACKLOG row; there is no prompt file. G5 writes `npk.bin` every snapshot and
+published no overlay for it, so the three pools were a field on disk with no hues and no range, and
+by the project's rule a viewer may invent neither. `meta.json`'s `overlays` gains three rows,
+`nitrogen`, `phosphorus` and `potassium`, appended after `water` so no published row moves, each with
+`lo`/`hi` hues and a `scale` of the shape S10 gave `water`: `{lo, hi, unit:"g/m2", curve:"log10"}`.
+`format_version` does not move.
+
+**The scales are measured, not derived, and they are constants.** Ponded depth's top is a fact about
+the terrain, computed at load. A nutrient pool's range is not: it is where five years of deposition,
+uptake, leaching and runoff take it, and `meta.json` is written before any of that happens. So the
+ends come from G5's own runs: the 2nd and 98th percentile of every plantable column of `npk.bin`,
+at ticks 10000 and 20000, on the Capitol at the default deposition (`ci-runs/g5cap/dep2.5`, the same
+bytes as `runs/capitol-s42`) and on strip seeds 1–3 (`ci-runs/s1..s3`), each end rounded outward to
+a whole decade. A constant is also what makes two runs' maps comparable, which is what an overlay
+is for; a scale that tracked each run would draw a starved site and a rich one the same colour.
+
+| pool | lowest p2 | highest p98 | min, max seen | published | columns off the ramp |
+| --- | --- | --- | --- | --- | --- |
+| N | 0.0137 (Capitol, 10000) | 6.78 (s1, 10000) | 0.0084, 13.6 | **0.01 – 10** | a few, both ends |
+| P | 0.0044 (s1, 20000) | 54.9 (s1, 20000) | 0.00028, 519 | **0.001 – 100** | a few, both ends; the top ones are runoff sinks |
+| K | 0.0113 (s2, 20000) | 37.6 (s3, 20000) | 0.0017, 69.3 | **0.01 – 100** | a few, bottom only |
+
+All three start inside their ramp (1.536, 51.2 and 38.4 g/m²), which `output.rs` asserts on a fresh
+run. Off-ramp columns clamp to the end colour; the ramp stops resolving there, the field does not.
+
+**What each end means on the ground.**
+- **Nitrogen, 0.01 to 10 g/m²** (0.1 to 100 kg/ha of mineral N). The bottom is a column a tree has
+  drawn to nothing: 70 times below grass's half-saturation point (0.7 g/m², `npk.half_sat` × need),
+  so growth there is about 1% of unlimited. The top is what a field holds just after a full season's
+  fertiliser application; this unfertilised site reaches it only in the first-year flush, when litter
+  decays faster than the sward can take it up. The start, 15 kg/ha, is three quarters of the way up.
+- **Phosphorus, 0.001 to 100 g/m²**, of the whole stored pool — **not the available pool**. `npk.bin`
+  writes what `Npk::soil` holds, and growth sees that times `npk.p_avail_frac` (0.1); the SAD's
+  "available phosphorus" wording was wrong about the file and is corrected in this shot. The bottom
+  is a flow line runoff has stripped of particulate P; the top is twice the starting stock, which
+  only the sinks at the foot of those lines exceed. The median column sits at 94% of the ramp, so a
+  correct phosphorus map is nearly uniform and dark, with the drainage network drawn **pale**.
+- **Potassium, 0.01 to 100 g/m²** of exchangeable K. The bottom is a column cropped bare (there is no
+  input of K in this model at all, so a column can only go down); the top is 2.6 times the start,
+  above the richest column measured.
+
+**The hues: pale is poor, dark is rich, one hue per element.** Nitrogen `#f5f2d6` to `#1d5e20`, the
+green of leaf growth; phosphorus `#f6eef8` to `#5b1a8c`, the purple a P-starved leaf turns; potassium
+`#fff3e0` to `#b85400`, potash orange. Richer is darker because that is what `moisture` and
+`fertility` already do, and a reader switching overlays should not have to relearn which end is
+more. None of the three is `fertility`'s white-to-brown: since G5 that file is a growth factor, not a
+stock, and the two maps have to be distinguishable at a glance. **This inverts the G5 PNGs**, which
+drew low as dark on a dark ground; V12 should expect the picture the other way round, with the same
+structure in it.
+
+**No `scale` when `npk.enabled` is false**, the S10 rule for `water`: such a run writes no `npk.bin`,
+and a scale would describe a field the run does not contain. The hues stay. Tested by
+`a_run_without_the_nutrient_tier_publishes_no_nutrient_scale`.
+
+**Regenerated.** `fixtures/capitol-mini`, `fixtures/capitol-animals-mini` and `fixtures/s42-mini-v2`
+are compared byte for byte with a fresh run, so their `meta.json` was re-cut with
+`ECOSIM_REGEN_MANIFEST=1` and nothing else in them changed (their `timing.json` was restored, since
+the comparison skips it). No manifest or golden file changed: none hashes `meta.json`.

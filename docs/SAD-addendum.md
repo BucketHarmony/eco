@@ -190,11 +190,11 @@ The steps run in this order:
   - `{id:2, name:"tree", kind:"tree", color:"#6b4a2b", canopy_color:"#2e8b3d"}`
   - `{id:3, name:"grazer", kind:"animal", color:"#f2d024"}`
   - `{id:4, name:"hunter", kind:"animal", color:"#d6332a"}`
-- **`overlays`** (sim shot S2, eighth entry sim shot S10) is the rest of the palette the `species`
+- **`overlays`** (sim shot S2, eighth entry sim shot S10, ninth to eleventh sim shot G13) is the rest of the palette the `species`
   table starts: one entry per ecological overlay, each `{name, lo, hi}` in sRGB hex, in this order.
   `lo` colours the bottom of the scale a renderer builds from `params` and `hi` the top; the scale's
   numbers are the renderer's reading of the fields, and the two hues are the simulator's — except on
-  `water`, whose numbers are nowhere else and are published with it.
+  `water` and the three nutrients, whose numbers are nowhere else and are published with them.
   - `{name:"light", lo:"#000000", hi:"#ffffff"}` — grey on purpose: a hue reads as a species.
   - `{name:"moisture", lo:"#ffffff", hi:"#1f4fd1"}`
   - `{name:"fertility", lo:"#ffffff", hi:"#4a2c12"}`
@@ -209,8 +209,16 @@ The steps run in this order:
     the second so that no row S2 published moved. Deliberately not `moisture`'s white-to-blue: one
     map is water in the soil and the other is water lying on top of it. "No water here" is a
     category off the bottom of the ramp and stays the renderer's, as fire's quiet ground does.
-  - **`scale`** is on `water` and on no other entry: `{lo, hi, unit, curve}`, `curve` either
-    `"log10"` or `"linear"`. Every other overlay's range is already published — `light` and
+  - `{name:"nitrogen", lo:"#f5f2d6", hi:"#1d5e20", scale:{lo:0.01, hi:10.0, unit:"g/m2",
+    curve:"log10"}}`, `{name:"phosphorus", lo:"#f6eef8", hi:"#5b1a8c", scale:{lo:0.001, hi:100.0,
+    unit:"g/m2", curve:"log10"}}` and `{name:"potassium", lo:"#fff3e0", hi:"#b85400", scale:{lo:0.01,
+    hi:100.0, unit:"g/m2", curve:"log10"}}` — the three planes of `npk.bin` (sim shot G13), pale where
+    the soil is poor and dark where it is rich. The phosphorus plane is the whole pool, not the tenth
+    of it growth can reach. The scales are constants: the 2nd–98th percentile of the shot G5 runs,
+    rounded outward to decades (`ecosim/DECISIONS.md`, shot G13). A run with `npk.enabled` false
+    writes no `npk.bin` and these three entries have no `scale`.
+  - **`scale`** is on `water` and the three nutrients and on no other entry: `{lo, hi, unit,
+    curve}`, `curve` either `"log10"` or `"linear"`. Every other overlay's range is already published — `light` and
     `moisture` are fractions the file format fixes, `fire` counts down `params.fire.duration`,
     `temperature` runs over the species curves in `params` — while ponded depth has none, because
     `water.bin` is in tenths of a millimetre and how deep this site's water gets is a fact about its

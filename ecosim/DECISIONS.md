@@ -2034,3 +2034,85 @@ things for whoever takes it. `ecoview-native/src/bundle.rs` *writes* `bundle.jso
 saves a world, and as it stands it would drop the latitude of any bundle it round-trips. And the
 committed copy under `ecoview/public/fixtures/capitol-world` is stale until the next
 `scripts/sync-data.sh`, which CI's `ecoview` job runs on every push.
+
+## Shot S10 — the water overlay's ramp is the ground's, not the renderer's
+
+Shot S2 published the palette: seven overlays, two hues each, so a renderer stopped keeping a private
+copy of the legend. The water tier landed one shot later and brought an eighth field with it, and shot
+S5 drew it — so `ecoview-native` picked its own two hues for standing water, picked its own 1 mm to
+10 m log ramp, and marked both `(!)` on screen because there was nothing in the run to read. The gap
+S2 closed had reopened within the hour. This closes it for the eighth.
+
+**Two things were missing and they are not the same kind of thing.** The hues are a legend: somebody
+has to choose them and it should be the component that owns the palette. The *scale* is a claim about
+the site. `water.bin` is in tenths of a millimetre, a wet pavement and a flooded corner are three
+decades apart, and which depth counts as the top of the ramp decides whether a screenshot shows a
+flooded site or a dry one. That is the half worth the shot.
+
+**The top of the ramp is the deepest water this ground can hold, rounded up to a decade.** Every
+ground cell's `Flow::pond_cap` is its spill level: `route_storm` adds at most `pond_cap − ponded` to a
+cell and sends the rest downhill in the same pass, so `ponded ≤ pond_cap` is an invariant of the
+routing rather than a tendency of the weather, and the largest cap over the site bounds every depth
+any snapshot can show. It is computed once, at load, by the same priority flood the storms run on, so
+it is a fact about the terrain and not about one run's rain — which is what an overlay scale has to be
+if two snapshots of the same site are to be comparable at a glance.
+
+- **Why a decade and not the number itself.** The ramp is logarithmic, so a whole number of decades
+  puts the bands on the millimetre, the centimetre, the decimetre and the metre, and two sites that
+  differ only in where their deepest pit happens to be get the same scale. An exact decade is left
+  alone. The floor is 100 mm, for a site with no depression at all — a roof, a plane, a bare slope —
+  which still needs a ramp with room in it.
+- **Measured before it was chosen.** The Capitol's deepest depression is **5,383 mm** (47,384 of
+  262,144 ground cells hold anything; median 17 mm, ninetieth percentile 1,000), so it publishes
+  1 mm–10 m. The noise strip's deepest is 3,000 mm and the old square world's 2,000 — whole voxels,
+  because noise terrain is integer metres — so both publish 1 mm–10 m too. **Every committed run
+  therefore publishes exactly the ramp `ecoview-native` guessed**, which is the same shape as S2:
+  no picture changes, only who owns the number.
+- **`lo` is 1 mm**, ten quanta of the file, and it is where wet ground becomes water standing on it.
+  Below it the field still says what it says; it is the ramp that stops resolving.
+- **No logarithm is taken.** `pond_ramp_mm` multiplies a running decade by ten until it reaches the
+  deepest cap. The decades are exact in `f32` and the answer needs no `libm`, so nothing here can
+  differ between MSVC and glibc (the rule from shot 4).
+
+**`scale` goes on the overlay entry, and only on `water`.** The `mid`/`burnt` precedent does not cover
+this: both are colours, and the question here is what the two ends *mean*. So the entry gains
+`scale: {lo, hi, unit, curve}`, with `curve` `"log10"` or `"linear"` and always written — a ramp four
+decades wide drawn linearly is a picture of an empty site, and nothing else in the entry would have
+said so. No other overlay gets one. `light` and `moisture` are fractions the file format fixes, `fire`
+counts down `params.fire.duration`, `temperature` runs over the species curves: publishing those here
+would give a reader two sources for one number and no rule for which wins. Crowding's ramp is also the
+viewer's guess (shot S7 measured it), and it stays that way — the simulator has no opinion about how
+many grazers a patch holds beyond a disease threshold that S7 rejected as the top of a scale.
+
+- **`water` is the eighth row, not the second.** Appending it leaves every row S2 published where it
+  was. The array is read by name; the order is for a renderer's overlay list.
+- **No `scale` when `hydro.enabled` is false.** Such a run writes no `water.bin`, so there is no
+  ponded depth for a scale to be about, and a plausible one written anyway would be the simulator
+  inventing the range of a field the run does not contain — this shot's own defect, wearing the other
+  hat. The hues stay: the palette is the same palette whatever a run happens to hold.
+- **Dry ground is not published.** "No water here" is a category off the bottom of the ramp, not a
+  depth, and it stays the renderer's, exactly as fire's quiet ground did in S2.
+- **`format_version` does not move.** An added `meta.json` key, like `overlays` itself, `overrides`,
+  `dims.patch`, `animals`, `year_len` and `world.latitude_deg` before it.
+
+**Tested where the claim is.** `hydro.rs` pins the derivation (a plane gets the 100 mm floor, a 400 mm
+pit gets a ramp to 1 m, an exact metre is left alone, 1.2 m needs the decade above) and a property test
+with a named regression sibling asserts the invariant the top rests on: over random media, heights and
+storms, no cell ever stands deeper than the published top, and the top is always a decade.
+`tests/bundle.rs` runs the whole way round — dig a 325 mm sealed basin into the synthetic bundle, run
+4,000 ticks, and the run publishes a ramp to 1 m that every snapshot's `water.bin` obeys, with at
+least one cell wet so the bound is not vacuous. `output.rs` pins the row's position in the array and
+that `scale` is on `water` and nowhere else.
+
+**Regenerated.** `fixtures/capitol-mini`, `fixtures/capitol-animals-mini` and `fixtures/s42-mini-v2`
+are compared byte for byte with a fresh run and their `meta.json` gains the row, so all three were
+re-cut with `ECOSIM_REGEN_MANIFEST=1`. No manifest and no golden `check` output changed: none of them
+hashes `meta.json`. `fixtures/s42-mini` is version 1 and cannot be re-cut (shot G4b); the test that
+reads it checks that every version-1 params key is still present, which an addition cannot break.
+
+**Handed on.** Reading the scale is a viewer shot (component isolation). `ecoview-native`'s
+`Scale::of` still returns its own `WATER_RAMP_MM` and still says `(!)`, and `Overlay::ramp` will now
+find a `water` row and take its hues from the run — which changes no pixel, because the two hex values
+published here are the ones that module already held. Whoever takes it should note that the ramp is
+per run: a site with no deep bowl will publish 100 mm or 1 m rather than 10 m, and a viewer that
+hard-codes four decades of band spacing will need the published `curve` and ends instead.

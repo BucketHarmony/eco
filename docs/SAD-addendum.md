@@ -190,10 +190,11 @@ The steps run in this order:
   - `{id:2, name:"tree", kind:"tree", color:"#6b4a2b", canopy_color:"#2e8b3d"}`
   - `{id:3, name:"grazer", kind:"animal", color:"#f2d024"}`
   - `{id:4, name:"hunter", kind:"animal", color:"#d6332a"}`
-- **`overlays`** (sim shot S2) is the rest of the palette the `species` table starts: one entry per
-  ecological overlay, each `{name, lo, hi}` in sRGB hex, in this order. `lo` colours the bottom of the
-  scale a renderer builds from `params` and `hi` the top; the scale's numbers are the renderer's
-  reading of the fields, and the two hues are the simulator's.
+- **`overlays`** (sim shot S2, eighth entry sim shot S10) is the rest of the palette the `species`
+  table starts: one entry per ecological overlay, each `{name, lo, hi}` in sRGB hex, in this order.
+  `lo` colours the bottom of the scale a renderer builds from `params` and `hi` the top; the scale's
+  numbers are the renderer's reading of the fields, and the two hues are the simulator's — except on
+  `water`, whose numbers are nowhere else and are published with it.
   - `{name:"light", lo:"#000000", hi:"#ffffff"}` — grey on purpose: a hue reads as a species.
   - `{name:"moisture", lo:"#ffffff", hi:"#1f4fd1"}`
   - `{name:"fertility", lo:"#ffffff", hi:"#4a2c12"}`
@@ -203,6 +204,21 @@ The steps run in this order:
     since the previous snapshot, a category rather than a point on the ramp.
   - `{name:"traits", lo:"#1f5bff", mid:"#ffffff", hi:"#ff1f1f"}` — `mid` is the neutral middle of a
     diverging ramp. Only `traits` has one, and only `fire` has a `burnt`.
+  - `{name:"water", lo:"#9fe8ff", hi:"#08246b", scale:{lo:1.0, hi:10000.0, unit:"mm",
+    curve:"log10"}}` — standing water, pale over deep (sim shot S10), and the eighth row rather than
+    the second so that no row S2 published moved. Deliberately not `moisture`'s white-to-blue: one
+    map is water in the soil and the other is water lying on top of it. "No water here" is a
+    category off the bottom of the ramp and stays the renderer's, as fire's quiet ground does.
+  - **`scale`** is on `water` and on no other entry: `{lo, hi, unit, curve}`, `curve` either
+    `"log10"` or `"linear"`. Every other overlay's range is already published — `light` and
+    `moisture` are fractions the file format fixes, `fire` counts down `params.fire.duration`,
+    `temperature` runs over the species curves in `params` — while ponded depth has none, because
+    `water.bin` is in tenths of a millimetre and how deep this site's water gets is a fact about its
+    ground. `hi` is the deepest water the ground can hold — the largest depression storage the
+    priority flood finds, which no snapshot can exceed — rounded up to a decade, with a floor of
+    100 mm; `lo` is 1 mm, ten quanta of the file. Both the Capitol bundle and the noise worlds come
+    out at 1 mm–10 m. A run with `hydro.enabled` false has no `water.bin` and its `water` entry has
+    no `scale`.
   - Surface media and buildings are **not** here: they are scene geometry, not ecology, and they stay
     with the world bundle and its renderer (ecosim/DECISIONS.md, shot G7).
 - **`patches.json`**: 64 objects `{grass, shrub, detritus, temperature}` in patch index order.

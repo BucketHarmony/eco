@@ -167,7 +167,12 @@ rest of it — one entry per ecological overlay, `{name, lo, hi}` in sRGB hex, `
 bottom of the scale and `hi` the colour of the top, with `mid` on the one diverging ramp (`traits`) and
 `burnt` on `fire` for ground that burnt out since the previous snapshot. What the two ends of a scale
 *mean* is the renderer's reading of the run's `params` and of the field's own units; what they look
-like is the simulator's. `docs/SAD-addendum.md` lists the seven entries and their values.
+like is the simulator's. Sim shot S10 added the eighth entry, `water`, and with it the one exception
+to that division: ponded depth has no range in `params` or in the file format for a renderer to read,
+so the `water` entry carries a `scale` — `{lo, hi, unit, curve}` in millimetres, `curve` `log10` —
+whose top is the deepest water the site's ground can hold, rounded up to a decade. A run with
+`hydro.enabled` false writes no `water.bin` and the entry then has no `scale`.
+`docs/SAD-addendum.md` lists the eight entries and their values.
 
 Surface media and buildings are not in `overlays`: they are scene geometry rather than ecology and
 belong to the world bundle and whatever draws it. `format_version` does not change for either

@@ -162,7 +162,60 @@ impl Flow {
     pub fn cells(&self) -> usize {
         self.recv.len()
     }
+
+    /// The two ends of the ponded-depth ramp, in millimetres: the scale `meta.json` publishes for
+    /// the `water` overlay (shot S10). Logarithmic, and the top is the site's own.
+    ///
+    /// A renderer colouring `water.bin` has to decide what depth is the top of its ramp, and until
+    /// this shot no run said. The number is not a matter of taste: ponded depth on a real site spans
+    /// decades, because most wet ground is a film a few millimetres deep and a few cells are the
+    /// bottom of a bowl metres deep. On the Capitol at tick 10000 the median wet cell holds 10 mm,
+    /// the ninetieth percentile 48 mm and the deepest 5,074 mm (`ecoview-native/MEASUREMENTS.md`,
+    /// S5), so a linear ramp to the deepest draws 99% of the standing water in its bottom band and
+    /// the site looks dry.
+    ///
+    /// **The top is the deepest water this site can hold, rounded up to a decade.** Every cell's
+    /// [`Flow::pond_cap`] is its spill level: fill it past that and the surplus moves downhill
+    /// within the same storm pass, so no snapshot can show a cell deeper than its own cap, and the
+    /// largest cap is the deepest standing water the terrain admits. That is a fact about the
+    /// ground rather than about one run's weather -- it is computed once, at load, from the same
+    /// priority flood the storms use -- which is what the scale of an overlay has to be if two
+    /// snapshots of the same site are to be comparable at a glance
+    /// (`ecoview-native/DECISIONS.md`, "V2 the scale is the simulator's range, never the data's").
+    ///
+    /// Rounding up to a decade keeps the ramp a whole number of decades, so the bands sit on
+    /// millimetre, centimetre, decimetre and metre; it also stops the scale twitching between two
+    /// sites that differ only in where their deepest pit happens to be. An exact decade is left
+    /// alone. The floor is [`POND_RAMP_MIN_HI_MM`]: a site with no depression at all still needs a
+    /// scale, because a storm can stand water on a slope for a tick before it runs off.
+    ///
+    /// `deepest` is compared against a running product of ten rather than fed to a logarithm: the
+    /// decades are exact in `f32` and the answer needs no `libm` (DECISIONS.md, shot 4).
+    pub fn pond_ramp_mm(&self) -> (f32, f32) {
+        let deepest = self.pond_cap.iter().copied().fold(0.0f32, f32::max);
+        let mut hi = POND_RAMP_MIN_HI_MM;
+        while hi < deepest {
+            hi *= 10.0;
+        }
+        (POND_RAMP_LO_MM, hi)
+    }
 }
+
+/// The bottom of the ponded-depth ramp, in millimetres.
+///
+/// `water.bin` is quantised to 0.1 mm, so this is ten quanta, and it is the depth at which wet
+/// ground becomes water standing on it. Below it the field still says what it says; it is the ramp
+/// that stops resolving, and "no water at all" is a category off the bottom of the ramp rather than
+/// its first band (shot S2 left fire's quiet ground to the renderer for the same reason).
+pub const POND_RAMP_LO_MM: f32 = 1.0;
+
+/// The shallowest top the ponded-depth ramp is given, in millimetres: two decades above
+/// [`POND_RAMP_LO_MM`].
+///
+/// A world whose ground has no depression -- a roof, a plane, a bare slope -- would otherwise be
+/// handed a ramp with no room in it. A tenth of a metre is a deep puddle and a shallow pond, so it
+/// is where a site that holds nothing is still drawn honestly.
+pub const POND_RAMP_MIN_HI_MM: f32 = 100.0;
 
 /// Kahn's topological sort of the receiver graph, upstream first. A cell caught in a cycle (a
 /// courtyard whose only way out is over a roof) has its receiver cut to [`OUT`], lowest index
@@ -734,6 +787,97 @@ mod tests {
         let media: Vec<u8> = (0..64).collect();
         let heights: Vec<u8> = (0..64).map(|i| ((i % 8) * (i / 8)) as u8).collect();
         balance_holds(&media, &heights, &[0, 1, 40, 255, 3, 0, 200]).unwrap();
+    }
+
+    /// Is `hi` one of the decades [`Flow::pond_ramp_mm`] is allowed to return?
+    fn is_decade(hi: f32) -> bool {
+        let mut d = POND_RAMP_MIN_HI_MM;
+        while d < hi {
+            d *= 10.0;
+        }
+        d == hi
+    }
+
+    /// A flat bundle whose interior cell (4, 4) sits `dip` metres below the rest.
+    fn bundle_with_a_pit(dip: f32) -> Bundle {
+        let mut b = flat_bundle(8, 1);
+        cover(&mut b, Medium::Asphalt);
+        let w = b.ground.width;
+        b.ground_h[4 + w * 4] = -dip;
+        b
+    }
+
+    /// Acceptance (shot S10): the published ponded-depth ramp starts at a millimetre and ends at the
+    /// deepest water the ground can hold, rounded up to a decade. It is the scale `meta.json` gives
+    /// a renderer for `water.bin`, so what it is measured from is the point.
+    #[test]
+    fn the_pond_ramp_ends_at_the_deepest_bowl_rounded_up() {
+        // A plane with nowhere to hold water still gets a ramp: the floor, two decades wide.
+        let mut flat = flat_bundle(8, 1);
+        cover(&mut flat, Medium::Asphalt);
+        let s = sim_of(&flat);
+        assert_eq!(hydro(&s).flow.pond_cap.iter().copied().fold(0.0f32, f32::max), 0.0, "a plane holds nothing");
+        assert_eq!(hydro(&s).flow.pond_ramp_mm(), (1.0, POND_RAMP_MIN_HI_MM));
+        // 0.4 m of storage is over the floor and under a metre, so the ramp runs to a metre.
+        let s = sim_of(&bundle_with_a_pit(0.4));
+        assert_eq!(hydro(&s).flow.pond_cap[4 + 8 * 4], 400.0, "the pit's spill level is 400 mm above it");
+        assert_eq!(hydro(&s).flow.pond_ramp_mm(), (1.0, 1000.0));
+        // An exact decade is left alone rather than rounded to the next one.
+        let s = sim_of(&bundle_with_a_pit(1.0));
+        assert_eq!(hydro(&s).flow.pond_ramp_mm(), (1.0, 1000.0));
+        // A metre and a bit needs the decade above it.
+        let s = sim_of(&bundle_with_a_pit(1.2));
+        assert_eq!(hydro(&s).flow.pond_ramp_mm(), (1.0, 10_000.0));
+    }
+
+    /// The invariant behind the ramp: no cell can hold more than its own depression storage, so the
+    /// top of the ramp bounds every depth any snapshot of this world can show.
+    fn ramp_bounds_every_pond(media: &[u8], heights: &[u8], storms: &[u8]) -> Result<(), TestCaseError> {
+        let size = 8;
+        let mut b = flat_bundle(size, 1);
+        for (i, &m) in media.iter().enumerate() {
+            let medium = Medium::ALL[m as usize % Medium::ALL.len()];
+            let (x, y) = (i % size, i / size);
+            paint(&mut b, x, y, medium);
+            if medium == Medium::Roof {
+                build(&mut b, x, y, 3.0);
+            }
+        }
+        for (i, &h) in heights.iter().enumerate() {
+            b.ground_h[i] = h as f32 / 64.0;
+        }
+        let mut s = sim_of(&b);
+        let (lo, hi) = hydro(&s).flow.pond_ramp_mm();
+        prop_assert_eq!(lo, POND_RAMP_LO_MM);
+        prop_assert!(is_decade(hi), "{} is not a decade", hi);
+        for (t, &d) in storms.iter().enumerate() {
+            s.route_storm(d as f64 / 4.0);
+            let deepest = hydro(&s).ponded.iter().copied().fold(0.0, f64::max);
+            prop_assert!(deepest <= hi as f64, "storm {}: {} mm stands, over a ramp to {}", t, deepest, hi);
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(8)))]
+
+        #[test]
+        fn prop_pond_ramp_bounds_every_pond(
+            media in prop::collection::vec(any::<u8>(), 64),
+            heights in prop::collection::vec(any::<u8>(), 64),
+            storms in prop::collection::vec(any::<u8>(), 1..12),
+        ) {
+            ramp_bounds_every_pond(&media, &heights, &storms)?;
+        }
+    }
+
+    /// The regression sibling of `prop_pond_ramp_bounds_every_pond`: the world of
+    /// `water_balance_regression_every_medium`, whose storms fill and spill its depressions.
+    #[test]
+    fn pond_ramp_regression_every_medium() {
+        let media: Vec<u8> = (0..64).collect();
+        let heights: Vec<u8> = (0..64).map(|i| ((i % 8) * (i / 8)) as u8).collect();
+        ramp_bounds_every_pond(&media, &heights, &[0, 1, 40, 255, 3, 0, 200]).unwrap();
     }
 
     /// With `hydro.enabled` off there is no water tier at all, and the pre-G4 moisture update runs.

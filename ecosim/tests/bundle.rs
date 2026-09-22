@@ -192,6 +192,75 @@ fn a_bundle_run_writes_a_format_4_run_dir_that_check_reads() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Dig a sealed basin into a written bundle: a 3 m square of asphalt at a flat 1.3 m, in ground of
+/// the slope `write_bundle` lays down. Its lowest rim is the column to its west at 1.625 m, so the
+/// basin holds 325 mm of water and nothing else on this site holds any.
+fn dig_a_sealed_basin(dir: &Path) {
+    const FLOOR_M: f32 = 1.3;
+    let code = Medium::ALL.iter().position(|&k| k == Medium::Asphalt).unwrap() as u8;
+    let bytes = fs::read(dir.join("ground_h.f32")).unwrap();
+    let mut ground: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|&c| f32::from_le_bytes(c)).collect();
+    let mut medium = fs::read(dir.join("medium.u8")).unwrap();
+    for gy in 16..22 {
+        for gx in 14..20 {
+            ground[gx + GW * gy] = FLOOR_M;
+            medium[gx + GW * gy] = code;
+        }
+    }
+    fs::write(dir.join("ground_h.f32"), ground.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+    fs::write(dir.join("medium.u8"), &medium).unwrap();
+}
+
+/// Every snapshot's deepest standing water, in mm, over the run at `out`. `water.bin` is one u16 of
+/// tenths of a millimetre per ground cell (CLAUDE.md, the run directory contract).
+fn deepest_pond_mm(out: &Path, m: &Value) -> f64 {
+    let mut deepest = 0.0f64;
+    for t in m["snapshots"].as_array().unwrap() {
+        let snap = out.join(format!("snap_{:06}", t.as_u64().unwrap()));
+        let bytes = fs::read(snap.join("water.bin")).unwrap();
+        assert_eq!(bytes.len(), 2 * GW * GW, "water.bin is the ground grid");
+        for &c in bytes.as_chunks::<2>().0 {
+            deepest = deepest.max(u16::from_le_bytes(c) as f64 / 10.0);
+        }
+    }
+    deepest
+}
+
+/// Shot S10: `meta.json` publishes the ponded-depth ramp, and it is this ground's.
+///
+/// The eighth overlay arrived with the water tier, a shot after S2 published the palette, so a
+/// renderer had to invent both its hues and its scale -- and the scale is the half that is not
+/// cosmetic, because `water.bin` is in tenths of a millimetre and the depth worth calling "deep"
+/// is a fact about the site. The top of the ramp is the deepest water this ground can hold, rounded
+/// up to a decade: dig a basin that holds 325 mm into a site that otherwise holds none, and the run
+/// publishes a ramp to 1 m. **Then it is checked against the run's own snapshots**, which is the
+/// claim that matters to a renderer: no cell of any snapshot is deeper than the number the file
+/// gives, and some cell is wet, so the bound is not vacuous.
+#[test]
+#[cfg_attr(coverage, ignore = "a 4000-tick run on a 16 m world; runs in `cargo test`, not under llvm-cov")]
+fn the_published_water_ramp_is_this_grounds_and_bounds_its_ponds() {
+    let dir = tmp("bundle_ramp_src");
+    write_bundle(&dir);
+    dig_a_sealed_basin(&dir);
+    let b = Bundle::load(&dir).unwrap();
+    let (p, set) = bundle_params(&b);
+    let out = tmp("bundle_ramp_run");
+    let opts = RunOptions { format_version: BUNDLE_FORMAT_VERSION, bundle: Some(&b), ..Default::default() };
+    run_with(p, 7, 4_000, 500, &set, &out, opts).unwrap();
+
+    let m = meta(&out);
+    let water = m["overlays"].as_array().unwrap().iter().find(|r| r["name"] == "water").expect("a water row").clone();
+    assert_eq!(water["scale"]["lo"], 1.0, "a millimetre, ten quanta of water.bin");
+    assert_eq!(water["scale"]["hi"], 1000.0, "the 325 mm basin, rounded up to a decade");
+    assert_eq!(water["scale"]["unit"], "mm");
+    assert_eq!(water["scale"]["curve"], "log10");
+
+    let deepest = deepest_pond_mm(&out, &m);
+    assert!(deepest > 0.0, "the run stands water somewhere, or the bound below is vacuous");
+    assert!(deepest <= 1000.0, "{deepest} mm stands, over a published ramp to 1000 mm");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Rewrite `dir/bundle.json` with `latitude_deg` set to `lat`, leaving every other key as it was.
 fn set_latitude(dir: &Path, lat: f64) {
     let text = fs::read_to_string(dir.join("bundle.json")).unwrap();

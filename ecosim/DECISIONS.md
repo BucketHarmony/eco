@@ -1815,3 +1815,87 @@ documents its `CROWN_RADIUS_FRACTION`/`CROWN_BASE_FRACTION` as "the mean of that
 0.37 are the *medians* (the means are 0.3287 and 0.3851), and its comment that `params.bundle` reaches
 `meta.json` only when non-default — which `src/run.rs` carries too — has been stale since shot S2. Both are in
 `sweeps/shotS3/FINDINGS.md`.
+
+## Shot S8 — the Capitol with animals, past tick 2000
+
+**The row was an open question and it closes as one: the Capitol's grazer level is correct
+scaling, and its tree crash is drought in the establishment year rather than anything the animals
+do.** No code, default, invariant or committed file changed. The evidence is
+`sweeps/shotS8/FINDINGS.md`, every table of which is printed by `analyse.py` beside it from run
+directories the file's own commands rebuild.
+
+**Why nobody could tell before.** No run of a bundle world with animals had gone past tick 2000,
+so the only picture of one was `fixtures/capitol-animals-mini`, which ends at 2000 — and at tick
+2000 this run is at the bottom of a transient in every variable that matters. Trees are at 24,
+their minimum for the whole run. Hunters are at 28, against the 356 they settle at. Grazers are at
+9204 and climbing, on their way to a peak of 11348 near tick 4500. Reading any of those three as a
+steady state gives the wrong answer, and reading all three together gives "predation has failed".
+Carried to 20000 the same run ends with **2470 trees, 8347 grazers and 356 hunters**, and seeds 1,
+2 and 3 end with 4674, 4560 and 3861 trees.
+
+**Grazers: scaling.** Population is set per patch, so it tracks grazable area. At tick 10000 the
+Capitol carries 12.97 grazers per grassy patch and the noise strip carries 10.67, 12.44 and 12.05;
+the Capitol has 3.5–4.0× the strip's grassy patches and 3.7–4.8× its grazers. The kill rate is
+4.5–5.4 grazers per hunter per 1000 ticks on both worlds in every window, because
+`hunter.satiation` and not prey density limits it — which the row had already measured and was
+right about.
+
+**What the row's measurement could not see is that `grazer.start_count` and `hunter.start_count`
+are absolute, not per patch.** 300 grazers and 20 hunters are placed whatever the world's size, so
+a world with four times the patches starts four times emptier of both. The grazer refills its
+space in a few hundred ticks (`repro_energy` 70, `cooldown` 300); the hunter takes the whole run
+(`repro_energy` 75, `refractory` 2750). At tick 2000 the Capitol is at 152 grazers per hunter
+against the strip's 61–68 — the predator behind by about the area ratio, exactly as an absolute
+start count predicts — and by tick 20000 it is 34 against 14–31. **The overshoot is the transient
+of that mismatch, not a failure of the brake.** Left as it is: making the start counts densities
+would change every existing run and the row asked for an explanation, not a change.
+
+**Trees: drought, and the animals are not involved.** Drought is 91–98% of every tree death before
+tick 2500 in seven of the eight 20000-tick Capitol runs (the eighth has 32 early deaths in total
+and no crash). The controlled test is 32 replicates — one world, seed 42, `rng.stream` 1–16 per
+condition, so the weather distribution is matched and only `animals.enabled` differs: **9 of 16
+crash with animals and 8 of 16 without.** Severity tracks the establishment-window moisture
+minimum at r = −0.757; nine of the ten driest replicates lose more than half the cohort against
+eight of the other twenty-two.
+
+**The mechanism is the scene's own tree cohort.** Through tick 1000 every mature tree on the site
+is one of the 79 the bundle planted, because nothing sown in the run has reached
+`tree.mature_age_years` (0.25 years, so 1000 ticks) yet, and only mature trees seed. So the site's
+entire seed supply for its first year is one synchronous cohort standing on one profile, and a dry
+spell takes it down together: 79, 51, 27, 11, 8 mature trees, with germination following exactly —
+34, 32, 37, 31, 26 per 100 ticks, then 10, 1, 4, 3, 1. The recovery is the same mechanism
+forwards, and compounds: 8, 12, 13, 15, 19, 20, 40, 131, 551, 1637. **The noise strip cannot do
+this**, because it starts with `tree.initial_count = 12` at `initial_age_years = 0.125` and never
+builds a 300-tree first-year cohort over a seed supply of 79. The crash is a property of starting
+from a surveyed scene, not of the Capitol's size.
+
+**`hydro.initial_fill` is the other half and is deliberately not changed.** The default 0.5 starts
+every column at half its available water capacity and the site takes about 2500 ticks to fill, so
+year one is structurally the driest year of every run. Eight replicates at `initial_fill = 1.0`
+crash 2 of 8 against 9 of 16, median loss 11% against 61%, and median trees at tick 2500 of 811
+against 286. That measurement completes the explanation the row asked for. **Whether a garden site
+should begin at field capacity, at half of it, or at whatever the season implies is a question
+about what the model means by tick 0, and it is a human's to answer** — so nothing was retuned,
+`TUNING.md` gains no entry, and no default moved.
+
+**Two things this shot found and did not fix.**
+- **An animals-on Capitol run cannot pass `ecosim check`.** `max_10x` fails on hunters (max 362
+  against a limit of 280) and trees (2548 against 1620) because the invariant's anchors — animals
+  at 0.5 years, trees at 1.25 — land inside a transient that is 15000 ticks long on this world and
+  is over by tick 2000 on the strip. The assumption the invariant encodes is that the anchor tick
+  is past the initial transient, and on a bundle world with animals it is not. **Widening it is
+  forbidden and the row did not ask for it**; what the anchor should be is a judgement, not a
+  worker's call. `runtime` fails too, at 314.5 s against a 90 s cap.
+- **It is 10× slower than the animals-off reference run**, 314.5 s against 31.5 s, with 89.6% of
+  the time in the animal phase. Recorded in `PERF.md` under "The Capitol with animals (shot S8)".
+  This is why `just capitol` carries `animals.enabled=false` and should keep carrying it.
+
+**One methodological note worth keeping, because it would silently invalidate any repeat of this
+work.** `animals.enabled=false` skips the animal phase, which draws from the shared `ChaCha8Rng`,
+so an animals-off run **at the same seed gets different weather** — different storm ticks, not
+just different animals. Over ticks 1000–1500 `capitol-s42-animals-20k` got 36.3 mm of rain and
+`capitol-s42` got 100.3 mm, which alone would explain the whole difference between them.
+`runs/capitol-s42` is therefore not a control for `runs/capitol-s42-animals-20k` and was not used
+as one. `rng.stream` is the knob that makes a real control: it replays the same world with an
+independent dynamics stream, so replicates can be matched on weather distribution while differing
+in one parameter.

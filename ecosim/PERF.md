@@ -99,6 +99,20 @@ The animal phase costs about the same per grazer on every world: 0.31 µs per gr
 - **256×256 in 7.1 s, against 170.4 s with animals and a 90 s limit.** This was the point of the shot: a 256×256 garden run now finishes in a twelfth of the budget, so the world can keep growing.
 - The 256×256 run fails one invariant, `max_10x` (trees max 3444, limit 3340, margin −0.031), exactly as the animals-on 256×256 run in shot 15a failed check. It is a speed measurement and the shot's acceptance is the wall time; nothing was retuned to make it pass, since the shot did not ask for a tuning change (`sweeps/G0/FINDINGS.md`).
 
+## The Capitol with animals (shot S8)
+
+The numbers above are noise worlds. Shot S8 ran the committed Capitol bundle — 256×256 ecology columns over a 512×512 ground grid — with animals on, for 20000 ticks, which no run had done before.
+
+| run | wall time | ticks/s | animals share | `ecosim check` |
+|---|---|---|---|---|
+| Capitol, 20000 ticks, seed 42, animals **off** (`just capitol`) | 31.5 s | 635 | — | pass |
+| Capitol, 20000 ticks, seed 42, animals **on** | 314.5 s | 63.6 | 89.6% | fails `max_10x` and `runtime` |
+
+- **10× slower with animals**, and `--profile` charges 281.7 s of the 314.5 s to the animal phase. The run carries 8300–11300 grazers where the strip carries 2300–3000, which is the finding this file already has stated the other way round: the model's cost is set by the grazer count, not by the terrain size.
+- **314.5 s against the 90 s cap** is the third sighting of the same shape; the 256×256 noise world was 170.4 s in shot 15a and again in G0. A bundle world costs more than a noise world of the same dimensions because it carries four times the grazers, not because its ground grid is finer.
+- The `max_10x` failure is the anchor landing inside a transient, not a runaway: the tree anchor at 1.25 years is 162 because tick 5000 is still in the establishment-year trough, and the hunter anchor at 0.5 years is 28 because the hunter has barely begun its numerical response. `sweeps/shotS8/FINDINGS.md` has both, with the check output.
+- **This is why `just capitol` runs with `animals.enabled=false`.** An animals-on Capitol run is a deliberate act, not a CI job.
+
 ## The three largest hotspots
 
 These all sit inside the animal phase, which takes 76–93% of every run.

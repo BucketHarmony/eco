@@ -1647,3 +1647,24 @@ reason S1 gave and for one more: `ecoview` is frozen and this shot may not edit 
 **No animal is drawn.** Crowding is a patch field the simulator publishes, and this shot bands it;
 there is no grazer geometry in this viewer and this row did not ask for any. A picture of the
 crowding overlay is a map of where the animals are, not a picture of animals.
+
+## The CI round this shot needed twice, and why the second one is not a fix
+
+The first push, 66a7f85, came back **nine of ten jobs green** -- `ecoview-native`'s own gate among
+them -- and red on `ecoview`, which this shot's diff does not touch: twelve files, all under
+`ecoview-native/`, and the identical `ecoview` tree passed on the parent commit 84dbba6 thirty-seven
+minutes earlier (run 35681737824) and on the eleven runs before that.
+
+The failure asserted nothing. `tests/e2e/edit.spec.ts:346`, the first-person pick path, timed out at
+**3.0m** with `browser.newContext: Protocol error (Browser.setDownloadBehavior): Failed to find
+browser context`; 48 of the 49 e2e tests and all 116 unit tests passed. That is the runner lottery
+shot C2 measured and the operator wrote up on 2026-09-21: the same test, the same protocol error, the
+same 3.0m, and the same conclusion -- the browser dies because the runner is slow, and the protocol
+error is a symptom of the teardown rather than a cause.
+
+So the one fix attempt MASTER allows was spent on a push rather than a change. A worker cannot ask
+GitHub for a re-run -- `gh run rerun --failed` answers `Must have admin rights to Repository`, which
+the operator established on 2026-09-21 at 06:17 -- so the only re-run available is another commit,
+and this paragraph is it. **Nothing in the shot was changed to make a gate pass**, and nothing could
+have been: an `ecoview-native` shot may not edit `ecoview/` (MASTER.md, component isolation), so the
+alternative to recording the flake here was to record it in a BLOCKED file.

@@ -2,3 +2,8 @@
 # `-Zshare-generics` is nightly and is documented as broken on Windows, so it is not used.
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld.exe"
+
+# Shot V13: `cargo heartbeat` renders the fixed screenshot set into shots/heartbeat/ and exits
+# non-zero if any view fails to render or comes back blank (src/bin/heartbeat.rs).
+[alias]
+heartbeat = "run --release --bin heartbeat --"

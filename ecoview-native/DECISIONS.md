@@ -1430,3 +1430,94 @@ crowding --headless`.
 - An observation, not this shot's to act on: the same HUD shows 79 mature trees at tick 0 and 15
   mature trees (of 290) at tick 2000 on this fixture. That is the simulator's result, and the viewer
   draws it as published.
+
+## V13 the heartbeat is a binary behind a cargo alias
+
+Worked from the BACKLOG row; V13 has no prompt file. The row asks for "a recipe" and this component
+has no justfile, so the command is `cargo heartbeat`, an alias in `.cargo/config.toml` for
+`cargo run --release --bin heartbeat --`. A binary rather than a script because it has to decode
+PNGs and compare them, it has to run the same on Windows and on a Linux runner, and the component
+already has two helper binaries (`agent_loop`, `mesh_measure`) shaped this way. It is behind the
+`viewer` feature like the viewer itself, so the CI gate's `--no-default-features` build never
+compiles it. `cargo run --bin heartbeat` builds only the heartbeat, so the heartbeat builds the viewer
+first (`cargo build --release --bin ecoview-native`, a no-op when it is current) rather than
+photograph whatever stale binary is on disk. The one new dependency is `png`, pinned at the 0.18.1
+Bevy's own PNG support already locks, so no crate was added to the build.
+
+## V13 the fixed set: eight views, two poses, one tick
+
+The reference run `ecosim/runs/capitol-s42` at tick 10000 (21 September, the tick the project
+photographs most), and the Capitol bundle. `--run`, `--world`, `--tick` and `--out` move it; nothing
+else does, so two heartbeats are comparable. The run is gitignored and regenerable, and the heartbeat
+does not make it: a viewer command that starts a 40 s simulation to take a picture would hide a
+stale run behind a fresh one. When it is missing the heartbeat exits 2 and prints the command that
+writes it.
+
+- `iso-surface`, `iso-moisture`: the viewer's own overview pose, beauty pass on, HUD on. These are
+  the pictures a person recognises, and the HUD in them says which run and tick they are.
+- `top-no-run`, `top-surface`, `top-light`, `top-moisture`, `top-fertility`, `top-water`: straight
+  down over the centre, flat-lit (`--no-sky --no-ao`) so a top face carries its band and nothing
+  else, and with the HUD's text block off.
+
+`INDEX.md` beside the images is written by the same command: for each view the flags, what it shows,
+how you would tell it was wrong, and what was measured. It is regenerated, never edited.
+
+## V13 `--no-hud`
+
+A small viewer flag, not a feature: it hides the HUD's text block and keeps the legend and the
+timeline. On the first heartbeat the text covered the top 400 of 800 rows of every top-down map --
+the whole north third of the site. The iso views keep the HUD, so the set still carries the run,
+tick and scale lines in pictures.
+
+## V13 what the gate checks, and the frame that fooled the first version
+
+The row forbids a pixel-golden gate, so the checks are coarse: every view renders (the viewer exits 0
+and a PNG is there), is not blank (at least 32 colours at 5 bits a channel, no colour over 90%), and
+differs from the views it names by at least 2% of pixels at more than 8/255.
+
+The first version measured the whole frame, and a negative test broke it. A wrapper that appends
+`--frames 3` photographs the site before any mesh is ready. That frame is sky and HUD only, and it
+passed: the HUD's anti-aliased text alone gave it 131 colours with the sky at 51%, and the overlay's
+HUD lines made `iso-moisture` "differ" from `iso-surface` by 21%. The checks now look only at rows
+55% to 92% of the height, below the HUD text and above the legend. In that band the same broken frame
+is one colour at 100%, and the heartbeat exits 1 with 11 failures. The real set measures 247 to
+1569 colours with the commonest at 38-50%. The commonest colour in the top views is the black clear
+colour around the square site.
+
+The second weakness was also measured. Against `top-surface` alone, all four top-down overlays
+differ by the same 46.6-46.7%, because an overlay also hides the ground cover. A palette that drew
+every overlay alike would still pass. So each overlay also has to differ from the one before it:
+moisture from light by 25.0%, fertility from moisture by 34.2%, water from fertility by 46.3%. The
+run-loader check is `top-surface` against `top-no-run`: 21.1%.
+
+What it cannot catch, stated rather than implied: a palette that is wrong but still distinct, a
+tree in the wrong place, a field read from the wrong snapshot. Those are for the person looking at
+the pictures, which is what the row says the images are for.
+
+## V13 found by looking: the water legend's `(!)` is false
+
+`top-water`'s legend says `scale from this viewer's fallback: meta.json has no scale for ponded
+depth (!)`. The regenerated reference run's `meta.json` does carry it, as
+`overlays[water].scale = {lo 1, hi 10000, unit mm, curve log10}`, and has since S10. The viewer never
+reads that object: `overlay.rs` builds the water `Scale` from its own `WATER_RAMP_MM` every time. The
+numbers happen to agree, so the picture is right and only the claim about its source is wrong. It is
+not fixed here, because this shot is the heartbeat and the fix changes what an overlay reads. V12
+has to read `scale` objects for the three nutrients G13 publishes the way `water` does, and reading
+water's there is the natural place. Recorded so that row starts from it.
+
+## V13 the reference run was regenerated first
+
+`ecosim/runs/capitol-s42` on disk predated G5 (written 02:04 on 2026-09-22; G5 landed 14:15). It
+was moved to `runs/capitol-s42-preG5` and rewritten at `d57cd50` with the `capitol` recipe's flags
+under `runs/` (`--world worlds/capitol --seed 42 --ticks 20000 --set animals.enabled=false --set
+climate.rain_gradient=0`). The run took 39.3 s and `ecosim check` passed. Nothing under `ecosim/` was
+edited; `runs/` is gitignored.
+
+## V13 deterministic apart from one HUD number
+
+Three heartbeats on this machine gave the same measurements to the digit. The six top-down PNGs were
+byte-identical between runs. The two iso PNGs differed in 233 and 222 pixels, all inside one text
+line (rows 323-390, columns 324-354): the HUD's `remesh ... in N ms`, a wall-clock timing. That line
+is left alone because the timing is what it is for. The check band starts below it, so it cannot
+move a verdict. Warm, the whole set takes 15 s. The first build of the heartbeat took 11-13 minutes,
+because a new dependency rebuilt the viewer's tree.

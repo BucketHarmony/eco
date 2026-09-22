@@ -5,7 +5,7 @@
 //! Usage:
 //! ```text
 //! ecoview-native [--world DIR | --stress] [--run DIR] [--tick N] [--overlay NAME] [--no-cover]
-//!                [--no-water] [--eye X,Y,Z] [--look X,Y,Z] [--headless] [--frames N]
+//!                [--no-water] [--no-hud] [--eye X,Y,Z] [--look X,Y,Z] [--headless] [--frames N]
 //!                [--screenshot PATH]
 //!                [--bench SECS] [--port N] [--no-ao] [--no-sky] [--hour H] [--lat DEG]
 //!                [--day N | --date M-D] [--exposure auto|STOPS]
@@ -181,6 +181,9 @@ struct Args {
     /// `--exposure STOPS`: the eye's adaptation held by hand, in stops, or `None` for the measured
     /// one (shot V7). `--exposure auto` is the default and says so out loud.
     exposure: Option<f32>,
+    /// `--no-hud`: leave the text block out, keeping the legend and the timeline (shot V13). The
+    /// heartbeat's top-down maps are for reading the map, and the text covers a third of it.
+    hud: bool,
 }
 
 /// `X0,Y0,X1,Y1,ACTION[,MEDIUM]` in ground cells, inclusive. Fatal when it does not parse, for the
@@ -239,6 +242,7 @@ fn args() -> Args {
         lat: sky::DEFAULT_LATITUDE_DEG,
         day: None,
         exposure: None,
+        hud: true,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -316,6 +320,7 @@ fn args() -> Args {
             }
             "--no-ao" => a.ao = false,
             "--no-sky" => a.sky = false,
+            "--no-hud" => a.hud = false,
             "--hour" => {
                 a.hour = next().parse().unwrap_or(sky::DEFAULT_HOUR);
                 i += 1;
@@ -1389,7 +1394,7 @@ fn setup(
         SkyDome,
     ));
     // `AmbientLight` is a camera component in 0.19, not a resource, so it goes on the camera above.
-    spawn_hud(&mut commands);
+    spawn_hud(&mut commands, args.hud);
 }
 
 #[derive(Component)]
@@ -1416,8 +1421,13 @@ struct LegendLabel;
 /// V1 skipped the bar when the viewer opened with no run, which was right while a run could only
 /// arrive on the command line. A round trip can now grow one while the viewer is running, so the bar
 /// is always built and `hud` hides it until there is something to scrub (V5).
-fn spawn_hud(commands: &mut Commands) {
+fn spawn_hud(commands: &mut Commands, text: bool) {
     commands.spawn((
+        if text {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        },
         Text::new(""),
         TextFont {
             // 0.19 made this an enum: a bare f32 is no longer a font size.

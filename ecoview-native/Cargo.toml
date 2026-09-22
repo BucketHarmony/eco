@@ -13,11 +13,18 @@ name = "ecoview-native"
 path = "src/main.rs"
 required-features = ["viewer"]
 
+# `cargo heartbeat` (.cargo/config.toml): the fixed screenshot set, shot V13. It drives the viewer
+# as a command and decodes what it wrote, so it needs `png` and nothing else from the engine side.
+[[bin]]
+name = "heartbeat"
+path = "src/bin/heartbeat.rs"
+required-features = ["viewer"]
+
 # `viewer` carries every Bevy dependency, so the mesh golden test -- the only CI gate -- builds and
 # runs with `--no-default-features` and never compiles an engine or touches a GPU.
 [features]
 default = ["viewer"]
-viewer = ["dep:bevy", "dep:bevy_brp_extras"]
+viewer = ["dep:bevy", "dep:bevy_brp_extras", "dep:png"]
 # Dev-profile link speed only. Never in a shipped build (V0-spike.md, build item 1).
 dynamic_linking = ["bevy/dynamic_linking"]
 
@@ -38,6 +45,8 @@ bevy = { version = "=0.19.1", optional = true, default-features = false, feature
     "png",
 ] }
 bevy_brp_extras = { version = "=0.22.6", optional = true, default-features = false }
+# The version Bevy's own PNG support already locks, so the heartbeat adds no crate to the build.
+png = { version = "=0.18.1", optional = true }
 
 [profile.release]
 debug = false

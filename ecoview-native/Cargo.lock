@@ -2359,6 +2359,7 @@ dependencies = [
  "bevy",
  "bevy_brp_extras",
  "binary-greedy-meshing",
+ "png",
  "serde",
  "serde_json",
 ]

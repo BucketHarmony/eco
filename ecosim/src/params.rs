@@ -380,8 +380,18 @@ pub struct TreeParams {
     pub max_age_years: f32,
     /// Relative spread of per-tree lifespans around `max_age`.
     pub lifespan_jitter: f32,
-    /// Per-update death chance of a mature tree whose crown is overlapped by the canopy of ≥ 2 other trees.
+    /// Per-update death chance of a mature tree whose crown is at least `crowding_overlap` covered
+    /// by other live crowns (shot S11: the count of trunks this used to read is gone).
     pub crowding_mortality: f32,
+    /// Fraction of a mature tree's crown footprint that other crowns must cover before
+    /// `crowding_mortality` is rolled against it (shot S11).
+    ///
+    /// The quantity is [`Sim::crown_crowding`](crate::sim::Sim::crown_crowding): the same crowns
+    /// shot S3 published and the same mean-field combination [`Sim::crown_light`](crate::sim::Sim::crown_light) makes, so a tree
+    /// is judged at the scale of the crown it has (6–12 m across when mature) and not at the scale
+    /// of the 3×3 m stamp its canopy voxels shade. At 1.0 nothing but a completely buried crown is
+    /// ever at risk; at 0.0 every mature tree with a live neighbour anywhere is.
+    pub crowding_overlap: f32,
     /// Transpiration of one tree, millimetres per hour over its trunk column. An update takes
     /// `transpiration_mm_h × update_every × tick_hours` millimetres, so the cadence does not change
     /// a year's water use. It is charged to the trunk column alone, though a mature crown covers

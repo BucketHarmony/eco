@@ -360,6 +360,30 @@ fn crowding_off_cuts_to_its_manifest() {
     assert_manifest("s42-manifest-g4b-crowding-off.sha256", &got);
 }
 
+/// **Tree** crowding mortality at rate 0 (shot S11), which the test above is not about: its
+/// `pre_shot_10` turns off the two *animal* `disease` rates and leaves `tree.crowding_mortality` at
+/// the file's 0.02. This one turns the tree term off and nothing else.
+///
+/// The manifest was cut from the binary of the commit **before** S11, and S11 replaced the trunk
+/// count that decided tree crowding with a crown-overlap term. So this is the shot's rate-0
+/// identity: the new term is read outside the RNG draw, never inside it, and a run with the rate at
+/// 0 makes the same draws in the same order and writes the same bytes as the code that predates it.
+///
+/// It is deliberately **not** regenerable. Every other manifest in this file is rewritten by
+/// `ECOSIM_REGEN_MANIFEST=1`, and this one holds bytes that a later run of this code cannot produce
+/// again if it is wrong — a regeneration would quietly replace the evidence with the claim.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn tree_crowding_off_cuts_to_its_manifest() {
+    let dir = tmp("s42_tree_crowding_off");
+    let mut p = Params::load_default();
+    p.tree.crowding_mortality = 0.0;
+    run(p, 42, 20_000, 100, &[], &dir).unwrap();
+    let got = hash_run(&dir, |_, b| b);
+    assert_eq!(got.len(), 2 + 201 * 10 + 4);
+    assert_same_manifest(&read_manifest("s42-manifest-S11-tree-crowding-off.sha256"), &got);
+}
+
 /// Fire at rate 0: with `fire.base_rate=0` (and shots 10 and 11 switched off), seed 42 hashes to its
 /// own manifest once the trait additions and the fire columns, the `burning_ticks_left` patch field
 /// and the `state.bin` fire section are cut. So fire at rate 0 draws nothing and writes nothing but
@@ -577,15 +601,16 @@ fn fork_matches_the_uninterrupted_run_from_the_fork_tick_on() {
 /// `s42-manifest.sha256` taken before the re-cut) on the 201 `entities.json` lines and on nothing
 /// else. The crown a tree has is published, not consumed — no field moves, no RNG draw is made and
 /// the series does not shift — and this is that claim as bytes rather than as prose.
+///
+/// The second half of the pair is `s42-manifest-preS11.sha256` since shot S11, not the live
+/// manifest. S11 made the mortality rule read those crowns, so the live manifest has moved on every
+/// line and the S3 claim is no longer a statement about it. `preS11` is a byte copy of the manifest
+/// S3 cut, so the claim is the same two files it always compared — the historical pair is pinned
+/// rather than retired, which is what `the_pre_conversion_manifests_are_kept_as_history` does for
+/// the older chain.
 #[test]
 fn the_crown_fields_changed_only_entities_json() {
-    // Under `ECOSIM_REGEN_MANIFEST=1` the manifest this reads is being rewritten by
-    // `fresh_s42_matches_committed_manifest` in the same binary, and the two race. Every ordinary
-    // run compares two committed files, which is what the claim is about.
-    if regenerating() {
-        return;
-    }
-    let (before, after) = (read_manifest("s42-manifest-preS3.sha256"), read_manifest("s42-manifest.sha256"));
+    let (before, after) = (read_manifest("s42-manifest-preS3.sha256"), read_manifest("s42-manifest-preS11.sha256"));
     let keys: Vec<&String> = before.keys().collect();
     assert_eq!(keys, after.keys().collect::<Vec<&String>>(), "the file set moved");
     let differing: Vec<&String> = keys.iter().copied().filter(|k| before[*k] != after[*k]).collect();

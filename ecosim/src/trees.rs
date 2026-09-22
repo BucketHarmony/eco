@@ -173,33 +173,59 @@ impl Sim {
         self.refresh_canopy_columns(x, y);
     }
 
-    /// Other live trees whose canopy lies over any column of tree `i`'s mature crown (the 3×3
-    /// around its trunk): mature trees with trunks within Chebyshev 2, young trees within 1.
-    pub fn crowding(&self, i: usize) -> usize {
-        let (x, y) = (self.trees[i].x as i32, self.trees[i].y as i32);
+    /// How much of tree `i`'s crown footprint other live crowns cover, in [0, 1] (shot S11).
+    ///
+    /// **This is the quantity that decides tree-on-tree competition, and it replaced a count.**
+    /// Until S11 the rule counted other *trunks* in a 5 × 5 m window — mature ones within Chebyshev
+    /// 2, young ones within 1 — which is the footprint the canopy *voxels* shade. Shot S3 measured
+    /// what the trees actually carry: a median mature crown radius of 3.19 m, a maximum of 6.00 m,
+    /// and a reference run whose crowns summed to 266% of the site while that window saw almost
+    /// nothing. A rule at 5 m cannot see a canopy three deep, so the trees competed at one scale
+    /// and shaded each other at another.
+    ///
+    /// Each neighbour covers [`overlap_fraction`] of this crown's disc, and the open share is the
+    /// product of what each one leaves: `1 − Π(1 − f_j)`. That is the same mean-field independence
+    /// [`Sim::crown_light`](crate::sim::Sim::crown_light) assumes, for the same reason and with the
+    /// same error — exact for one
+    /// neighbour and for neighbours that do not overlap each other, and too crowded when several
+    /// cover the same side. Stage does not appear: a neighbour's weight is the crown its age gives
+    /// it, so a sapling (radius 0, from a height of 0) contributes exactly nothing without being
+    /// named as a special case, and the dead `Stage::Young => 1` arm of the old rule — unreachable
+    /// in any run, because `min_spacing = 2` forbids a trunk at Chebyshev 1 — is gone rather than
+    /// repaired.
+    ///
+    /// It draws nothing from the RNG and writes no field.
+    ///
+    /// `crowns` is the [`Sim::crowns`] of the stand as it stood when the update pass began, shared
+    /// by every tree the pass judges, so all of them are measured against one instant. A tree the
+    /// pass has planted since is not in it and is skipped — which is exact rather than approximate,
+    /// because `Sim::try_seed` plants at age 0, a tree of age 0 is 0 m tall and a crown of radius
+    /// 0 contributes nothing to any overlap. A tree the pass has **killed** is not skipped by
+    /// `crowns` but by `trunk_at`, which `Sim::kill_tree` clears: the gap opens immediately, in
+    /// the same pass, exactly as it does for light.
+    pub fn crown_crowding(&self, i: usize, crowns: &Crowns) -> f32 {
+        let me = &crowns.of[i];
         let d = self.world.dims;
-        let mut n = 0;
-        for dy in -2..=2i32 {
-            for dx in -2..=2i32 {
-                let (tx, ty) = (x + dx, y + dy);
-                if (dx == 0 && dy == 0) || !d.in_bounds(tx, ty) {
+        let (tx, ty) = (me.x.floor() as i32, me.y.floor() as i32);
+        // Nothing whose trunk is outside this box can reach the footprint.
+        let reach = (me.radius + crowns.max_radius).ceil().max(0.0) as i32;
+        let mut open = 1.0f32;
+        for ny in ty - reach..=ty + reach {
+            for nx in tx - reach..=tx + reach {
+                if !d.in_bounds(nx, ny) {
                     continue;
                 }
-                let ti = self.trunk_at[d.cidx(tx as usize, ty as usize)];
-                if ti == NO_TREE {
+                let j = self.trunk_at[d.cidx(nx as usize, ny as usize)] as usize;
+                if j == NO_TREE as usize || j == i || j >= crowns.of.len() {
                     continue;
                 }
-                let reach = match self.tree_stage(&self.trees[ti as usize]) {
-                    Stage::Sapling => continue,
-                    Stage::Young => 1,
-                    Stage::Mature => 2,
-                };
-                if dx.abs().max(dy.abs()) <= reach {
-                    n += 1;
+                let f = overlap_fraction(me, &crowns.of[j]);
+                if f > 0.0 {
+                    open *= 1.0 - f;
                 }
             }
         }
-        n
+        (1.0 - open).clamp(0.0, 1.0)
     }
 
     /// Germination probability on a soil column: f_L(surface light)·f_M(moisture)·f_T(patch temp).
@@ -231,6 +257,10 @@ impl Sim {
     pub fn update_trees(&mut self) {
         let tp = self.params.tree.clone();
         let ages = self.params.tree_ages();
+        // The stand as the pass found it: one crown per tree, shared by every judgement below.
+        // `crowding_mortality = 0` is the one setting that reads no crown at all, and it must not
+        // pay for one either — nor may it touch the RNG (the rate-0 identity, tests/sweep.rs).
+        let crowns = (tp.crowding_mortality > 0.0).then(|| self.crowns());
         let n = self.trees.len();
         for i in 0..n {
             if !self.trees[i].alive {
@@ -256,10 +286,14 @@ impl Sim {
                 continue;
             }
             let after = self.tree_stage(&self.trees[i]);
-            // Canopy self-thinning: one draw, only for a mature tree under ≥ 2 other canopies.
+            // Canopy self-thinning: one draw, only for a mature tree whose crown is at least
+            // `crowding_overlap` covered by its neighbours' crowns (shot S11). The rate check stays
+            // outside the measurement and outside the draw, so at `crowding_mortality = 0` this
+            // makes no draw, reads no crown and leaves the random stream exactly where it was.
             if after == Stage::Mature
                 && tp.crowding_mortality > 0.0
-                && self.crowding(i) >= 2
+                && self.crown_crowding(i, crowns.as_ref().expect("built when the rate is above 0"))
+                    >= tp.crowding_overlap
                 && self.rng.gen::<f32>() < tp.crowding_mortality
             {
                 self.kill_tree(i, "crowded");
@@ -527,38 +561,43 @@ mod tests {
     }
 
     /// Columns a tree's canopy lies over: the 3x3 around a mature trunk, the trunk column of a young one.
-    fn canopy_columns(sim: &Sim, t: &Tree) -> Vec<(i32, i32)> {
-        let (x, y) = (t.x as i32, t.y as i32);
-        match sim.tree_stage(t) {
-            Stage::Sapling => vec![],
-            Stage::Young => vec![(x, y)],
-            Stage::Mature => (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (x + dx, y + dy))).collect(),
-        }
-    }
-
-    /// `crowding` equals a brute-force count: the other live trees whose canopy columns meet the
-    /// 3x3 crown of tree `i`. Planted trees keep `lifespan` within `max_age · (1 ± lifespan_jitter)`.
+    /// `crown_crowding` equals a brute force over **every** live tree in the world, with no search
+    /// box at all: `1 − Π(1 − overlap_fraction)`. The box is the only thing the shipped version does
+    /// differently, so this is the test that the box never cuts off a neighbour that reaches.
+    /// Planted trees keep `lifespan` within `max_age · (1 ± lifespan_jitter)`.
+    ///
+    /// The comparison has a tolerance because the two multiply the same factors in different orders
+    /// — column-scan order against tree-index order — and IEEE multiplication is not associative.
     fn crowding_matches_brute_force(plants: &[(usize, usize, u32)], jitter: f32) -> Result<(), TestCaseError> {
         let mut sim = bare_sim();
         sim.params.tree.lifespan_jitter = jitter;
         for &(x, y, age) in plants {
-            if sim.spacing_ok(x as i32, y as i32) {
+            if sim.world.is_soil(x as i32, y as i32) && sim.spacing_ok(x as i32, y as i32) {
                 sim.plant_tree(x, y, age);
             }
         }
         let mean = sim.params.tree_ages().max as f32;
+        let crowns = sim.crowns();
         for (i, t) in sim.trees.iter().enumerate() {
             let (lo, hi) = ((mean * (1.0 - jitter)).floor() as u32, (mean * (1.0 + jitter)).ceil() as u32);
             prop_assert!((lo..=hi).contains(&t.lifespan), "lifespan {} outside [{}, {}]", t.lifespan, lo, hi);
-            let crown: Vec<(i32, i32)> =
-                (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (t.x as i32 + dx, t.y as i32 + dy))).collect();
-            let want = sim
-                .trees
-                .iter()
-                .enumerate()
-                .filter(|&(j, o)| j != i && o.alive && canopy_columns(&sim, o).iter().any(|c| crown.contains(c)))
-                .count();
-            prop_assert_eq!(sim.crowding(i), want, "tree {} at ({}, {})", i, t.x, t.y);
+            let me = &crowns.of[i];
+            let mut open = 1.0f32;
+            for (j, o) in sim.trees.iter().enumerate() {
+                if j != i && o.alive {
+                    open *= 1.0 - overlap_fraction(me, &crowns.of[j]);
+                }
+            }
+            let (got, want) = (sim.crown_crowding(i, &crowns), (1.0 - open).clamp(0.0, 1.0));
+            prop_assert!(
+                (got - want).abs() <= 1e-5,
+                "tree {} at ({}, {}): {} against a brute force over the whole world of {}",
+                i,
+                t.x,
+                t.y,
+                got,
+                want
+            );
         }
         Ok(())
     }
@@ -567,7 +606,7 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(crate::cases(32)))]
 
         #[test]
-        fn prop_crowding_matches_brute_force(
+        fn prop_crown_crowding_matches_brute_force(
             plants in prop::collection::vec((0..16usize, 0..16usize, 0u32..1500), 1..60),
             jitter in 0.0f32..=0.9,
         ) {
@@ -592,12 +631,67 @@ mod tests {
 
     #[test]
     fn crowding_regression_row_of_mature_and_young_trees() {
-        // Mature at x = 10, 12, 14 (spacing 2) and a young tree at 13: the middle mature tree has
-        // three neighbours, the young one is under two canopies.
+        // Mature at x = 10, 12, 14 (spacing 2) and a young tree at 13: under the old trunk count
+        // the middle mature tree had three neighbours and the young one none, because a young
+        // neighbour only ever counted at Chebyshev 1 and `min_spacing = 2` forbids that. Under the
+        // crown rule the young tree is a 3.1 m crown among 11.5 m ones and is counted by its size,
+        // which is the arm this shot deleted rather than repaired.
         let plants = [(10, 10, 2000), (12, 10, 2000), (14, 10, 2000), (13, 12, 600), (5, 5, 0)];
         crowding_matches_brute_force(&plants, 0.2).unwrap();
     }
 
+    /// The scale change, as one arrangement: two mature trees 4 m apart crowd each other now and
+    /// did not before.
+    ///
+    /// The old rule counted trunks within Chebyshev 2 and needed **two** of them, so a pair at 4 m
+    /// was invisible to it twice over — too far, and too few. Their crowns are 3.45 m in radius at
+    /// this age, so each covers a quarter of the other, and a third tree at 4 m on the other side
+    /// takes the middle one past half. That is the whole of the shot in one picture: the trees
+    /// compete at the size of what they carry, not at the size of the voxel stamp they shade.
+    #[test]
+    fn crowns_meet_at_four_metres_where_the_trunk_count_saw_nothing() {
+        let mut sim = bare_sim();
+        let crowns = |sim: &Sim| {
+            let c = sim.crowns();
+            (0..sim.trees.len()).map(|i| sim.crown_crowding(i, &c)).collect::<Vec<f32>>()
+        };
+        sim.plant_tree(10, 10, 2000);
+        assert_eq!(crowns(&sim), [0.0], "a lone tree is not crowded by anybody");
+        sim.plant_tree(14, 10, 2000);
+        let pair = crowns(&sim);
+        assert_eq!(pair[0], pair[1], "the pair is symmetric");
+        assert!((0.2..0.35).contains(&pair[0]), "a neighbour 4 m away covers {} of the crown", pair[0]);
+        sim.plant_tree(6, 10, 2000);
+        let row = crowns(&sim);
+        assert!(row[0] > 0.5, "the middle tree of three is over half covered: {}", row[0]);
+        assert!(row[1] < 0.5 && row[2] < 0.5, "the outer two are not: {row:?}");
+        // The old rule's answer to the same arrangement, for the record: no trunk is within
+        // Chebyshev 2 of another, so it counted 0 for every one of the three.
+        for (i, t) in sim.trees.iter().enumerate() {
+            let near = sim
+                .trees
+                .iter()
+                .enumerate()
+                .filter(|&(j, o)| {
+                    j != i
+                        && o.alive
+                        && (i32::from(o.x) - i32::from(t.x)).abs().max((i32::from(o.y) - i32::from(t.y)).abs()) <= 2
+                })
+                .count();
+            assert_eq!(near, 0, "tree {i} had a trunk within Chebyshev 2");
+        }
+    }
+
+    /// Self-thinning takes the crowded trees and leaves the one with room, the gap it opens is the
+    /// gap a death opens, and at rate 0 nothing happens at all.
+    ///
+    /// The arrangement is the old test's — three mature trees in a row at x = 10, 12, 14, the
+    /// closest `min_spacing` allows — and the verdict has moved, which is the shot. Their crowns
+    /// are 3.45 m in radius, so at 2 m apart each pair overlaps by about 0.63 and every one of the
+    /// three is over `crowding_overlap` where the old trunk count let the outer two through. The
+    /// pass thins in index order and reads the live world as it goes, exactly as the old rule did:
+    /// tree 0 goes, then tree 1 (still next to tree 2), and tree 2 is left standing alone. A row
+    /// this tight is not a stand, it is one tree's worth of room.
     #[test]
     fn crowded_mature_tree_thins_and_lone_ones_survive() {
         let mut sim = bare_sim();
@@ -606,13 +700,16 @@ mod tests {
         for x in [10, 12, 14] {
             sim.plant_tree(x, 10, 2000);
         }
-        // Tree 0 has one neighbour; tree 1 two (dies); after that, tree 2 has none.
         sim.update_trees();
         let alive: Vec<bool> = sim.trees.iter().map(|t| t.alive).collect();
-        assert_eq!(alive, [true, false, true]);
-        assert_eq!(sim.patches[patch_of(12, 10)].detritus, sim.params.tree.death_detritus);
+        assert_eq!(alive, [false, false, true]);
+        // Both dead trunks stand in the same patch, so it gets two trees' worth of detritus.
+        assert_eq!(sim.patches[patch_of(12, 10)].detritus, 2.0 * sim.params.tree.death_detritus);
         assert_eq!(sim.world.surface_light(cidx(12, 10)), 255, "the gap over the dead trunk opens");
-        // With mortality 0 nothing thins.
+        // And the survivor is stable: a second update, with nobody left to crowd it, kills nothing.
+        sim.update_trees();
+        assert_eq!(sim.trees.iter().map(|t| t.alive).collect::<Vec<bool>>(), [false, false, true]);
+        // With mortality 0 nothing thins — no draw is made and no crown is even measured.
         let mut sim = bare_sim();
         sim.params.tree.crowding_mortality = 0.0;
         sim.moisture.fill(200.0);
@@ -621,6 +718,32 @@ mod tests {
         }
         sim.update_trees();
         assert!(sim.trees.iter().all(|t| t.alive));
+    }
+
+    /// `crowding_overlap` is the whole of the rule's severity, read on one pair 4 m apart whose
+    /// crowns cover about 0.27 of each other.
+    ///
+    /// Above that the pair is left alone; below it the first tree goes and the second, now with
+    /// nothing over it, stays. At 0 even that survivor dies, because a crown covered by nothing at
+    /// all still satisfies `0 >= 0` — the degenerate end of the dial, recorded rather than
+    /// special-cased, since a rule that kills isolated trees is not a setting anyone wants. The
+    /// shipped default sits above the pair and is a tuning choice (TUNING.md, shot S11).
+    #[test]
+    fn the_overlap_threshold_is_the_severity_dial() {
+        let pair = |overlap: f32| {
+            let mut sim = bare_sim();
+            sim.params.tree.crowding_mortality = 1.0;
+            sim.params.tree.crowding_overlap = overlap;
+            sim.moisture.fill(200.0);
+            for x in [10, 14] {
+                sim.plant_tree(x, 10, 2000);
+            }
+            sim.update_trees();
+            sim.trees.iter().filter(|t| t.alive).count()
+        };
+        assert_eq!(pair(0.5), 2, "0.27 of a crown is under the default, so neither is at risk");
+        assert_eq!(pair(0.2), 1, "below it the first goes and the second is then uncrowded");
+        assert_eq!(pair(0.0), 0, "at 0 an uncrowded tree is at risk too");
     }
 
     #[test]

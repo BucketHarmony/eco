@@ -712,3 +712,40 @@ only from `Sim::crowns`, which is called only by the snapshot writer. The sweep 
 every `check` margin is identical to four decimal places at all four radii, which is the sweep
 reporting the absence of a mechanism rather than the shape of one. What the radius does move is the
 published `crown_light`, and that table is there too.
+
+## Shot S11 — the crown term
+
+One new key, `tree.crowding_overlap`, and **no changed default**: `tree.crowding_mortality` stays at
+0.02 and `tree.min_spacing` stays at 2. What changed is the quantity the mortality is rolled
+against, not the rate or the planting rule, so the one number to defend is the threshold. This does
+change the ecology — unlike S3 — and the before/after of every reference run is in
+`sweeps/shotS11/FINDINGS.md`.
+
+The BACKLOG row is the specification, and the line that forced the key is: "*make `crowding` (or a
+replacement mortality term) read the crowns S3 already computes — `overlap_fraction` is exactly the
+quantity wanted*". A fraction of a crown's disc needs a threshold to be a rule, and CLAUDE.md's "all
+species and tuning parameters live in `params.toml`" leaves nowhere else to put it.
+
+| Parameter | Before | After | Kind | Why, and the line that forced it |
+|---|---|---|---|---|
+| `tree.crowding_overlap` | — (did not exist; the trunk count had no threshold, one neighbour was enough) | 0.55 | new, calibrated | Just above the 95th percentile (0.471) and just below the maximum (0.569) of `crown_crowding` over the Capitol's own 79 surveyed trees at tick 0: 2 of 79 at risk on the day the run opens, 77 not. The row: "the site is drought-limited first and a retune that ignores water will chase the wrong number" — so the value was calibrated against the real stand, not fitted to a population target. |
+| `tree.crowding_mortality` | 0.02 | 0.02 | **not touched** | The shot changed what is measured, not how hard the measurement kills. It remains the rate-0 off switch, pinned by `tests/data/s42-manifest-S11-tree-crowding-off.sha256`. |
+| `tree.min_spacing` | 2 | 2 | **not touched** | It gates planting, not competition (and is why the deleted `Stage::Young => 1` arm could never fire). Retiring it changes how the stand is seeded; the row asked for a competition term. |
+
+**The acceptance lines that constrained the value.** `ecosim check` on the Capitol reference run is
+what rejected the alternatives:
+
+- **0.25** fails twice — `no species exceeds 10x its anchor count` (`trees max=964 limit=720`) and
+  `no tree on a roof or on more than half its ground cells sealed, >= 80% on none` at 66.67%. The
+  stand collapses to 12 trees and 147 stems/ha.
+- **0.50** passes, but leaves `min trees=19` and the sealed-ground line at 80.28%, a quarter-point
+  over its floor.
+- **0.55** passes every line on all five reference runs, with the sealed-ground line at 88.59% and
+  `mature trees at 2.5 years` at 295 (Capitol) and 92–493 (strips), against a floor of 35.
+
+**What the sweep could not settle, stated plainly.** Eight RNG streams per condition put the
+within-condition spread far above every between-condition difference (crown cover 0.10–3.20 across
+the crown conditions), and the medians are not monotone in the threshold. The level of 0.55 rests on
+the tick-0 calibration above; the sweep's role was to show the term bites in the right direction
+(crowded rises from a median 34.7% of tree deaths to 46–65%) and does not run away (no replicate
+extinguished the trees). Both tables are in `sweeps/shotS11/FINDINGS.md`.

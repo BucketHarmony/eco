@@ -1899,3 +1899,85 @@ just different animals. Over ticks 1000–1500 `capitol-s42-animals-20k` got 36.
 as one. `rng.stream` is the knob that makes a real control: it replays the same world with an
 independent dynamics stream, so replicates can be matched on weather distribution while differing
 in one parameter.
+
+## Shot S11 — the crowns decide
+
+**The trunk count is gone and the crown decides.** `Sim::crowding` counted other trunks in a 5×5 m
+window and killed a mature tree that had any; the crowns shot S3 published are 6–12 m across, so
+the stand advertised a canopy and competed as poles. `Sim::crown_crowding` replaces it: every
+neighbour's `overlap_fraction` of *this* tree's disc, combined as `1 − Π(1 − f_j)`, against the new
+`tree.crowding_overlap`. The measurements are in `sweeps/shotS11/FINDINGS.md`, the parameter's
+calibration in `TUNING.md`.
+
+**The mortality keeps its shape; only the measured quantity changed.** A threshold plus a flat
+per-update probability was already the rule, and `tree.crowding_mortality = 0.02` still means what
+it meant. A continuous form — mortality rising with the covered share — was considered and
+rejected: it would have folded two decisions (how much cover is too much, and how hard that kills)
+into one number, and it would have destroyed the rate-0 identity that
+`tree_crowding_off_cuts_to_its_manifest` pins. The shot's claim is about *what* competition
+measures, and keeping everything else fixed is what makes the before/after readable.
+
+**`1 − Π(1 − f_j)` is a mean-field combination and is wrong in the same way `crown_light` is
+wrong.** It treats neighbours' crowns as independently placed over this crown's disc, so two
+neighbours that cover the same half of it are counted as covering more than half. It is exact for
+one neighbour and an over-estimate for several. This shot uses the same approximation deliberately,
+because the alternative — a real union of discs — is a second geometry kernel to maintain, and
+because a term that is calibrated against the site's own stand absorbs a constant bias into the
+threshold.
+
+**`Crowns` is built once per tree-update pass, and that makes the pass exact rather than
+approximate.** Every judgement in one pass reads the same stand, as the pass found it. Two hazards
+were checked rather than assumed: a tree killed earlier in the pass is gone from `trunk_at`, which
+is what the search reads, so its crown cannot shade anyone; and a tree *planted* during the pass
+has age 0, hence height 0, hence radius 0, so skipping indices past `crowns.of.len()` discards
+nothing that could have overlapped. The pass therefore never reads a crown that does not exist and
+never counts a stale one.
+
+**The `Stage::Young => 1` arm was deleted, not repaired.** `tree.min_spacing = 2` makes
+`spacing_ok` reject any trunk within Chebyshev 1, and both production planting paths are guarded by
+it, so no run could ever place a young neighbour where that arm would see it: it was reachable only
+from unit tests that plant without the guard. The BACKLOG row asked to "fix or delete the dead
+`Young` arm rather than leaving a branch that reads as live", and deleting it is the honest half —
+the crown term has no stage table at all, because a crown's radius already carries the tree's age.
+
+**`tree.min_spacing = 2` stays.** It gates *planting*, not competition. Retiring it is a change to
+how the stand is seeded, with its own before/after to measure, and the row asked for a competition
+term. The doc comment on `crown_crowding` records the connection so the next reader does not have
+to rediscover why the old arm was dead.
+
+**S3's identity claim was re-pinned, not weakened.** `the_crown_fields_changed_only_entities_json`
+asserted that the crown fields moved nothing but `entities.json`; that is still true of shot S3 and
+false of the repository's current head, because S11 is exactly the shot that made the crown decide.
+It now compares `tests/data/s42-manifest-preS3.sha256` against the new, frozen
+`tests/data/s42-manifest-preS11.sha256` (a byte copy of the pre-shot `s42-manifest.sha256`), so it
+is a claim about history that no later regeneration can quietly rewrite. Its
+`if regenerating() { return; }` guard came off for the same reason.
+
+**`the_crown_changes_only_what_it_publishes` became
+`the_crown_decides_only_through_crowding`.** Deleting it would have dropped the coverage; keeping
+it would have asserted something false. It now asserts both halves: with `crowding_mortality = 0` a
+change to `tree.crown_radius_frac` still moves only `meta.json` and `entities.json`, and at the
+shipped rate the same change moves `series.csv`, `events.csv` and `state.bin`. The second half is
+the shot's whole claim, in one assertion.
+
+**The rate-0 anchor was cut before the behaviour changed.** `s42-manifest-S11-tree-crowding-off`
+was hashed from the *parent commit's* binary at `crowding_mortality = 0`, and
+`tree_crowding_off_cuts_to_its_manifest` reads it with `assert_same_manifest`, which does not
+regenerate. So the identity is evidence rather than a restatement: if the crown term ever starts
+drawing from the RNG or writing a field at rate 0, the test fails against bytes that predate it.
+
+**Regenerated, and why each was unavoidable.** `fixtures/capitol-mini` and
+`fixtures/capitol-animals-mini` are runs of a changed ecology; `s42-manifest.sha256` and the five
+`s42-manifest-g4b-*.sha256` history manifests are hashes of the same; `fixtures/s42-mini-v2`
+carries `params` in its `meta.json` and so gains the new key. `tests/bundle.rs`'s pinned counts
+moved with the fixtures — grazers at tick 2000 from 9204 to 9169, the busiest patch from 95 to 70 —
+and the assertions were rewritten to keep asserting the *ratio* they were about (the busiest patch
+is still more than double `scale_top`) rather than the digits.
+
+**One golden line was set by hand, and it is recorded here because it is the kind of thing that
+should not pass unremarked.** `tests/data/s42-check.txt` holds `ecosim check`'s report for the
+reference run. Regenerating it under `cargo test` wrote `FAIL run time … 106890 ms`, because
+eighteen full-length sims were running in parallel on the same machine; the comparison ignores that
+line's numbers (it is matched by name), but a golden that reads FAIL misleads every future reader.
+The line was replaced with the `PASS … 64782 ms` a standalone run of the same seed produces. No
+other line in the file was touched.

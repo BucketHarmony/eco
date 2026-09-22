@@ -439,7 +439,8 @@ fn the_animals_fixture_carries_what_an_animals_off_run_cannot() {
     assert_eq!((g0, h0), (300, 20), "the tier is populated at the first snapshot, not only later");
     assert_eq!(f0, g0 + h0, "every animal position at tick 0 is a JSON float");
     let (g, h, floats, per_patch) = animals_of(&fixture.join("snap_002000"));
-    assert_eq!((g, h), (9204, 28), "the committed run's animals at tick 2000");
+    // Shot S11 re-cut this fixture: (9204, 28) was S1's count, before tree crowding read crowns.
+    assert_eq!((g, h), (9169, 28), "the committed run's animals at tick 2000");
     assert_eq!(floats, g + h, "every animal position at tick 2000 is a JSON float");
 
     // (3) The crowding an overlay has to survive. A reader that takes the top of its crowding
@@ -447,8 +448,11 @@ fn the_animals_fixture_carries_what_an_animals_off_run_cannot() {
     // run reaches, and the saturated patches are exactly the ones such an overlay exists to show.
     let scale_top = 2 * m["params"]["disease"]["grazer_threshold"].as_u64().unwrap() as u32;
     let busiest = *per_patch.iter().max().unwrap();
-    assert_eq!((scale_top, busiest), (32, 95));
-    assert_eq!(per_patch.iter().filter(|&&n| n >= scale_top).count(), 5, "patches at or over the scale top");
+    // 95 before the S11 re-cut; the point of the assertion is the ratio to `scale_top`, which is
+    // still more than double it, and not the digits.
+    assert_eq!((scale_top, busiest), (32, 70));
+    assert!(busiest > 2 * scale_top, "the busiest patch is far over a scale built from {scale_top}");
+    assert_eq!(per_patch.iter().filter(|&&n| n >= scale_top).count(), 7, "patches at or over the scale top");
 
     // The older fixture is untouched: `capitol-mini` still has no animal in it. This one is an
     // addition and not a flip, because flipping it would move every pixel test that reads it.

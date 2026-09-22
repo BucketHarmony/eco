@@ -207,6 +207,16 @@ mature_age_years = 0.25
 max_age_years = 1.5
 lifespan_jitter = 0.2
 crowding_mortality = 0.02
+# How much of a mature tree's crown other crowns must cover before the roll above is made (shot
+# S11). It replaces a count of trunks within Chebyshev 2 -- a 5 m window, on a species whose mature
+# crown is 6-12 m across, which is why the Capitol reference run ended at 623 stems a hectare with
+# its crowns covering 266% of the site while the mortality term could not see it (sweeps/shotS3).
+# 0.55 sits just above the 95th percentile (0.471) of the crown coverage of the Capitol's own 81
+# surveyed trees, so the arrangement a real site carries is not condemned by the rule that judges
+# what grows on it: exactly one of the 79 planted at tick 0 is at risk. It is a tuning choice and
+# not a measurement -- see TUNING.md and sweeps/shotS11/FINDINGS.md, shot S11, for the runs behind
+# it, for what the other candidates did, and for why the reference run alone cannot settle it.
+crowding_overlap = 0.55
 # Transpiration per hour over the trunk column (shot G4b: was 50 units of the 0–255 index every 50
 # ticks, which came to 2352 mm a year). 0.0342 mm/h is 300 mm a year, the low end of the published
 # range for an open-grown temperate deciduous tree, chosen low because the draw is charged to one

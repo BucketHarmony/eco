@@ -313,6 +313,36 @@ fn forced_grazer_extinction_on_the_strip_runs_to_the_end() {
     );
 }
 
+/// Forced extinction by crowding (shot S11): `tree.crowding_overlap=0` makes every mature tree's
+/// covered share reach the threshold — `0.0 >= 0.0`, so even a tree whose crown nothing touches
+/// fails the test — and `tree.crowding_mortality=1.0` kills every one of them at its first update
+/// past `mature_age_years`. Only mature trees seed, so the stand loses its seed supply as soon as
+/// the starting cohort matures and the species is gone. Fire is off so the cause is unambiguous.
+/// The run still completes 20000 ticks with valid snapshots, and `ecosim stats` names `crowded`.
+#[test]
+fn forced_tree_extinction_by_crowding_runs_to_the_end() {
+    let dir = tmp("forced_crowding_extinction");
+    let last = run_with(
+        &dir,
+        &[
+            "tree.crowding_overlap=0".to_string(),
+            "tree.crowding_mortality=1.0".to_string(),
+            "fire.base_rate=0".to_string(),
+        ],
+    );
+    assert_eq!(last.trees, 0, "the trees are gone by the end");
+    let text = assert_valid_run(&dir);
+    assert!(text.contains("extinction: trees at tick 500"), "{text}");
+    // `ecosim stats` reads its causes from the series columns, which count animal deaths only, so
+    // the attribution comes from the event log itself.
+    let events = ecosim::events::parse_events(&fs::read_to_string(dir.join("events.csv")).unwrap()).unwrap();
+    let deaths: Vec<&str> =
+        events.iter().filter(|e| e.kind == ecosim::events::EventKind::TreeDeath).map(|e| e.cause).collect();
+    assert!(!deaths.is_empty(), "no tree died");
+    let crowded = deaths.iter().filter(|c| **c == "crowded").count();
+    assert!(crowded * 2 > deaths.len(), "crowded is {crowded} of {} tree deaths", deaths.len());
+}
+
 /// Forced extinction by fire: every patch with fuel can ignite at any temperature and fire kills any
 /// animal in one tick, so both animal species burn out on seed 1 in the first few hundred ticks.
 /// Ignition is scaled by the square of dryness, and the water tier keeps a good part of the soil's
@@ -816,27 +846,27 @@ fn animals_off_run_has_no_animals_and_marks_the_animal_invariants_na() {
     assert!(ecosim::check::signature_line(&sig).contains("not applicable"));
 }
 
-/// Shot S3 publishes; it does not decide. The crown a tree has is written to `entities.json` and is
-/// read by nothing in the simulator, so changing the crown's own parameter changes that file and
-/// no other: two runs that differ only in `tree.crown_radius_frac` have the same `series.csv`, the
-/// same `events.csv`, the same `light.bin` and the same `state.bin` at every snapshot. Only
-/// `meta.json`, which carries the parameter, and `entities.json`, which carries what it produced,
-/// move. This is the identity anchor a rate-0 test would be for a mechanism with a rate; the crown
-/// has none, because there is no setting of it at which a tree stops having a crown.
+/// Shot S3 published; shot S11 made the publication decide. The crown is written to
+/// `entities.json` and, since S11, read by the crowding term — so S3's identity (two runs that
+/// differ only in `tree.crown_radius_frac` differ only in `meta.json`, which carries the
+/// parameter, and `entities.json`, which carries what it produced) holds exactly where that term
+/// is switched off, and must fail where it is on. Both halves are asserted here; the second is
+/// S11's whole claim, that the crown is no longer decorative.
 #[test]
-fn the_crown_changes_only_what_it_publishes() {
-    let each = |frac: &str, name: &str| {
-        let set = common::small_set(&[&format!("tree.crown_radius_frac={frac}")]);
+fn the_crown_decides_only_through_crowding() {
+    let each = |frac: &str, rate: &str, name: &str| {
+        let set =
+            common::small_set(&[&format!("tree.crown_radius_frac={frac}"), &format!("tree.crowding_mortality={rate}")]);
         let dir = tmp(name);
         run(small_with(&set), 1, 3_000, 500, &set, &dir).unwrap();
         dir
     };
-    let (a, b) = (each("0.30", "crown_frac_default"), each("0.90", "crown_frac_wide"));
+    let (a, b) = (each("0.30", "0.0", "crown_frac_default"), each("0.90", "0.0", "crown_frac_wide"));
     let diff = ecosim::check::diff_runs(&a, &b).unwrap();
     let want: Vec<String> = std::iter::once("differs: meta.json".to_string())
         .chain((0..=6).map(|i| format!("differs: snap_{:06}/entities.json", i * 500)))
         .collect();
-    assert_eq!(diff, want, "a crown radius moved something it does not write");
+    assert_eq!(diff, want, "with the crowding term off, a crown radius moved something it does not write");
 
     // And the radius is what moved in it: three times the crown, three times the radius, on a tree
     // whose height and age are untouched.
@@ -850,5 +880,15 @@ fn the_crown_changes_only_what_it_publishes() {
         assert_eq!((&x["id"], &x["age"], &x["height_m"]), (&y["id"], &y["age"], &y["height_m"]));
         let (ra, rb) = (x["crown_radius_m"].as_f64().unwrap(), y["crown_radius_m"].as_f64().unwrap());
         assert!((rb - 3.0 * ra).abs() <= 0.001, "{ra} -> {rb}");
+    }
+
+    // With the term on at its shipped rate, the same widening reaches the ecology: crowns that
+    // used to miss each other now overlap past the threshold, trees are thinned, and the run
+    // diverges in the files a thinning shows up in.
+    let rate = Params::load_default().tree.crowding_mortality.to_string();
+    let (c, d) = (each("0.30", &rate, "crown_frac_default_live"), each("0.90", &rate, "crown_frac_wide_live"));
+    let live = ecosim::check::diff_runs(&c, &d).unwrap();
+    for f in ["series.csv", "events.csv", "snap_003000/state.bin"] {
+        assert!(live.contains(&format!("differs: {f}")), "a crown radius left {f} alone with crowding on: {live:?}");
     }
 }

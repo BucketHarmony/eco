@@ -428,6 +428,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Which machine ran it, as in the `ecoview` job above (shot C2b). This job shares that job's
+      # data step and renders through the same SwiftShader, so it draws from the same lottery.
+      - name: which runner
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo || true
+          free -g | head -2
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.98.1"
@@ -511,6 +519,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Which machine ran it, the same three lines as the `ecoview` job above (shot C2b). This job is
+      # the second pole behind that one -- 7.9 to 13.8 min over six runs, two tight clusters 1.68x
+      # apart -- and the draw is per job, not per run: run 35599849884 got a slow `ecoview` and a fast
+      # `ecoview-native` in the same run.
+      - name: which runner
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo || true
+          free -g | head -2
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.98.1"
@@ -547,13 +565,15 @@ jobs:
         run: cargo build --release
 
       # This was ten screenshots; shot C1 cut it to one. It is a measurement, never a gate, and it
-      # has been made: V0 ran ten on lavapipe and recorded 10/10 in MEASUREMENTS.md. Ten of them cost
-      # 43m 41s of a 52m 46s run, the largest single time sink in this pipeline, and nobody was
-      # reading the repetition -- MEASUREMENTS.md still says 136-142 s and 811,550 bytes, while the
-      # last ten-run pass (b48e7bd) measured 259-267 s and 815,129 bytes every time. What is left is
-      # a smoke check: the headless software-rendered path still produces a picture off Windows. A
-      # screenshot that stops working still shows up here; variance no longer does, and that is the
-      # trade (.github/DECISIONS.md, shot C1).
+      # has been made: V0 ran ten on lavapipe and recorded 10/10 at 136-142 s and 811,550 bytes, in
+      # `overnight/LOG.md` and not in MEASUREMENTS.md, which this comment cited for it until shot
+      # C2b. Ten of them cost 43m 41s of a 52m 46s run, the largest single time sink in this
+      # pipeline, and nobody was reading the repetition: the last ten-run pass (b48e7bd) measured
+      # 259-267 s and 815,129 bytes every time, which is the runner's CPU rounding the last bit
+      # differently and not a change in the picture (`ecoview-native/MEASUREMENTS.md`, "The lavapipe
+      # drift, explained"). What is left is a smoke check: the headless software-rendered path still
+      # produces a picture off Windows. A screenshot that stops working still shows up here; variance
+      # no longer does, and that is the trade (.github/DECISIONS.md, shot C1).
       - name: one headless screenshot on lavapipe (smoke check)
         continue-on-error: true
         env:

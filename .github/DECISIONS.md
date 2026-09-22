@@ -47,16 +47,20 @@ supply-chain dependency is a bad trade for fifteen lines of shell.
 
 `ecoview-native`'s screenshot step is a measurement and has never been a gate — the only gate in that
 job is `mesh golden`, and every step after it carries `continue-on-error: true`. Its answer is already
-in `ecoview-native/MEASUREMENTS.md`: 10/10 succeeded, 136–142 s each, every PNG 811,550 bytes. On
-b48e7bd the ten took **43m 41s** of a **52m 46s** run, while the job that did all of that shot's actual
-work finished in 17m 45s and then waited half an hour.
+on record: 10/10 succeeded, 136–142 s each, every PNG 811,550 bytes — in V0's log, `overnight/LOG.md`
+line 301. This line cited `ecoview-native/MEASUREMENTS.md` for them until shot C2b checked and found
+they had never been in it. On b48e7bd the ten took **43m 41s** of a **52m 46s** run, while the job
+that did all of that shot's actual work finished in 17m 45s and then waited half an hour.
 
 **And the repetition was not being read.** Those ten runs on b48e7bd came in at **259–267 s each and
-815,129 bytes every time** — 1.9× slower than MEASUREMENTS.md still quotes, and a different picture.
-That drift sat unread in every run's log for two shots, which argues for the cut rather than against
-it: a measurement repeated ten times a push and read zero times a week is not a measurement, it is a
-queue. The screenshot this shot kept measured 273 s and 815,129 bytes on run 35565798278, in line with
-the ten it replaced. Correcting MEASUREMENTS.md is `ecoview-native`'s work, and is flagged in the backlog.
+815,129 bytes every time** — 1.9× slower than V0's figures, and, it looked at the time, a different
+picture. That drift sat unread in every run's log for two shots, which argues for the cut rather than
+against it: a measurement repeated ten times a push and read zero times a week is not a measurement,
+it is a queue. The screenshot this shot kept measured 273 s and 815,129 bytes on run 35565798278, in
+line with the ten it replaced. **Shot V1 has since answered it and the picture did not change**: the
+two sizes are two runner CPUs, differing by exactly 1 in one channel on 2% of pixels
+(`ecoview-native/MEASUREMENTS.md`, "The lavapipe drift, explained"). The cut still stands — what
+nobody read for two shots was a number that meant nothing.
 
 Of the three options the shot prompt offered, this took **one screenshot as a smoke check**. Limiting
 the ten to an `ecoview-native` diff was not enough alone: the closing push of every shot is a full run
@@ -123,10 +127,15 @@ common to both.
 | `edit.spec.ts:241` saves a bundle byte for byte | 46.0 s | 29.6 s | 1.55 |
 | `film.spec.ts:36` 10-frame tiled set is byte-identical | 33.7 s | 23.7 s | 1.42 |
 
-Every test in the suite is between 1.42x and 2.00x slower on the slow run, and the whole-job steps move
-with them: step 9 542 → 886 s, film 89 → 130, tiled film 243 → 354, screenshots 19 → 26. **A uniform
-factor across independent steps is a slower machine, not a slower test.** GitHub's hosted runners vary
-in CPU, and everything in this job renders through SwiftShader on that CPU.
+Every test over five seconds is between 1.42x and 2.00x slower on the slow run — 16 of the 49, and
+**91.7% of the suite's wall clock**, 485.7 → 818.5 s. The 33 shorter ones carry the other 8.3% and
+scatter from 0.33x to 1.65x, which is fixed per-test cost plus a reporter that prints two significant
+figures, not a second effect. (This line said "every test in the suite" until shot C2b measured where
+the band starts; the exception that sent it looking, `edit.spec.ts:95`, ran 392 ms on the slow machine
+against 1.2 s on the fast one.) The whole-job steps move with the long tests: step 9 542 → 886 s, film
+89 → 130, tiled film 243 → 354, screenshots 19 → 26. **A uniform factor across independent steps is a
+slower machine, not a slower test.** GitHub's hosted runners vary in CPU, and everything in this job
+renders through SwiftShader on that CPU.
 
 So the row's headline fact — one test swinging 1.4, 2.2, 2.8 minutes and then timing out — is that same
 1.65x acting on a test that had nowhere to go. It is not flakiness in the test's own logic.
@@ -166,8 +175,10 @@ The runner that ran it: **4 vCPU, Intel Xeon Platinum 8370C at 2.80 GHz, 16 GB**
 
 ### The controlled version of the same measurement, which arrived by luck
 
-This shot's second commit changes comments and this file and nothing else, so `ecoview/` is
-byte-identical between 35599849884 and 35602067865. The same 49 tests, one after the other:
+This shot's second commit changes comments and this file and nothing else: the only `ecoview/` change
+between 35599849884 and 35602067865 is a two-line comment in `playwright.config.ts`, so the code that
+ran is identical. (This line said "byte-identical" until shot C2b ran `git diff ea43603 522d203 --
+ecoview/` and got those two lines.) The same 49 tests, one after the other:
 
 | run | head | runner | the suite | the job |
 |---|---|---|---|---|
@@ -239,3 +250,11 @@ ecoview decision about what to measure, not a CI decision about where to run it.
 `ecoview` now prints `nproc`, the CPU model and the memory before it does anything. The evidence above
 took an hour of log archaeology across five runs; the next person gets it in the first ten lines of a
 slow job's log.
+
+**Shot C2b put the same three lines in `ecoview-film` and `ecoview-native`.** C2 proved the runner is
+the variable and then instrumented one job of ten. `ecoview-native` is the second pole behind
+`ecoview` — 7.9 to 13.8 min over six runs, two clusters 1.68x apart — and the draw is **per job, not
+per run**: run 35599849884 drew a slow `ecoview` (19.9) and a fast `ecoview-native` (8.1) together, so
+stamping the run rather than the job would have been the wrong unit. The `ecosim*` jobs are left alone
+on purpose — they finish in 1 to 5 minutes and the lottery cannot threaten them, so the same six lines
+there would be noise rather than instrumentation.

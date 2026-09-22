@@ -841,7 +841,8 @@ fn coerce(old: &toml::Value, raw: &str) -> Result<toml::Value, String> {
     }
 }
 
-/// Serde skip test for keys that are left out of `meta.json` at 0.
+/// `--set` overrides, the world-dimension checks, and the serialized params, every section of
+/// which reaches `meta.json` whether or not it is at its defaults (shot S2).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -956,17 +957,6 @@ mod tests {
         serde_json::json!(if key == "hunter.kill_prob" { v } else { v as f32 as f64 })
     }
 
-    /// `p` as JSON with every section present: `meta.json` leaves `[rng]` out at stream 0,
-    /// `[animals]` out when they are enabled and `[bundle]` out at its defaults, so all three are
-    /// put back here and every leaf is compared exactly.
-    fn stored(p: &Params) -> serde_json::Value {
-        let mut v = serde_json::to_value(p).unwrap();
-        v["rng"] = serde_json::to_value(&p.rng).unwrap();
-        v["animals"] = serde_json::to_value(&p.animals).unwrap();
-        v["bundle"] = serde_json::to_value(&p.bundle).unwrap();
-        v
-    }
-
     fn lookup<'a>(json: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
         key.split('.').fold(json, |j, k| &j[k])
     }
@@ -993,7 +983,10 @@ mod tests {
             other => return Err(TestCaseError::fail(format!("{key}: unexpected leaf type {other:?}"))),
         };
         let set = Params::from_toml_str_with(&defaults(), &[format!("{key}={text}")]).map_err(TestCaseError::fail)?;
-        let (mut got, base) = (stored(&set), stored(&Params::load_default()));
+        // Serializing is enough: since shot S2 `[rng]`, `[animals]` and `[bundle]` are written at
+        // their defaults like every other section, so no section has to be put back by hand here.
+        let (mut got, base) =
+            (serde_json::to_value(&set).unwrap(), serde_json::to_value(Params::load_default()).unwrap());
         prop_assert_eq!(lookup(&got, key), &want, "{} = {}", key, text);
         // Put the leaf back the way it was, then nothing else may have moved. Keys nest more than
         // one level deep since the media table (shot G4), so this walks the whole path.

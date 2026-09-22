@@ -715,7 +715,8 @@ fn version_1_runs_still_check_stat_and_diff_but_do_not_fork() {
 }
 
 /// `rng.stream` (shot 14). Stream 0 is the stream every earlier run drew from: params with it set
-/// explicitly give a byte-identical run directory, and `meta.json` carries no `rng` section at 0.
+/// explicitly give a byte-identical run directory, and `meta.json` records `rng.stream = 0` rather
+/// than leaving the section out (shot S2, which is what the assertion below checks).
 /// Another stream keeps the seed's terrain but is a different run on it, recorded in `meta.json`.
 #[test]
 fn rng_stream_0_is_the_default_stream_and_others_differ() {

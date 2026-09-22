@@ -252,7 +252,10 @@ immigrants_per_year = 8.0
 
 [bundle]
 # A world loaded from a bundle (shot G1, `../docs/SCENE-CONTRACT.md`). These keys are ignored by a
-# noise world, and are not written to meta.json at their defaults.
+# noise world, and every one of them is written to meta.json on every run, at its defaults or not
+# (shot S2, `src/params.rs`). A run that has no `[bundle]` section in its meta.json was written
+# before S2 -- `fixtures/s42-mini` is one -- so a reader still needs a fallback for old runs, and
+# what the fallback means is "this run predates S2", not "this run is at the defaults".
 # Ecology layers under the bundle's lowest ground: a column's surface layer is base_z + round(its
 # mean ground height in metres), so base_z sets how much soil sits below the lowest ground.
 base_z = 8
@@ -276,7 +279,7 @@ tree_move_radius = 2.0
 [animals]
 # The animal tier (shot G0). false leaves grazers and hunters out of the run entirely: none are
 # placed, none immigrate, and the animal phase is skipped, so it draws nothing from the RNG.
-# true is the default and is not written to meta.json.
+# true is the default, and the section is written to meta.json either way (shot S2).
 enabled = true
 
 [grazer]
@@ -359,5 +362,5 @@ mutation = 0.05
 [rng]
 # Random stream (shot 14). The seed alone makes the terrain; the stream drives everything after it,
 # so other values replay the same world with independent dynamics. 0 is the stream every earlier
-# run used, and is not written to meta.json.
+# run used, and is written to meta.json like every other section (shot S2).
 stream = 0

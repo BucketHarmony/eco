@@ -2125,3 +2125,54 @@ and as backlog row C2 describes; 48 of 49 e2e tests and all 116 unit tests passe
 including every test that reads the three fixtures this shot regenerated. A worker cannot re-run a
 job on this repository (`gh run rerun --failed` answers `Must have admin rights`), so the re-run is a
 push, and this paragraph is it: no source file, test or gate changed.
+
+## Shot S13 — three comments that said the opposite of the code
+
+The row is the specification; there is no prompt file. Shot S2 removed the `skip_serializing_if`
+that kept `[bundle]`, `[animals]` and `[rng]` out of `meta.json` at their defaults, and
+`src/params.rs` has said so on each of the three fields since. The comments above those same three
+sections in `params.toml` were never updated and still told a reader the opposite. **No behaviour
+changed: no default, no invariant, no byte of any run, manifest or fixture.**
+
+**Verified against runs on disk, not inferred.** `runs/capitol-s42` (format 4) carries all 19 params
+sections, `bundle.base_z = 8`, `animals.enabled = false` and `rng.stream = 0` among them.
+`fixtures/s42-mini` (format 1) carries 9 sections and none of the three. One correction to the row,
+which is why this paragraph exists: the row cites `runs/s42` as a second pre-S2 witness at format 3
+with 16 sections, and the `runs/s42` on this machine is now format 4 with all 19 — `runs/` is
+gitignored and regenerated, so that copy has been rebuilt since the row was filed. The **committed**
+evidence of a run written before S2 is `fixtures/s42-mini` alone, and it was left exactly as it is,
+as the row required: a reader that admits an old run is old is the behaviour wanted, and the
+fixture's age is what tests it.
+
+- **The `[bundle]` comment says what an absent section means**, because it is the load-bearing one —
+  shot S6 reads `params.bundle.base_z` out of `meta.json` as its dig floor, and a reader who believed
+  the old comment would conclude the key is absent at defaults and that the fallback always fires. The
+  new comment names the fallback's real meaning: *this run predates S2*, not *this run is at the
+  defaults*. The other two are one line each; there is nothing to warn a reader about on them.
+- **Two more of the same defect, inside `ecosim`, are fixed beside the three the row names.** The
+  `mod tests` doc in `src/params.rs` read "Serde skip test for keys that are left out of `meta.json`
+  at 0", and `tests/integration.rs`'s doc comment on `rng_stream_0_is_the_default_stream_and_others_differ`
+  read "`meta.json` carries no `rng` section at 0" — three lines above the assertion that it carries
+  `0`, and beside an inline comment that already said so. A comment contradicting the assertion under
+  it is the row's own complaint, in the same component, for two lines.
+- **`stored()` in `params.rs`'s tests is gone, and its two call sites serialize directly.** The helper
+  existed only to put `[rng]`, `[animals]` and `[bundle]` back into the serialized params after serde
+  had skipped them. Since S2 serde skips nothing, so all three re-insertions were writing each section
+  over an identical copy of itself. Deleting dead compensation is better than documenting it, and this
+  is the one place in the shot where code and not a comment moved: `prop_set_round_trips_every_leaf`
+  and its fixed-value regression sibling pass unchanged, which is what holds it.
+- **The history in `DECISIONS.md` and `TUNING.md` is not rewritten.** Shot 14's `[rng]` entry, G0's
+  `[animals]` entry and G1's `[bundle]` entry all describe the skipping, and all three were true when
+  they were written; S2's own entry above records the reversal. These files are a log. Editing a past
+  entry to read as though it had always been right destroys the one thing a log is for.
+- **No `TUNING.md` entry.** No parameter value moved. `params.toml` changed, but only its prose, and
+  TUNING records values and the acceptance lines that forced them.
+- **No sweep and no `FINDINGS.md`.** The sim-shot rules are not invoked by this row and there is no
+  mechanism to sweep; nothing this shot touches can change a number the event log records, so the
+  cause breakdown that a sim shot's findings lead with would be the previous shot's table, copied.
+
+**Reported, not fixed** (component isolation): `ecoview-native/src/tree.rs:48` still documents its
+height fallbacks with "`params.bundle` is written to `meta.json` **only when it is not at its
+defaults**". Shot S3 reported that comment and a sibling in `ecoview-native/src/run.rs`; the sibling
+has since gone and this one has not. It is the same stale fact as the three fixed here, one component
+over, and it sits directly under the HUD's `(!)` provenance mark — a viewer shot's line.

@@ -1349,3 +1349,84 @@ sites. It pins both: the helper's behaviour in its own test, and the call sites 
 asserts is deliberately narrow -- `plantable.line()` appears twice in `main.rs`, and the sentence's
 words appear in exactly one file in `src/` -- so it goes red for a deleted console line or a
 hand-rolled second copy, and stays green for any refactor that keeps one sentence in one place.
+
+## V11 a test here asserts what the viewer claims, not what the simulator counted
+
+Worked from the BACKLOG row; V11 has no prompt file. G5 regenerated
+`ecosim/fixtures/capitol-animals-mini`, as the sim-shot rules require of a behaviour change, and two
+tests here went red over seven literals. That was the fourth time (14c, G4b, G4c, G5), and V10 was
+the third re-cut. The re-cut is not the fix. The cause is that a test in this component hard-coded
+numbers the other component computes. The two components are supposed to share only a file format,
+yet they shared grazer counts, and no `ecosim` shot is allowed to edit them.
+
+**Re-derived before replacing.** V10 set the precedent that the numbers are re-read and the claim
+re-checked, not pasted. On the regenerated fixture the values are exactly G5.BLOCKED.md's table:
+9240 grazers at tick 2000, busiest 61, 866 patches occupied, seven patches at or over 32 spanning
+33 to 61, and 28 distinct bands on the old scale against 18 on the ramp. The ramp test's claim still
+holds. The old scale draws a range of nearly two to one in one colour, and the ramp spreads those
+patches over at least three bands with none at the top.
+
+**What each pin became.**
+- The tick 0 count (300) is now compared with `params.grazer.start_count` from the same `meta.json`.
+  It is still exact, but it is no longer a copy of anything.
+- The tick 0 `(busiest, occupied) == (3, 251)` became "scattered": more than one patch occupied.
+- The tick 2000 total and `(busiest, occupied)` became three checks: the tier is present (both
+  above zero), it has gathered (busiest now above busiest at tick 0), and the overlay reads the
+  busiest patch, whatever its count, at the patch's corner columns.
+- The clamped range `(37, 70)` and its count of seven became the test's precondition: at least two
+  patches over 32, the top at least 1.5 times the bottom. If a regeneration stops showing that case,
+  the failure message says so, because at that point the test's input has to change, not its
+  expected value.
+- `distinct == 28` and `distinct == 20` became the ratio they were there to show: the ramp has fewer
+  bands and keeps more than half. The history is 27 -> 18, 28 -> 20, 28 -> 18.
+- `(stats.min, stats.max) == (0, 70)` now compares with the field's own min and max. The point of
+  that check was always that the scale does not alter the reading.
+
+**Checked across an ecology move, not only on today's bytes.** I ran both rewritten tests against the
+pre-G5 fixture (`git archive 13c318c`, extracted outside the repo, constant pointed at it for one
+run and then restored). They pass there too, on 9169 / 70 / 37 to 70 / 28 -> 20. The same assertions
+therefore hold on both sides of the change that broke the old ones. I also pointed the first test at
+`capitol-mini`, which has animals off. It fails, but earlier than the grazer checks: on the snapshot
+ticks, `(0, 100)` against `(0, 2000)`. So I have no run that exercises the "tier dropped" message
+itself. The argument that it would fire is the arithmetic: a run with no animals has a tick 0 total
+of 0, against a `start_count` that the same assertion first requires to be above zero.
+
+**Pins on committed fixtures that stay, and why.** Each one is exact because its exact value is the
+thing under test, and none of them is ecology:
+- `the_capitol_run_and_the_name_list_agree`: the sealed set `concrete, asphalt, roof, water` comes
+  from `params.medium`. Its own comment says it should go red if a default changes, so that the
+  viewer follows the change.
+- `base_z_m() == Some(8.0)` is `params.bundle.base_z`, a property of the bundle.
+- Fixture shape (256 x 256, patch 8, snapshots at 0 and 2000) is set by the fixture's recipe, not by
+  the ecology.
+- `the_animals_off_sibling_still_has_nobody_on_it`: zero grazers is what `animals.enabled=false`
+  means.
+
+**One ecology-derived band stays, with its headroom measured.**
+`the_committed_reference_site_is_left_where_v6_drew_it` asserts canopy closure below 10%, exposure
+below 0.25 stops, and more than 100 trees on the denser fixture. Measured at V11: 290 trees at 0.30%
+and 111 trees at 4.54% / +0.177 stops. The binding case is the quiet fixture at tick 100, whose trees
+are almost all imported from the scene rather than grown, so an ecology shot moves it little. Its
+comment quoted 39 trees for the animals fixture, which the fixture has since outgrown. The comment
+now says the counts are printed, not pinned.
+
+**The rule going forward.** A test in this component that opens a run written by `ecosim` asserts
+one of two things. Either it is a value the run itself publishes (params, dims, the palette), compared
+with where the run publishes it, or it is a shape: an ordering, a ratio, a band, a presence. It never
+asserts a count the simulator arrived at by simulating. The test may print that count, and the two
+rewritten tests do, so the numbers stay visible in `--nocapture` output without being gates.
+
+**Screenshots** (the cadence rule; this shot changes no pixel, so they show the data the rewritten
+tests read, drawn by the viewer). Both are `--run ../ecosim/fixtures/capitol-animals-mini --overlay
+crowding --headless`.
+- `shots/v11-crowding-t0.png`, tick 0: the 300 placed grazers show as scattered pale-pink patches
+  of 1 to 3 on grey empty-band ground, and the HUD reads `field 0.00 to 3.00`. You would know it was
+  wrong if the site were uniformly pink, meaning the empty band was lost, or if the patches were not
+  8 m squares.
+- `shots/v11-crowding-t2000.png`, tick 2000: nearly every patch is occupied, deeper magenta patches
+  stand out from the pale bulk, and the HUD reads `field 0.00 to 61.00`, the busiest count the test
+  now derives rather than pins. You would know it was wrong if the site were one flat colour, which
+  is the V2 scale's failure that the ramp test guards against.
+- An observation, not this shot's to act on: the same HUD shows 79 mature trees at tick 0 and 15
+  mature trees (of 290) at tick 2000 on this fixture. That is the simulator's result, and the viewer
+  draws it as published.

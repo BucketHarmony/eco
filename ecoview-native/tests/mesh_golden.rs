@@ -3294,9 +3294,14 @@ fn distinct(v: &[u8]) -> usize {
 
 /// The row's first half: this viewer opens the animals fixture and finds the animals in it.
 ///
-/// Every number here is read off the committed bytes and matches what S1 recorded when it made
-/// them, which is the point -- a regeneration that quietly dropped the animal tier fails here, in
-/// the component that draws them, and not six shots later in a screenshot nobody can explain.
+/// What a regeneration may move and what it may not are asserted differently, and that split is
+/// shot V11's. Tick 0 is compared with the run's own `params.grazer.start_count`, read off the same
+/// `meta.json`, so it is exact without being a copy of anything. Tick 2000 is asserted as a shape:
+/// the animal tier is still there and has gathered, and the overlay reads the busiest patch at every
+/// column it covers. Before V11 both ticks were literal counts, and every `ecosim` shot that moved
+/// the ecology -- 14c, G4b, G4c, G5 -- turned this job red over numbers it was forbidden to edit. A
+/// regeneration that quietly dropped the animal tier still fails here, in the component that draws
+/// them, and not six shots later in a screenshot nobody can explain.
 #[test]
 fn the_viewer_reads_the_committed_animals_run() {
     let run = Run::load(std::path::Path::new(ANIMALS_FIXTURE)).unwrap();
@@ -3317,22 +3322,59 @@ fn the_viewer_reads_the_committed_animals_run() {
     let busiest = |f: &Fields| *f.grazers.iter().max().unwrap();
     let occupied = |f: &Fields| f.grazers.iter().filter(|g| **g > 0).count();
 
-    assert_eq!(total(&start), 300, "the 300 grazers the parameters place");
-    assert_eq!((busiest(&start), occupied(&start)), (3, 251));
-    assert_eq!(total(&grown), 9169, "S1's count at tick 2000");
-    assert_eq!((busiest(&grown), occupied(&grown)), (70, 860));
+    println!(
+        "tick 0: {} grazers, busiest {}, {} patches occupied; tick 2000: {}, busiest {}, {} occupied",
+        total(&start),
+        busiest(&start),
+        occupied(&start),
+        total(&grown),
+        busiest(&grown),
+        occupied(&grown)
+    );
+
+    let meta: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(ANIMALS_FIXTURE).join("meta.json")).unwrap(),
+    )
+    .unwrap();
+    let placed = meta["params"]["grazer"]["start_count"]
+        .as_u64()
+        .expect("params.grazer.start_count") as u32;
+    assert!(placed > 0, "the animals fixture places animals");
+    assert_eq!(
+        total(&start),
+        placed,
+        "tick 0 holds exactly the grazers the run's parameters place"
+    );
+    assert!(
+        occupied(&start) > 1,
+        "and they start scattered, not stacked"
+    );
+
+    assert!(
+        total(&grown) > 0 && occupied(&grown) > 0,
+        "the animal tier is still in the run at tick 2000"
+    );
+    let top = busiest(&grown);
+    assert!(
+        top > busiest(&start),
+        "and it has gathered: the busiest patch holds {top}, against {} at tick 0",
+        busiest(&start)
+    );
 
     // And the overlay reads them where they are: a patch's count is the value at every one of the
     // 64 ecology columns it covers, which is what makes the patch grid visible on the picture.
     let hot = grown
         .grazers
         .iter()
-        .position(|g| *g == 70)
+        .position(|g| *g == top)
         .expect("the busiest patch");
     let (px, _) = d.patch_grid();
     let (cx, cy) = ((hot % px) * d.patch, (hot / px) * d.patch);
-    assert_eq!(grown.value(Overlay::Crowding, &d, cx, cy), 70.0);
-    assert_eq!(grown.value(Overlay::Crowding, &d, cx + 7, cy + 7), 70.0);
+    assert_eq!(grown.value(Overlay::Crowding, &d, cx, cy), top as f32);
+    assert_eq!(
+        grown.value(Overlay::Crowding, &d, cx + 7, cy + 7),
+        top as f32
+    );
 }
 
 /// The regression sibling, on the other fixture: the animals-off run still has nobody on it, and
@@ -3359,14 +3401,16 @@ fn the_animals_off_sibling_still_has_nobody_on_it() {
 /// The row's second half, measured on the fixture rather than argued: the ramp no longer flattens
 /// the patches the map exists to show.
 ///
-/// The old scale put everything from 32 grazers up in one band, and on this snapshot that is seven
-/// patches spanning 37 to 70 -- a factor of just under two, drawn in one colour, at the top of the
-/// range. The new ramp separates them and leaves headroom above the busiest patch this run ever had.
+/// The old scale put everything from 32 grazers up in one band. After S11 (shot V10) that was seven
+/// patches spanning 37 to 70, and after G5 (shot V11) seven spanning 33 to 61 -- each time a factor
+/// of nearly two, drawn in one colour at the top of the range. The new ramp separates them and
+/// leaves headroom above the busiest patch.
 ///
-/// The numbers moved once, in shot S11: crown crowding changed the ecology, `capitol-animals-mini`
-/// was regenerated with it, and these constants are read off the regenerated bytes (shot V10). The
-/// claim is the one S7 made -- the old scale drew a range in one colour and the new one does not --
-/// and it survived the move: the flattened band is wider than before, not narrower.
+/// **Asserted as the claim, not as the counts** (shot V11). The counts are the simulator's and move
+/// whenever its ecology does; the claim is the viewer's and has survived every move. So the test
+/// requires the fixture to still show the case -- at least two patches over the old top, spanning at
+/// least half again -- and says so if a regeneration ever stops showing it, which is a statement
+/// about the test's input rather than a pin on it.
 #[test]
 fn the_crowding_ramp_no_longer_flattens_the_patches_it_exists_to_show() {
     let run = Run::load(std::path::Path::new(ANIMALS_FIXTURE)).unwrap();
@@ -3377,13 +3421,19 @@ fn the_crowding_ramp_no_longer_flattens_the_patches_it_exists_to_show() {
     assert_eq!((new.lo, new.hi), CROWDING_RAMP);
 
     let clamped: Vec<u32> = f.grazers.iter().copied().filter(|g| *g >= 32).collect();
-    assert_eq!(clamped.len(), 7, "seven patches at or over the old top");
-    assert_eq!(
-        (
-            *clamped.iter().min().unwrap(),
-            *clamped.iter().max().unwrap()
-        ),
-        (37, 70)
+    let (lo, hi) = (
+        clamped.iter().copied().min().unwrap_or(0),
+        clamped.iter().copied().max().unwrap_or(0),
+    );
+    println!(
+        "{} patches at or over the old top, spanning {lo} to {hi}",
+        clamped.len()
+    );
+    assert!(
+        clamped.len() >= 2 && hi as f32 >= 1.5 * lo as f32,
+        "the fixture no longer has a range over the old top of 32 for the old scale to flatten \
+         ({} patches, {lo} to {hi}), so this test no longer shows what it exists to show",
+        clamped.len()
     );
     for g in &clamped {
         assert_eq!(
@@ -3398,7 +3448,8 @@ fn the_crowding_ramp_no_longer_flattens_the_patches_it_exists_to_show() {
         .collect();
     assert!(
         spread.iter().max().unwrap() - spread.iter().min().unwrap() >= 3,
-        "the seven spread up the ramp instead of stacking on its end: {spread:?}"
+        "the {} spread up the ramp instead of stacking on its end: {spread:?}",
+        clamped.len()
     );
     assert!(
         spread.iter().all(|b| *b < (BANDS - 1) as u8),
@@ -3406,21 +3457,26 @@ fn the_crowding_ramp_no_longer_flattens_the_patches_it_exists_to_show() {
     );
 
     // The cost, asserted rather than hidden: a log ramp spends bands on the top of the range, so
-    // the bulk loses separation. On this snapshot 28 distinct bands become 20 -- and neighbouring
-    // bands are already below what the eye separates on a lit surface (DECISIONS.md, V2), while
-    // 37-against-70 was not. S7 measured 27 and 18 on the pre-S11 fixture; both moved by one when
-    // the ecology did, and the ratio they are there to show did not (shot V10).
+    // the bulk loses separation -- and neighbouring bands are already below what the eye separates
+    // on a lit surface (DECISIONS.md, V2), while the two ends of the clamped range were not. The
+    // counts have been 27 -> 18 (S7), 28 -> 20 (V10) and 28 -> 18 (V11); what held every time is
+    // that the ramp has fewer, and keeps more than half.
     let old_bands: Vec<u8> = f.grazers.iter().map(|g| band_of(*g as f32, &old)).collect();
     let (bands, stats) = f.bands(Overlay::Crowding, &d, &new);
-    assert_eq!(distinct(&old_bands), 28);
     let new_bands: Vec<u8> = f
         .grazers
         .iter()
         .map(|g| crowding_band(*g as f32, &new))
         .collect();
-    assert_eq!(distinct(&new_bands), 20);
+    let (was, now) = (distinct(&old_bands), distinct(&new_bands));
+    println!("distinct bands: {was} on the old scale, {now} on the ramp");
+    assert!(
+        now < was && 2 * now > was,
+        "the ramp costs the bulk some bands but not most of them: {was} -> {now}"
+    );
     // The field itself is untouched by any of this: the scale is a drawing, not a reading.
-    assert_eq!((stats.min, stats.max), (0.0, 70.0));
+    let floor = *f.grazers.iter().min().unwrap();
+    assert_eq!((stats.min, stats.max), (floor as f32, hi as f32));
     assert_eq!(bands.len(), d.columns());
 }
 
@@ -3754,9 +3810,10 @@ fn the_line_says_whether_the_number_was_measured_or_set() {
 #[test]
 fn the_committed_reference_site_is_left_where_v6_drew_it() {
     let bundle = Bundle::load(std::path::Path::new(ecoview_native::CAPITOL)).unwrap();
-    // Both committed Capitol runs, at their last snapshot: 39 trees on the animals fixture at tick
-    // 2000 and 111 on the quiet one at tick 100. Neither is a dense site and that is the finding,
-    // not a shortcoming of the fixtures -- the reference world's trees stand apart.
+    // Both committed Capitol runs, at their last snapshot: the animals fixture at tick 2000 and the
+    // quiet one at tick 100. The counts are the simulator's and are printed rather than pinned (V11
+    // measured 290 and 111; this comment said 39 for the first until then). Neither is a dense site and that is
+    // the finding, not a shortcoming of the fixtures -- the reference world's trees stand apart.
     let mut most = 0usize;
     for dir in [ANIMALS_FIXTURE, QUIET_FIXTURE] {
         let run = Run::load(std::path::Path::new(dir)).unwrap();

@@ -192,6 +192,113 @@ fn a_bundle_run_writes_a_format_4_run_dir_that_check_reads() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Spill the roof block over the south half of the columns along its north edge, so each of them is
+/// two ground cells of roof and two of lawn. Returns those columns. This is a building outline that
+/// does not follow the ecology grid, which is the ordinary case on a suburban lot and the case shot
+/// G12 was found on.
+fn spill_the_roof_north(dir: &Path) -> Vec<(usize, usize)> {
+    let code = |m: Medium| Medium::ALL.iter().position(|&k| k == m).unwrap() as u8;
+    let mut medium = fs::read(dir.join("medium.u8")).unwrap();
+    let mut building: Vec<f32> = fs::read(dir.join("building_h.f32"))
+        .unwrap()
+        .chunks(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let mut cell = |i: usize, h: f32| {
+        medium[i] = code(Medium::Roof);
+        building[i] = h;
+    };
+    // A 3 x 3 house just north of the scene's tree at (8.5, 9.5) ...
+    for y in 11..14 {
+        for x in 7..10 {
+            for gy in y * RATIO..(y + 1) * RATIO {
+                for gx in x * RATIO..(x + 1) * RATIO {
+                    cell(gx + GW * gy, 4.0);
+                }
+            }
+        }
+    }
+    // ... whose south wall stops half way across the row of columns below it. Those columns are two
+    // ground cells of roof and two of lawn, and they are south of the house, so nothing shades them.
+    let cols: Vec<(usize, usize)> = (7..10).map(|x| (x, 10)).collect();
+    for &(x, y) in &cols {
+        for gx in x * RATIO..(x + 1) * RATIO {
+            cell(gx + GW * (y * RATIO + RATIO - 1), 4.0);
+        }
+    }
+    fs::write(dir.join("medium.u8"), &medium).unwrap();
+    fs::write(dir.join("building_h.f32"), building.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+    // A street tree of the scene standing in the middle of one of them, which is what a survey of a
+    // real site gives you when a tree grows against a wall.
+    let trees = fs::read_to_string(dir.join("trees.json")).unwrap();
+    let extra = "{\"x\":7.5,\"y\":10.5,\"height\":11.0,\"crown_radius\":3.0,\"crown_base\":4.0},";
+    fs::write(dir.join("trees.json"), trees.replacen('[', &format!("[{extra}"), 1)).unwrap();
+    cols
+}
+
+/// Shot G12: a run on a bundle whose roof cuts across the ecology grid stays green under `ecosim
+/// check`. Before it, a column that was half roof and half lawn could root a tree, while
+/// `tree_footing` forbids a trunk over any roof cell at all: the model and the invariant disagreed,
+/// and such a bundle failed the check for something the model allowed. Measured on this bundle with
+/// the pre-G12 rule in place, the check fails -- "2 roof cells ... first bad at tick 0, tree (7.0,
+/// 10.0) on 2 of 4 sealed, 2 roof" -- and passes with it.
+///
+/// What moved is the trunk rule alone. The column is still soil and still grows cover, which is why
+/// the material under the eave is asserted here: a rule that took the whole column out of
+/// cultivation would also pass the footing invariant, and this test is the one that says the site
+/// did not lose its lawn to a roof overhanging a corner of it.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn a_roof_that_cuts_across_columns_takes_no_trunk_and_keeps_its_lawn() {
+    let dir = tmp("fringe_src");
+    write_bundle(&dir);
+    let fringe = spill_the_roof_north(&dir);
+    let b = Bundle::load(&dir).unwrap();
+    let (p, set) = bundle_params(&b);
+    let out = tmp("fringe_run");
+    let opts = RunOptions { format_version: BUNDLE_FORMAT_VERSION, bundle: Some(&b), ..Default::default() };
+    run_with(p, 7, 20_000, 5_000, &set, &out, opts).unwrap();
+
+    // Soil at every snapshot: the half of the column the eave does not cover is lawn like any other.
+    for tick in [0, 5_000, 10_000, 20_000] {
+        let snap = out.join(format!("snap_{tick:06}"));
+        let height = fs::read(snap.join("height.bin")).unwrap();
+        let material = fs::read(snap.join("material.bin")).unwrap();
+        for &(x, y) in &fringe {
+            let z = height[x + SIZE_M * y] as usize;
+            let m = material[x + SIZE_M * (y + SIZE_M * z)];
+            assert_eq!(m, 1, "tick {tick}: the part-roof column ({x}, {y}) tops out in material {m}, not soil");
+        }
+    }
+
+    let report = check_run(&out).expect("check reads the run");
+    let foot = report.lines.iter().find(|l| l.key == "tree_footing").expect("a bundle run has a footing line");
+    assert!(!foot.na && foot.pass, "{foot:?}");
+    assert!(foot.observed.contains("0 over half sealed, 0 roof cells"), "{foot:?}");
+    // Not vacuous: the site still grows trees, they just stand clear of the roof.
+    let sightings: usize = foot.observed.split(' ').next().unwrap().parse().unwrap();
+    assert!(sightings > 0, "no tree stood anywhere, so the footing line proves nothing: {foot:?}");
+    // The scene's tree against the wall is moved to a column that may root it, not dropped: the site
+    // keeps both its trees, and neither stands on the fringe -- at tick 0 or at any snapshot after,
+    // which is where a germinated tree would show up.
+    for tick in [0, 5_000, 10_000, 20_000] {
+        let ents: Value =
+            serde_json::from_slice(&fs::read(out.join(format!("snap_{tick:06}/entities.json"))).unwrap()).unwrap();
+        let trees: Vec<(usize, usize)> = ents
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "tree")
+            .map(|e| (e["x"].as_f64().unwrap() as usize, e["y"].as_f64().unwrap() as usize))
+            .collect();
+        if tick == 0 {
+            assert_eq!(trees.len(), 2, "both scene trees are planted: {trees:?}");
+        }
+        assert!(trees.iter().all(|c| !fringe.contains(c)), "tick {tick}: a tree stands on the fringe: {trees:?}");
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Dig a sealed basin into a written bundle: a 3 m square of asphalt at a flat 1.3 m, in ground of
 /// the slope `write_bundle` lays down. Its lowest rim is the column to its west at 1.625 m, so the
 /// basin holds 325 mm of water and nothing else on this site holds any.

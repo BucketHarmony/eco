@@ -115,9 +115,9 @@ pub fn in_shrub(s: &BundleShrub, px: f32, py: f32) -> bool {
     u * u + v * v <= 1.0
 }
 
-/// Where a scene tree's trunk goes: its own column when that is plantable, else the nearest
-/// plantable column within `radius` (ties broken by the offset order, nearest first), else nothing.
-/// The bool says the trunk moved.
+/// Where a scene tree's trunk goes: its own column when a trunk may root there, else the nearest
+/// column within `radius` that one may (ties broken by the offset order, nearest first), else
+/// nothing. The bool says the trunk moved.
 fn trunk_column(world: &World, t: &BundleTree, offsets: &[(i32, i32, i32)]) -> Option<(usize, usize, bool)> {
     let d = world.dims;
     // A tree may stand exactly on the north or east edge (x = size_m), which floors out of the grid.
@@ -125,8 +125,7 @@ fn trunk_column(world: &World, t: &BundleTree, offsets: &[(i32, i32, i32)]) -> O
     let y0 = (t.y.floor() as i32).clamp(0, d.wy as i32 - 1);
     offsets.iter().find_map(|&(dx, dy, _)| {
         let (x, y) = (x0 + dx, y0 + dy);
-        (d.in_bounds(x, y) && world.is_plantable(d.cidx(x as usize, y as usize)))
-            .then(|| (x as usize, y as usize, (dx, dy) != (0, 0)))
+        world.trunk_site_ok(x, y).then(|| (x as usize, y as usize, (dx, dy) != (0, 0)))
     })
 }
 
@@ -202,7 +201,7 @@ impl Sim {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle::tests::{build, bundle_params, flat_bundle, paint};
+    use crate::bundle::tests::{build, bundle_params, flat_bundle, paint, paint_part};
     use crate::bundle::Medium;
     use crate::trees::Stage;
     use crate::world::World;
@@ -254,6 +253,23 @@ mod tests {
         // The 3x3 roof neighbours are all lawn; the nearest-first offsets take (5, 4) (dy = -1).
         assert_eq!(planted(&s), vec![(5, 4, Stage::Mature)]);
         assert_eq!((imp.trees_planted, imp.trees_moved, imp.trees_dropped), (1, 1, 0));
+    }
+
+    /// Shot G12: a column only part of a roof covers is still a lawn — a shrub planted on it still
+    /// counts — but a trunk may not root in it, so a scene tree standing there moves off like one
+    /// on the roof proper. Half a concrete walk is not a roof and moves nothing.
+    #[test]
+    fn a_tree_under_an_eave_moves_off_while_the_lawn_under_it_still_grows() {
+        let mut b = flat_bundle(16, 2);
+        paint_part(&mut b, 7, 7, 2, Medium::Roof, 5.0);
+        paint_part(&mut b, 3, 3, 2, Medium::Concrete, 0.0);
+        b.trees.push(tree(7.5, 7.5, 12.0));
+        b.trees.push(tree(3.5, 3.5, 12.0));
+        b.shrubs.push(shrub(7.5, 7.5, 0.4, 0.4, 0.0));
+        let (s, imp) = sim_of(&b);
+        assert_eq!(planted(&s), vec![(3, 3, Stage::Mature), (7, 6, Stage::Mature)]);
+        assert_eq!((imp.trees_planted, imp.trees_moved, imp.trees_dropped), (2, 1, 0));
+        assert_eq!(imp.shrub_columns, 1, "the column under the eave still takes shrub cover");
     }
 
     #[test]

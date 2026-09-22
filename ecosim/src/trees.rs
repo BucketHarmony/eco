@@ -152,7 +152,7 @@ impl Sim {
         while placed < n && attempts < 10_000 {
             attempts += 1;
             let Some((x, y)) = self.random_soil_column() else { return };
-            if self.spacing_ok(x as i32, y as i32) {
+            if self.world.can_root_a_trunk(self.world.dims.cidx(x, y)) && self.spacing_ok(x as i32, y as i32) {
                 self.plant_tree(x, y, age);
                 placed += 1;
             }
@@ -243,7 +243,7 @@ impl Sim {
         let theta = 2.0 * std::f32::consts::PI * self.rng.gen::<f32>();
         let tx = (x + r * libm::cosf(theta)).round() as i32;
         let ty = (y + r * libm::sinf(theta)).round() as i32;
-        if !self.world.is_soil(tx, ty) || !self.spacing_ok(tx, ty) {
+        if !self.world.trunk_site_ok(tx, ty) || !self.spacing_ok(tx, ty) {
             return;
         }
         let p = self.germination_prob(tx as usize, ty as usize);

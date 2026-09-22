@@ -148,6 +148,11 @@ pub struct World {
     pub ground_h: Vec<f32>,
     /// Building height above the ground per ground cell; all zero in a noise world.
     pub building_h: Vec<f32>,
+    /// Whether any ground cell under the column is a `roof`: all false in a noise world, which has
+    /// no buildings, and true in a bundle world for every column a building outline crosses without
+    /// covering (shot G12). A roofed column may still be `Soil` — a lawn under the edge of an eave
+    /// is still a lawn — but no trunk may root in it.
+    pub roofed: Vec<bool>,
     /// Whether the world was loaded from a bundle (`ecosim run --world`).
     pub bundle_world: bool,
     /// The bundle's storm drains; empty in a noise world. Read by the drain network in shot G6.
@@ -384,6 +389,7 @@ impl World {
             ground_grid: Ground { width: d.wx, depth: d.wy, ratio: 1, medium: Vec::new(), media: Medium::ALL.to_vec() },
             ground_h: Vec::new(),
             building_h: vec![0.0; d.cols()],
+            roofed: vec![false; d.cols()],
             bundle_world: false,
             pipes: Vec::new(),
         };
@@ -406,8 +412,9 @@ impl World {
     /// cells under it)`, filled below exactly as the noise world fills terrain. The media decide
     /// what tops it: Rock when more than half its ground cells are sealed (`roof`, `asphalt`,
     /// `concrete`), otherwise Water when more than half are `water`, otherwise soil. A tie is
-    /// neither. Roofs then cast shade (`building_shade`). The bundle's dimensions must already be
-    /// in `params` (`Bundle::apply_to`).
+    /// neither. Roofs then cast shade (`building_shade`), and every column a roof cell touches at
+    /// all is marked `roofed`, which keeps trunks out of it without changing what it is made of
+    /// (shot G12). The bundle's dimensions must already be in `params` (`Bundle::apply_to`).
     pub fn from_bundle(b: &Bundle, params: &Params) -> Result<World, String> {
         let d = Dims::of(params);
         if (d.wx, d.wy) != (b.size_m, b.size_m) {
@@ -423,13 +430,16 @@ impl World {
         let mut heights = vec![0u8; d.cols()];
         let mut tops = vec![Top::Terrain; d.cols()];
         let mut building = vec![0f32; d.cols()];
+        let mut roofed = vec![false; d.cols()];
         for y in 0..d.wy {
             for x in 0..d.wx {
                 let (mut sum, mut sealed, mut water, mut roof) = (0.0f32, 0usize, 0usize, 0.0f32);
+                let mut roofs = 0usize;
                 for i in b.ground.cells_of(x, y) {
                     sum += b.ground_h[i];
                     let m = b.ground.medium_at(i);
                     sealed += (m != Medium::Water && !params.medium.get(m).plantable) as usize;
+                    roofs += (m == Medium::Roof) as usize;
                     water += (m == Medium::Water) as usize;
                     roof = roof.max(b.building_h[i]);
                 }
@@ -451,6 +461,7 @@ impl World {
                     Top::Terrain
                 };
                 building[c] = roof;
+                roofed[c] = roofs > 0;
             }
         }
         let shade = building_shade(d, &heights, &building, params.shade_slope());
@@ -458,6 +469,7 @@ impl World {
         w.ground_grid = b.ground.clone();
         w.ground_h = b.ground_h.clone();
         w.building_h = b.building_h.clone();
+        w.roofed = roofed;
         w.bundle_world = true;
         w.pipes = b.pipes.clone();
         Ok(w)
@@ -468,6 +480,21 @@ impl World {
     #[inline]
     pub fn is_plantable(&self, c: usize) -> bool {
         self.class[c] == ColClass::Soil
+    }
+
+    /// Whether a tree trunk may root in column `c`: the column is plantable **and** no roof covers
+    /// any part of it. Grass and shrub cover ask only [`World::is_plantable`], because a lawn under
+    /// the edge of an eave is still a lawn; a *trunk* under one is a tree growing through a
+    /// building, which `ecosim check`'s `tree_footing` forbids outright (shot G12).
+    #[inline]
+    pub fn can_root_a_trunk(&self, c: usize) -> bool {
+        self.is_plantable(c) && !self.roofed[c]
+    }
+
+    /// [`World::can_root_a_trunk`] at (x, y), false outside the world.
+    #[inline]
+    pub fn trunk_site_ok(&self, x: i32, y: i32) -> bool {
+        self.dims.in_bounds(x, y) && self.can_root_a_trunk(self.dims.cidx(x as usize, y as usize))
     }
 
     /// Whether (x, y) is inside the world and a soil column.

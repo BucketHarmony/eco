@@ -81,11 +81,18 @@ than half of its ground cells are sealed (`roof`, `asphalt`, `concrete`), Water 
 are `water`, otherwise soil. A roof shades the columns north of it, `[bundle] shade_slope` columns
 per metre of height.
 
+A trunk needs more than a plantable column: no tree may root in a column any roof cell touches at
+all, however few (shot G12). A building outline rarely follows the ecology grid, so the columns
+along its walls are part roof and part lawn; they stay soil and still grow grass and shrubs -- a
+lawn under the edge of an eave is still a lawn -- but a trunk there would stand in the wall, and
+`ecosim check`'s `tree_footing` counts it as a tree on a roof. The rule applies wherever a trunk is
+placed: the scene import, germination, and the immigration of a tree into an empty world.
+
 A bundle's plants are planted too, in place of the noise world's random ones. Each scene tree
 becomes a tree entity on the column its trunk stands in, aged by its height: piecewise linear
 through (0 m, 0), (`[bundle] tree_mature_height`, `tree.mature_age`) and (`tree_tall_height`,
-`tree_tall_age`), flat above. A trunk on an unplantable column moves to the nearest plantable one
-within `tree_move_radius`, or is dropped; when two trees land on one column the taller stays. Each
+`tree_tall_age`), flat above. A trunk on a column that cannot root one moves to the nearest column
+that can within `tree_move_radius`, or is dropped; when two trees land on one column the taller stays. Each
 shrub ellipse raises its patches' starting shrub density by the fraction of their plantable columns
 it covers. Grass starts as it does in a noise world. `ecosim run --world` prints what happened:
 

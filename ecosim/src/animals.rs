@@ -508,7 +508,9 @@ impl Sim {
         let tp = &self.params.tree;
         if t.is_multiple_of(tree_every) && self.count_trees() < tp.immigration_floor {
             if let Some((x, y)) = self.random_edge_soil_column() {
-                if self.spacing_ok(x as i32, y as i32) {
+                // An edge column a roof crosses takes no trunk, the same as one too close to a
+                // neighbour: the immigrant does not arrive this cadence (shot G12).
+                if self.world.can_root_a_trunk(self.world.dims.cidx(x, y)) && self.spacing_ok(x as i32, y as i32) {
                     let id = self.plant_tree(x, y, 0);
                     self.log_at(EventKind::Immigration, "tree", (x, y), "", id);
                 }

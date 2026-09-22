@@ -505,6 +505,18 @@ pub(crate) mod tests {
         }
     }
 
+    /// Paint the first `k` ground cells of ecology column (x, y) with `m` and `bh` metres of
+    /// building over them, leaving the rest of the column as it was: a roof or a walk whose outline
+    /// stops part way across a column, which is what a building that does not follow the ecology
+    /// grid leaves behind (shot G12).
+    pub(crate) fn paint_part(b: &mut Bundle, x: usize, y: usize, k: usize, m: Medium, bh: f32) {
+        let code = b.ground.media.iter().position(|&q| q == m).unwrap() as u8;
+        for i in b.ground.cells_of(x, y).take(k).collect::<Vec<_>>() {
+            b.ground.medium[i] = code;
+            b.building_h[i] = bh;
+        }
+    }
+
     /// Put a building of `h` metres on ecology column (x, y): roof over all its ground cells.
     pub(crate) fn build(b: &mut Bundle, x: usize, y: usize, h: f32) {
         paint(b, x, y, Medium::Roof);
@@ -598,6 +610,28 @@ pub(crate) mod tests {
         assert_eq!(class(2), ColClass::Rock);
         assert_eq!(class(3), ColClass::Water);
         assert_eq!(class(4), ColClass::Soil, "a water tie is not Water");
+    }
+
+    /// Shot G12: a column a roof crosses without covering keeps its class — it is a lawn with an
+    /// eave over one corner, and grass may grow on the rest of it — but no trunk may root in it. A
+    /// column that ground-level paving crosses the same way is ordinary in both senses.
+    #[test]
+    fn a_roof_over_part_of_a_column_bars_a_trunk_without_changing_what_the_column_is() {
+        let mut b = flat_bundle(16, 2);
+        paint_part(&mut b, 7, 7, 1, Medium::Roof, 4.0);
+        paint_part(&mut b, 8, 7, 2, Medium::Roof, 4.0);
+        paint_part(&mut b, 5, 5, 2, Medium::Concrete, 0.0);
+        let w = world_of(&b);
+        let c = |x, y| w.dims.cidx(x, y);
+        for (x, y) in [(7, 7), (8, 7)] {
+            assert_eq!(w.class[c(x, y)], ColClass::Soil, "({x}, {y}) is still soil: an eave is not paving");
+            assert!(w.is_plantable(c(x, y)), "so grass and shrub cover are still allowed on it");
+            assert!(w.roofed[c(x, y)] && !w.can_root_a_trunk(c(x, y)), "but no trunk may root in it");
+            assert!(!w.trunk_site_ok(x as i32, y as i32));
+        }
+        assert!(!w.roofed[c(5, 5)] && w.can_root_a_trunk(c(5, 5)), "half a concrete walk bars nothing");
+        assert!(w.class.iter().filter(|&&k| k == ColClass::Rock).count() == 0, "no column is fully sealed");
+        assert!(!w.roofed[c(9, 9)] && w.trunk_site_ok(9, 9), "and the open lawn is untouched");
     }
 
     #[test]
@@ -702,6 +736,79 @@ pub(crate) mod tests {
         let w = world_of(&b);
         assert_eq!(w.class[w.dims.cidx(11, 11)], ColClass::Water);
         assert_eq!(w.class[w.dims.cidx(8, 3)], ColClass::Rock);
+    }
+
+    /// No trunk stands on a column a roof crosses, at any tick: not one imported from the scene,
+    /// not one germinated later. Cover is deliberately not asserted — grass and shrubs are allowed
+    /// there, which is the whole difference between this rule and the sealed-majority one above.
+    fn no_trunk_under_a_roof(b: &Bundle, ticks: u32) -> Result<(), TestCaseError> {
+        let p = bundle_params(b);
+        let (mut sim, _) = Sim::from_bundle(p, 9, b).unwrap();
+        let d = sim.world.dims;
+        let roofed: Vec<usize> = (0..d.cols()).filter(|&c| sim.world.roofed[c]).collect();
+        for &c in &roofed {
+            let (x, y) = d.xy(c);
+            let roofs = b.ground.cells_of(x, y).filter(|&i| b.ground.medium_at(i) == Medium::Roof).count();
+            prop_assert!(roofs > 0, "column {:?} is marked roofed with no roof cell under it", (x, y));
+        }
+        for t in 0..=ticks {
+            for &c in &roofed {
+                prop_assert_eq!(sim.trunk_at[c], crate::sim::NO_TREE, "tick {}: a trunk under a roof", t);
+            }
+            if t < ticks {
+                sim.step();
+            }
+        }
+        Ok(())
+    }
+
+    /// The scattered bundle with a scene tree standing in the middle of every one of its columns, so
+    /// the import is asked about each in turn and has to move or drop the ones under a roof.
+    fn scattered_bundle_planted() -> impl Strategy<Value = Bundle> {
+        scattered_bundle().prop_map(|mut b| {
+            for y in 0..b.size_m {
+                for x in 0..b.size_m {
+                    let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+                    b.trees.push(BundleTree { x, y, height: 12.0, crown_radius: 3.0, crown_base: 4.0 });
+                }
+            }
+            b
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(4)))]
+
+        #[test]
+        fn prop_no_trunk_ever_stands_under_a_roof(b in scattered_bundle_planted()) {
+            no_trunk_under_a_roof(&b, 60)?;
+        }
+    }
+
+    /// Regression sibling, shot G12: a building whose outline cuts across the ecology grid, so the
+    /// columns along two of its sides are part roof and part lawn, with a street tree standing in
+    /// one of them. That is the shape the operator found on a bundle outside the Capitol, where
+    /// trees stood on part-roof columns and `ecosim check` then exited 1 on `tree_footing`.
+    #[test]
+    fn no_trunk_under_a_roof_regression_a_roof_that_cuts_across_columns() {
+        let mut b = flat_bundle(16, 2);
+        for y in 4..8 {
+            for x in 4..8 {
+                build(&mut b, x, y, 5.0);
+            }
+        }
+        for i in 4..8 {
+            // Two ground cells of the roof spill over its east and north edges.
+            paint_part(&mut b, 8, i, 2, Medium::Roof, 5.0);
+            paint_part(&mut b, i, 8, 2, Medium::Roof, 5.0);
+        }
+        b.trees.push(BundleTree { x: 8.5, y: 6.5, height: 11.0, crown_radius: 3.0, crown_base: 4.0 });
+        let w = world_of(&b);
+        let k = |x, y| w.class[w.dims.cidx(x, y)];
+        assert!((4..8).all(|i| k(8, i) == ColClass::Soil && k(i, 8) == ColClass::Soil), "the fringe is soil");
+        assert!((4..8).all(|i| w.roofed[w.dims.cidx(8, i)]), "and roofed, so it takes no trunk");
+        assert!(!w.roofed[w.dims.cidx(9, 6)], "the column past the fringe is not");
+        no_trunk_under_a_roof(&b, 120).unwrap();
     }
 
     /// A bundle world is deterministic: the same bundle and seed give the same tick-0 state.

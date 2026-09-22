@@ -2176,3 +2176,84 @@ height fallbacks with "`params.bundle` is written to `meta.json` **only when it 
 defaults**". Shot S3 reported that comment and a sibling in `ecoview-native/src/run.rs`; the sibling
 has since gone and this one has not. It is the same stale fact as the three fixed here, one component
 over, and it sits directly under the HUD's `(!)` provenance mark — a viewer shot's line.
+
+## Shot G12 — a roof bars a trunk, not a lawn
+
+**The defect.** `ecosim check`'s `tree_footing` (shot G11) fails a run in which a tree stands over
+**any** roof cell at all, while the model let a tree root in a column that was half roof: a column's
+class is a strict majority over the sealed media, so 2 of 4 ground cells of roof was a tie and a tie
+went to the living surface. The model and the invariant disagreed, and the invariant was right. The
+Capitol passes either way only because its geometry never happens to put a tree on such a column; a
+suburban lot, where a small irregular roof cuts across columns routinely, would fail the check for
+something the model allowed. The operator hit exactly that on a non-Capitol bundle, with trees that
+germinated — not imported — on part-roof columns from tick 4500 on.
+
+**Two ways to close the gap, and the narrow one is right.** The wide reading makes any roof cell seal
+the whole column: it becomes Rock and nothing grows there. The narrow one leaves the column as it is
+and forbids only what the invariant is actually about — **a trunk**. The narrow one was chosen:
+
+- **The invariant does not ask for the wide one.** `tree_footing` counts roof cells under a *trunk*.
+  A column whose north-east corner is under an eave is still lawn over the rest of its square metre,
+  and cover there is not the defect. Taking the cover too is a second change wearing the first one's
+  justification.
+- **The wide reading breaks a different clause of the same invariant, measured.** `tree_footing` also
+  requires **≥ 80% of sightings on no sealed cell at all**, and sealing 206 Capitol columns pushes
+  trees onto the paving they were previously crowded off. Worst-snapshot open share, three seeds, 201
+  snapshots each: 88.59 / 92.04 / 80.95% before, **76.60 / 77.58 / 75.56%** after — `just capitol` red
+  at "76.60% on none at tick 2100 of 47 trees [margin -0.0426]", and the failure is not sample noise
+  (the seed that fails hardest carries 315 trees). Relaxing that floor to fit is forbidden twice over:
+  it is a coverage floor, and this shot was not asked to move it. So the wide reading was withdrawn
+  after it was measured, not before.
+
+**The rule.** `World` gains `roofed: Vec<bool>` — true when any ground cell under the column is
+`roof` — and one predicate pair, `can_root_a_trunk(c) = is_plantable(c) && !roofed[c]` with its
+bounds-checked form `trunk_site_ok(x, y)`. The class rule is untouched: a part-roof column is still
+Soil, still plantable, still grows grass, shrubs, moisture and fertility. Every place a trunk is
+placed now asks the predicate: the scene import (`plants.rs::trunk_column`), germination
+(`trees.rs::try_seed`), the noise world's initial planting (`place_initial_trees`), and the
+immigration of a tree into an emptied world (`animals.rs`). Not one character of `check.rs` moved.
+
+**Why zero roof cells, and why it is not a parameter.** A roof is *above* the ground rather than on
+it: a trunk in such a column stands in the wall, whatever the rest of the square metre is made of.
+Zero also makes the model and the invariant say one sentence — `tree_footing` counts roof cells under
+a trunk and requires 0 — and an invariant that mirrors its rule by construction cannot drift from it.
+**It is not a `params.toml` key**, for the same reason the class rule beside it is not: what a
+bundle's ground is made of is structure read from the bundle, not a knob, and the threshold is forced
+by the invariant rather than chosen. `[medium] plantable` still says what cover roots in what.
+
+**The Capitol is byte-identical, which is the claim the row asked for.** Of 65,536 ecology columns
+6,331 have a roof cell and 21,705 of those are Rock already, leaving **206 part-roof soil columns**
+(165 with two roof cells of four, 41 with one). No tree ever wanted one: the scene import is unchanged
+(81 trees → 79 planted, 0 moved, 2 dropped), and **0 of the 17,594 germinations in a 20,000-tick
+Capitol run land on any of the 206**. Cut a run each side of the change on seeds 42, 43 and 44 —
+20,000 ticks, snapshots every 100, animals off, flat rain — and `ecosim diff` says `identical` on all
+three pairs, meta.json included. So nothing committed is regenerated: `fixtures/capitol-mini`,
+`fixtures/capitol-animals-mini`, `s42-manifest.sha256` and `tests/bundle.rs`'s pinned Capitol shape
+(21,705 Rock columns, shot G2's figure) are asserted against the committed bytes and pass. Noise
+worlds have no roof medium at all, so seeds 1, 2, 3 and 42 cannot move either.
+
+The wide reading's cost, for the record, was those 206 columns leaving cultivation and a 20,000-tick
+re-roll behind them (trees at 20k: 2378 → 2360, 2912 → 3222, 1858 → 3586 — direction-free noise). The
+operator's note that such a run "changed everywhere except the trees" is about that reading, not the
+one shipped.
+
+**Tests.** `a_roof_over_part_of_a_column_bars_a_trunk_without_changing_what_the_column_is` states both
+halves of the rule on one column of each kind — roofed, part-paved, open.
+`a_tree_under_an_eave_moves_off_while_the_lawn_under_it_still_grows` asks it through the scene import
+and, in the same breath, through the shrub importer, which still counts the eave column as cover.
+`prop_no_trunk_ever_stands_under_a_roof` puts a scene tree in the middle of every column of the
+scattered random bundle and asserts no trunk on a roofed column at any of 60 ticks, with a named
+regression sibling for a roof that spills two ground cells past its own columns on two sides. The
+end-to-end guard is `tests/bundle.rs`'s
+`a_roof_that_cuts_across_columns_takes_no_trunk_and_keeps_its_lawn`: a synthetic bundle — no site's
+data in it — with a house whose south wall stops half way across a row of columns and a surveyed
+street tree standing against that wall. **With the pre-G12 rule in place that run fails `ecosim
+check`**: "2 roof cells … first bad at tick 0, tree (7.0, 10.0) on 2 of 4 sealed, 2 roof". With the
+fix the tree moves one column clear, both trees are still planted, no tree stands on the fringe at
+any snapshot, the fringe columns are **soil** at every snapshot — the assertion that separates this
+rule from the withdrawn one — and the check passes.
+
+**No `TUNING.md` entry.** No parameter value moved; the change is a rule, and no acceptance line
+forced a default. **No sweep and no `FINDINGS.md`**: the row does not invoke the sim-shot rules and
+there is no rate parameter to sweep.
+

@@ -1878,3 +1878,116 @@ DECISIONS.md and measured above rather than left for someone to notice.
 **It did not put a latitude, an ambient level or an exposure into any format.** The number is the
 viewer's, the HUD says so in the same words V6 and V8 use, and if a later shot publishes one this
 becomes the fallback -- the same position crowding and standing water are in.
+
+# V9 -- the season word
+
+## The defect, reproduced before it was touched
+
+The row was verified by reimplementation; this shot re-ran the same measurement against the real
+`bump` and `smoothstep` in `sky.rs` and got the row's figures exactly. The old rule's year:
+
+| Word printed | From | To | Days |
+|---|---|---|---|
+| winter | 1 January | 6 March | 65 |
+| **summer** | **7 March** | **21 April** | **46** |
+| spring | 22 April | 9 June | 49 |
+| summer | 10 June | 17 September | 100 |
+| autumn | 18 September | 13 November | 57 |
+| **summer** | **14 November** | **27 November** | **14** |
+| winter | 28 November | 31 December | 35 |
+
+160 days of `summer`, 49 of `spring`, and the two bold rows are the else-branch: days that matched
+no bump at all. On those days the three weights sit just under the thresholds they were tested
+against -- 7 March is dormancy 0.4298 against 0.45, 21 April is flush 0.2749 against 0.3,
+14 November is senescence 0.2882 against 0.3 -- which is both why they fell through and the pin the
+third new test holds them at.
+
+## What it cost on the reference run
+
+`runs/capitol-s42` snapshots every 100 ticks against a `year_len` of 4000, so its **201 snapshots
+land on 40 distinct dates**, each recurring five times. **56 of the 201 change their word** under
+this shot:
+
+- **36** were in the two holes and printed `summer` in March, April or November. The largest single
+  one is 22 March, which is tick 0 and five more ticks besides -- six snapshots of the reference
+  run, the frame the row quoted.
+- **20** are boundary moves onto the calendar: 4 March winter to spring, 3 June spring to summer,
+  3 and 12 September summer to autumn.
+
+(That count corrects a line in this file's V8 section, which says the run's 201 snapshots "land on
+four dates". They land on four *in a year of 4000 ticks sampled every 1000*; the committed run
+samples every 100, and 40 is the measured number. V8's argument is unaffected -- the four-date
+version is the stronger case for the held date, not the weaker one -- so the paragraph is corrected
+here rather than rewritten there.)
+
+## The frames
+
+Four, all 1280 x 800, all on the committed Capitol, each one viewed. The first three are
+`--headless --frames 200` on `runs/capitol-s42` at the default camera; the fourth is the agent gate's
+own screenshot.
+
+| File | Command | Verdict |
+|---|---|---|
+| `v9-t0-22-march.png` | `--tick 0` | **The shot.** The run's own tick 0, and the frame the row quoted: the HUD reads `22 March, spring` and `season spring (14/64)` where it read `22 March, summer` before. 79 surveyed trees on unbroken lawn, the Capitol behind them -- the picture is unchanged, because the word is not an input to the colour. |
+| `v9-t10000-21-september.png` | `--tick 10000` | The control, and the case for the month boundary: 21 September still reads `autumn`, `season autumn (46/64)`, over 694 trees and 8,812 wet ground cells. The living green measures 80 degrees of hue here against 94 in the March frame, so the canopy has started to turn -- the equinox boundary would have called this `summer`. |
+| `v9-held-14-november.png` | `--tick 10000 --date 11-14` | The second hole, held over the same snapshot: `14 November, autumn`, `season autumn (55/64)`, sun 23 degrees up and the shadows long across the lawn. It printed `summer` before. Every run number is identical to the frame above -- 694 trees, 103,042 leaf voxels, 8,812 wet cells -- because only the date is held. |
+| `v9-agent-loop.png` | `agent_loop --run ../ecosim/runs/capitol-s42` | The gate's own frame, and an accident worth keeping: the loop scrubs to tick 200, which is **9 April** -- another of the fall-through days. It reads `9 April, spring`, and `ecoview.stats` on the same frame carries `"season":{"name":"spring","step":17,...}`. The word is right on all three surfaces without any of them being touched. |
+
+## The colour, measured across the three frames
+
+Sampled below the HUD (rows 470-700, columns 200-1100), over every pixel whose green channel leads:
+
+| Frame | Mean RGB | Hue | Lightness |
+|---|---|---|---|
+| `v9-t0-22-march.png` | 107, 154, 71 | 94 deg | 44.2% |
+| `v9-t10000-21-september.png` | 115, 141, 62 | 80 deg | 39.9% |
+| `v9-held-14-november.png` | 92, 121, 51 | 85 deg | 33.7% |
+
+These are three different words, three different dates, and the same colour model that was there
+before this shot. Nothing in the palette moved.
+
+## The tests
+
+Three new, 102 passing where V7 and V10 left 99.
+
+- `the_season_word_is_the_calendar_and_has_no_gap` walks all 366 days and checks each word against
+  the `MONTHS` table -- the calendar itself, not a second copy of the rule -- then checks the
+  counts: 92 spring, 92 summer, 91 autumn, 91 winter. No name is rare and none is an else-branch,
+  which is the defect stated as an invariant.
+- `the_season_word_never_says_summer_in_march_or_november` is the named regression sibling. The six
+  dates the operator measured, the ends and the middle of both holes, plus tick 0 of the reference
+  year (22 March) and tick 10000 (21 September), plus the four dates already published.
+- `the_season_word_moved_and_the_leaf_colour_did_not` pins the three weights on the five gap days
+  to 5e-4, asserts each is under the threshold it used to be tested against, and finishes by
+  tinting one palette twice -- once from `Season::of(65.0)` and once from the same struct with its
+  name overwritten -- to show the word is not an input to the colour.
+
+## The gates
+
+| Gate | Result |
+|---|---|
+| `cargo test --release --no-default-features --test mesh_golden` (the CI gate) | 102 passed |
+| `cargo test --release` | 102 passed |
+| `cargo fmt --check` | clean |
+| `cargo clippy --all-targets` | the same three pre-existing `src/bundle.rs` findings, no new one |
+| `cargo doc --no-deps --no-default-features` | the same three pre-existing private-link warnings |
+| `cargo build --release` | clean |
+| `agent_loop --run ../ecosim/runs/capitol-s42` | **PASS**, 19 calls, 0 retries, first screenshot 5.4 s |
+
+## Line budget
+
+Small, and it should be: the code is `month_index`, `season_name` and one line inside `Season::of`.
+The rest is the doc comment that says why and the three tests.
+
+## What this shot did not do
+
+**It did not touch the colour model.** `senescence`, `dormancy` and `flush`, their centres and
+their widths are byte for byte what V6 shipped. A shot that renamed the seasons and retuned the
+leaves at the same time would have made both unprovable.
+
+**It did not drop a leaf.** The canopy is still full in every frame here, in November as in March.
+Leaf fall is geometry and the simulator's to model (row G10); this viewer draws colour.
+
+**It did not re-accept a reference screenshot.** No mesh moves -- the name is not an input to any
+palette or any mesh key -- so `ecoview-native`'s goldens are untouched and no `REACCEPT` file is
+needed.

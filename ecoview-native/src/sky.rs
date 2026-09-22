@@ -150,6 +150,48 @@ pub const MONTHS: [(&str, u32); 12] = [
     ("December", 31),
 ];
 
+/// The 0-based month a 0-based day of the year falls in, on the [`MONTHS`] table. The day is
+/// clamped to 31 December, which is where the year's last quarter day lands.
+pub fn month_index(day: f32) -> usize {
+    let mut n = (day.rem_euclid(DAYS_PER_YEAR) as u32).min(364);
+    for (i, (_, len)) in MONTHS.iter().enumerate() {
+        if n < *len {
+            return i;
+        }
+        n -= len;
+    }
+    11
+}
+
+/// The season a day of the year is **named** in: the meteorological seasons, three whole months
+/// each, December to February being winter.
+///
+/// **The word is the calendar's, not the leaves'** (shot V9). It was read off the colour weights
+/// until this shot, and that had a hole in it: a day that matched none of the three bumps fell
+/// through to `"summer"`, so the HUD printed `summer` for 7 March to 21 April and again for 14 to
+/// 27 November -- 60 days a year, on a site where the ground was still frozen -- and `spring`
+/// existed for 49 days. A word taken from three overlapping Gaussians has to have such a hole
+/// somewhere, because the three do not cover the year; a word taken from the date cannot. The
+/// colour is unchanged and is still continuous: `senescence`, `dormancy` and `flush` are what the
+/// frame is actually drawn with, the HUD prints the season step beside the name, and
+/// `ecoview.stats` publishes all three.
+///
+/// Meteorological rather than astronomical, for one reason with a measurement behind it: the
+/// equinox boundary would move the reference run's own frame -- `runs/capitol-s42` at tick 10000
+/// falls on 21 September -- from `autumn` to `summer`, in a frame whose canopy has already started
+/// to turn: `senescence` is 0.40 there, a third of the way to the autumn hue, and the living green
+/// measures 80 degrees of hue against 94 on the same site in March (MEASUREMENTS.md, V9). The month
+/// boundary agrees with every seasonal frame this project has already taken and with all three bump
+/// centres (16 January, 16 May, 16 October).
+pub fn season_name(day: f32) -> &'static str {
+    match month_index(day) {
+        11 | 0 | 1 => "winter",
+        2..=4 => "spring",
+        5..=7 => "summer",
+        _ => "autumn",
+    }
+}
+
 /// Whose the day of the year on a frame is. Three cases, because two of them are not the run's and
 /// a picture that does not distinguish them is a picture making a claim the run never made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,14 +338,10 @@ impl Clock {
 
     /// Calendar month and day, on the [`MONTHS`] table.
     pub fn month_day(&self) -> (&'static str, u32) {
-        let mut n = (self.day as u32).min(364);
-        for (name, len) in MONTHS {
-            if n < len {
-                return (name, n + 1);
-            }
-            n -= len;
-        }
-        ("December", 31)
+        let m = month_index(self.day);
+        let before: u32 = MONTHS[..m].iter().map(|x| x.1).sum();
+        let n = (self.day.rem_euclid(DAYS_PER_YEAR) as u32).min(364) - before;
+        (MONTHS[m].0, n + 1)
     }
 
     /// `14:30`, from the viewer's hour.
@@ -372,7 +410,11 @@ impl Sun {
 ///
 /// Two continuous numbers rather than four named seasons, because a leaf does not change colour on
 /// a date. `senescence` is the autumn bump and `dormancy` the winter plateau; `flush` is the pale
-/// new growth of spring. The name is for the HUD only and nothing is computed from it.
+/// new growth of spring. The name is for the HUD only and nothing is computed from it -- and since
+/// shot V9 it comes from the calendar ([`season_name`]) rather than from those three weights, which
+/// is the one place in this module where the word and the colour are allowed to disagree: early
+/// September is named `autumn` with a canopy still drawn green, because the date says so and the
+/// leaves do not.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Season {
     pub day: f32,
@@ -397,15 +439,9 @@ impl Season {
         let senescence = bump(day, 288.0, 26.0);
         let dormancy = smoothstep(0.25, 0.85, bump(day, 15.0, 62.0));
         let flush = bump(day, 135.0, 22.0);
-        let name = if dormancy > 0.45 {
-            "winter"
-        } else if senescence > 0.3 {
-            "autumn"
-        } else if flush > 0.3 {
-            "spring"
-        } else {
-            "summer"
-        };
+        // The name is the calendar's and the three weights above are the leaves'; see
+        // [`season_name`] for why they were separated (shot V9).
+        let name = season_name(day);
         Season {
             day,
             name,

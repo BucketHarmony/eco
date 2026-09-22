@@ -3722,3 +3722,126 @@ fn a_closed_canopy_is_the_case_that_needed_the_shot() {
         a.stops
     );
 }
+
+// -----------------------------------------------------------------------------------------------
+// Shot V9: the season word. It was read off the three colour weights and fell through to "summer"
+// for the 60 days a year that matched none of them; it now comes from the calendar. The colour is
+// untouched, and the third test here is what holds that to be true.
+
+use ecoview_native::sky::{month_index, season_name};
+
+/// **Every day of the year has the right word, and the year has no hole in it.**
+///
+/// The meteorological seasons, three whole months each, checked against the [`MONTHS`] table rather
+/// than against a second copy of the rule: the test walks the calendar and asks what month it is in.
+#[test]
+fn the_season_word_is_the_calendar_and_has_no_gap() {
+    let mut counts = std::collections::BTreeMap::new();
+    for d in 0..=365 {
+        let day = d as f32;
+        let (month, _) = Clock::of(Some(0), DEFAULT_YEAR_LEN, 10.0)
+            .with_day(Some(day))
+            .month_day();
+        let want = match month {
+            "December" | "January" | "February" => "winter",
+            "March" | "April" | "May" => "spring",
+            "June" | "July" | "August" => "summer",
+            _ => "autumn",
+        };
+        let got = Season::of(day).name;
+        assert_eq!(got, want, "day {d} is in {month}");
+        assert_eq!(got, season_name(day), "the struct and the function agree");
+        *counts.entry(got).or_insert(0u32) += 1;
+    }
+    // 92, 92, 91 and 90, plus the year's last quarter day, which the [`MONTHS`] table lands on
+    // 31 December. No name is rare and none is the else-branch: that was the defect.
+    assert_eq!(counts["spring"], 92);
+    assert_eq!(counts["summer"], 92);
+    assert_eq!(counts["autumn"], 91);
+    assert_eq!(counts["winter"], 91);
+    // The word wraps with the year and survives a day off the end of it in either direction.
+    assert_eq!(season_name(-1.0), "winter");
+    assert_eq!(season_name(DAYS_PER_YEAR + 1.0), "winter");
+    assert_eq!(month_index(DAYS_PER_YEAR - 0.1), 11);
+    assert_eq!(month_index(0.0), 0);
+}
+
+/// The regression sibling, on the exact dates the defect was measured at: **the word is never
+/// `summer` in March, April or November**, and every seasonal frame this project has already
+/// published keeps the word it was published with.
+#[test]
+fn the_season_word_never_says_summer_in_march_or_november() {
+    // The two holes, 7 March to 21 April and 14 to 27 November, at their ends and in the middle.
+    for (m, d, want) in [
+        (3, 7, "spring"),
+        (3, 22, "spring"),
+        (4, 21, "spring"),
+        (11, 14, "autumn"),
+        (11, 27, "autumn"),
+        (11, 30, "autumn"),
+    ] {
+        let day = day_of_year(m, d).unwrap();
+        assert_eq!(Season::of(day).name, want, "{m}-{d}");
+    }
+    // Tick 0 of the reference year is 22 March, which is the frame the row quoted: it printed
+    // `22 March, summer`.
+    let tick0 = Clock::of(Some(0), 4000, 10.0);
+    assert_eq!(tick0.month_day(), ("March", 22));
+    assert_eq!(Season::of(tick0.day).name, "spring");
+    // The frames already taken, which is why the boundary is the month and not the equinox. Tick
+    // 10000 of the reference run is 21 September, drawn with the canopy already turning; V6's pair
+    // is 22 June and 21 December; V8's held dates are 15 May and 15 October.
+    let capitol = Clock::of(Some(10_000), 4000, 10.0);
+    assert_eq!(capitol.month_day(), ("September", 21));
+    assert_eq!(Season::of(capitol.day).name, "autumn");
+    for (m, d, want) in [
+        (6, 22, "summer"),
+        (12, 21, "winter"),
+        (5, 15, "spring"),
+        (10, 15, "autumn"),
+    ] {
+        assert_eq!(Season::of(day_of_year(m, d).unwrap()).name, want, "{m}-{d}");
+    }
+}
+
+/// **The word moved and the colour did not.** The three weights on the six days whose word changed,
+/// pinned: every one of them sits just under the threshold it used to be tested against, which is
+/// both why the day fell through and the evidence that nothing about the leaves has been retuned.
+#[test]
+fn the_season_word_moved_and_the_leaf_colour_did_not() {
+    // day, senescence, dormancy, flush -- and the old rule's thresholds were 0.3, 0.45, 0.3.
+    for (day, want) in [
+        (65.0, [0.0000, 0.4298, 0.0000]),
+        (80.0, [0.0000, 0.0523, 0.0019]),
+        (110.0, [0.0000, 0.0000, 0.2749]),
+        (317.0, [0.2882, 0.0786, 0.0000]),
+        (330.0, [0.0736, 0.4215, 0.0000]),
+    ] {
+        let s = Season::of(day);
+        let got = [s.senescence, s.dormancy, s.flush];
+        for i in 0..3 {
+            assert!((got[i] - want[i]).abs() < 5e-4, "day {day}: {got:?}");
+        }
+        assert!(
+            got[0] < 0.3 && got[1] < 0.45 && got[2] < 0.3,
+            "day {day} matched no bump, which is what the else-branch caught"
+        );
+    }
+    // 21 September is the other half of the argument and it is not a gap day: the reference run's
+    // own frame is already a third of the way to the autumn hue, so the equinox boundary would have
+    // named a turning canopy `summer`. The month boundary leaves it where it was.
+    let reference = Season::of(263.0);
+    assert!((reference.senescence - 0.3967).abs() < 5e-4);
+    assert!(reference.senescence > 0.3 && reference.name == "autumn");
+    // And the palette on such a day is still the palette those weights give: the name is not an
+    // input to the colour, so a frame on 7 March draws exactly what it drew before this shot.
+    let mut a = palette(Overlay::Surface, None);
+    let mut b = a.clone();
+    Season::of(65.0).tint_palette(&mut a);
+    Season {
+        name: "summer",
+        ..Season::of(65.0)
+    }
+    .tint_palette(&mut b);
+    assert_eq!(a, b, "the word is not an input to the colour");
+}

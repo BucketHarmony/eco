@@ -1255,3 +1255,56 @@ in the test from the viewer's own `TreeForm::grown` -- a tree every 6 m over a 3
 open (0.23% and 4.54%), so they show that an open site is left alone. Between them the two halves
 cover the claim without inventing data, and the built wood is the same procedural wood a run grows,
 not a block of leaf voxels stood in for one.
+
+# V9 -- the season word
+
+## V9 the word comes from the calendar, and the colour stays continuous
+
+`Season::of` named the season by testing the three colour weights in turn -- dormancy, then
+senescence, then flush -- and anything matching none of them fell through to `"summer"`. Three
+Gaussian bumps do not cover a year, so that else-branch was not an edge case: it was **60 days**,
+7 March to 21 April and 14 to 27 November, and it left `spring` with only 49 days of the year.
+
+The name now comes from the date (`season_name`), and the three weights are untouched. Two reasons
+for that direction rather than the other one the row offered, a fourth name for the gap:
+
+- A fourth name would need to cover both holes, and they are not the same thing -- March is
+  dormancy fading and November is dormancy rising. Any name true of one is wrong about the other.
+- The picture already carries the colour. What a reader cannot see in a frame is where in the year
+  it sits, and that is exactly what they read the date for, so the word is worth more agreeing with
+  the date than duplicating the leaves. The continuous truth is still published three ways: the
+  HUD prints the season step out of 64 beside the name, `ecoview.stats` carries all three weights,
+  and the palette is built from them and never from the word.
+
+The cost, stated plainly: the word and the colour may now disagree at the shoulders. Early
+September is named `autumn` over a canopy still drawn mostly green, and early March is named
+`spring` over a dormant one. That is a reduction of a continuous model to four words, and it is
+better placed on a boundary a reader can check against the date printed next to it than on a
+threshold nobody can see.
+
+## V9 meteorological boundaries, not the equinoxes
+
+Three whole months each, December to February being winter. The equinox boundary was measured and
+rejected for one reason: it moves `runs/capitol-s42` at tick 10000 -- 21 September, the tick the
+project photographs most -- from `autumn` to `summer`, in a frame whose canopy has already begun to
+turn (`senescence` 0.40, and its living green measures 80 degrees of hue against 94 on the same
+site in March). The month boundary leaves every seasonal frame this project has published reading
+the word it was published with (22 June, 15 May, 15 October, 21 December, 21 September), and it
+contains all three bump centres -- 16 January, 16 May and 16 October -- so the colour model's own
+opinion is never contradicted where it has one.
+
+## V9 one function, three surfaces
+
+The HUD line, the headless console summary and `ecoview.stats` all take the word from
+`Season::name`, and the first two share `SkyState::line()`, so the fix reaches all three at once
+and they cannot drift apart. Nothing computes from the name -- `Season::step()` drives remeshing
+and `tint_palette` drives the colour, both off the day and the weights -- so no mesh golden moves
+and no reference screenshot is re-accepted.
+
+## V9 `month_index` is shared rather than copied
+
+`Clock::month_day` already walked the `MONTHS` table; `season_name` needs the same walk. It is one
+function now, used by both, so a calendar with two answers in it is not possible. `month_index`
+also normalises with `rem_euclid` before the clamp, where `month_day` used a bare `as u32` cast --
+a day of `-1.0` named 1 January and now names 31 December. No caller passes one; the clock
+normalises its own day.

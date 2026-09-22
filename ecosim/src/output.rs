@@ -64,6 +64,15 @@ struct WorldMeta<'a> {
     ground_width: usize,
     ground_depth: usize,
     media: Vec<&'static str>,
+    /// Where on Earth the world is, degrees north (shot S9). It comes from the bundle and nothing
+    /// in the simulator reads it; it is here so a renderer's sun path is the world's rather than a
+    /// constant of its own.
+    ///
+    /// Written as `null` rather than omitted when the world has no latitude — a noise world, or a
+    /// bundle exported before the key existed. Omitting it would leave a reader unable to tell a
+    /// run that has no latitude from one written before the key, which is the distinction shot S2
+    /// restored for `params` and this key keeps.
+    latitude_deg: Option<f64>,
 }
 
 impl<'a> WorldMeta<'a> {
@@ -76,6 +85,7 @@ impl<'a> WorldMeta<'a> {
             ground_width: g.width,
             ground_depth: g.depth,
             media: g.media.iter().map(|m| m.name()).collect(),
+            latitude_deg: bundle.and_then(|b| b.latitude_deg),
         }
     }
 }

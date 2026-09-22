@@ -190,7 +190,17 @@ def json_rows(rows):
     return "[\n" + body + "\n]\n"
 
 
-def bundle_json(name, size_m, grid, source, counts):
+def latitude(v):
+    """`eco_latitude_deg` as the bundle records it: degrees north, rounded to 1e-6 of a degree,
+    which is about 0.1 m -- far finer than the site and coarse enough to be written identically
+    everywhere. Out-of-range values are the scene's mistake and stop the export."""
+    d = round(float(v), 6)
+    if not -90.0 <= d <= 90.0:
+        raise ValueError("eco_latitude_deg = %r is not a degree of latitude, -90 to 90" % (v,))
+    return d if d else 0.0
+
+
+def bundle_json(name, size_m, grid, source, latitude_deg, counts):
     """`bundle.json`'s object, keys in the contract's order. Every medium is always listed, so a
     medium code means the same thing in every bundle whether or not the scene used it."""
     return {
@@ -203,6 +213,7 @@ def bundle_json(name, size_m, grid, source, counts):
         "ground_depth": grid.depth,
         "media": list(MEDIA),
         "source": source,
+        "latitude_deg": latitude(latitude_deg),
         "counts": counts,
     }
 
@@ -325,6 +336,10 @@ def export(scene, out_dir, samples):
     if default_medium not in MEDIA:
         raise SystemExit("eco_default_medium = %r is not a medium" % default_medium)
     source = scene_prop(scene, "eco_source", str)
+    # Required, not optional. A scene that predates shot S9 stops the export with the property's
+    # name rather than exporting a bundle whose latitude has silently gone missing: the viewer
+    # would then fall back to its own constant and file the wrong sun under this site's name.
+    latitude_deg = scene_prop(scene, "eco_latitude_deg", float)
 
     grounds = tagged("ground")
     if len(grounds) != 1:
@@ -388,7 +403,7 @@ def export(scene, out_dir, samples):
     shrubs = sort_entities(shrubs)
     pipes = sort_entities(pipes, key=pipe_key)
     counts = {"trees": len(trees), "shrubs": len(shrubs), "pipes": len(pipes)}
-    meta = bundle_json(name, grid.width * grid.cell_m, grid, source, counts)
+    meta = bundle_json(name, grid.width * grid.cell_m, grid, source, latitude_deg, counts)
     write_bundle(out_dir, meta, ground_h, medium, building_h, trees, shrubs, pipes)
 
     cells = Counter(MEDIA[c] for c in medium)

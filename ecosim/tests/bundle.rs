@@ -146,6 +146,11 @@ fn a_bundle_run_writes_a_format_4_run_dir_that_check_reads() {
     assert_eq!((m["world"]["ground_width"].as_u64(), m["world"]["ground_depth"].as_u64()), (Some(32), Some(32)));
     assert_eq!(m["world"]["media"][0], "soil");
     assert_eq!(m["world"]["media"].as_array().unwrap().len(), 9);
+    // Shot S9. This synthetic bundle has no `latitude_deg`, the way every bundle written before
+    // S9 has none, and the key is still written -- as null, so a reader can tell "this world has
+    // no latitude" from "this run predates the key".
+    assert!(m["world"].as_object().unwrap().contains_key("latitude_deg"));
+    assert_eq!(m["world"]["latitude_deg"], Value::Null);
     assert_eq!(m["animals"], false, "the garden series runs without animals");
 
     // The static ground grid is written once, at the run root.
@@ -185,6 +190,55 @@ fn a_bundle_run_writes_a_format_4_run_dir_that_check_reads() {
     assert!(foot.observed.contains("0 over half sealed, 0 roof cells"), "{foot:?}");
     assert!(foot.observed.contains("over 5 snapshots"), "{foot:?}");
     fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Rewrite `dir/bundle.json` with `latitude_deg` set to `lat`, leaving every other key as it was.
+fn set_latitude(dir: &Path, lat: f64) {
+    let text = fs::read_to_string(dir.join("bundle.json")).unwrap();
+    let mut j: serde_json::Map<String, Value> = serde_json::from_str(&text).unwrap();
+    j.insert("latitude_deg".into(), serde_json::json!(lat));
+    fs::write(dir.join("bundle.json"), serde_json::to_vec(&j).unwrap()).unwrap();
+}
+
+/// Shot S9: the scene's latitude reaches the run, and nothing else makes one up. A bundle that
+/// carries a latitude puts it in `meta.json`'s `world`; a noise world has no site at all and writes
+/// null there. Nothing in the simulator reads the number -- the run is the carrier, and the
+/// renderer that draws the sun is the reader -- so what is tested is that it arrives unaltered.
+///
+/// The latitude used here is southern (-33.8688, Sydney) on purpose: a sign dropped anywhere
+/// between the scene and `meta.json` would put this site's sun in the northern sky, and a
+/// northern test number could not tell.
+#[test]
+#[cfg_attr(coverage, ignore = "two short runs on a 16 m world; runs in `cargo test`, not under llvm-cov")]
+fn the_scenes_latitude_reaches_the_runs_meta_json() {
+    let dir = tmp("bundle_lat_src");
+    write_bundle(&dir);
+    set_latitude(&dir, -33.8688);
+    let b = Bundle::load(&dir).unwrap();
+    assert_eq!(b.latitude_deg, Some(-33.8688), "the loader reads it");
+    let (p, set) = bundle_params(&b);
+    let out = tmp("bundle_lat_run");
+    let opts = RunOptions { format_version: BUNDLE_FORMAT_VERSION, bundle: Some(&b), ..Default::default() };
+    run_with(p, 7, 100, 100, &set, &out, opts).unwrap();
+    assert_eq!(meta(&out)["world"]["latitude_deg"], serde_json::json!(-33.8688), "and the run carries it");
+
+    // A noise world is format 4 through the water tier and has no bundle, so it has no latitude.
+    let noise = tmp("noise_lat_run");
+    let (p2, set2) = params(&["world.width=16", "world.depth=16", "world.patch=8"]);
+    run_with(p2, 7, 100, 100, &set2, &noise, RunOptions::default()).unwrap();
+    let m = meta(&noise);
+    assert_eq!(m["format_version"], BUNDLE_FORMAT_VERSION, "the water tier writes format 4 on noise too");
+    assert_eq!(m["world"]["bundle"], false);
+    assert_eq!(m["world"]["latitude_deg"], Value::Null, "a noise world is nowhere on Earth");
+
+    // A latitude that is not one is the scene's mistake and stops the load, naming the file.
+    set_latitude(&dir, 120.0);
+    let e = Bundle::load(&dir).unwrap_err();
+    assert!(e.contains("bundle.json") && e.contains("latitude_deg = 120"), "{e}");
+
+    fs::remove_dir_all(&dir).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+    fs::remove_dir_all(&noise).unwrap();
 }
 
 /// `ecosim run --world` builds the bundle world and writes format version 4. Asking for an older
@@ -276,6 +330,11 @@ fn the_committed_capitol_bundle_loads_with_its_documented_shape() {
     assert_eq!((b.ground.width, b.ground.depth, b.ground.ratio), (512, 512, 2), "0.5 m ground cells");
     assert_eq!((b.trees.len(), b.shrubs.len(), b.pipes.len()), (81, 64, 4));
     assert!(b.source.contains("OpenStreetMap"), "the ODbL credit travels with the bundle");
+    assert_eq!(
+        b.latitude_deg,
+        Some(42.73365),
+        "the dome's latitude (shot S9), the same number README.md gives the crop centre in prose"
+    );
 
     // Media: the LiDAR-and-OSM raster, in ground cells (256 m² each 0.5 m cell covers 0.25 m²).
     let mut cells = std::collections::BTreeMap::new();

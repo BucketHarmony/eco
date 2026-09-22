@@ -14,6 +14,7 @@ ecosim run --world worlds/capitol --seed 1 --ticks 20000 --out runs/capitol \
 | | |
 |---|---|
 | Crop | 256 m square, centred on the dome at 42.73365 N, 84.55553 W |
+| Latitude | `bundle.json`'s `latitude_deg` = 42.73365, the dome (shot S9). The only key in the bundle a renderer needs to draw this site's sun; nothing in the simulator reads it |
 | Ecology grid | 256 × 256 columns of 1 m (`[world] width` and `depth` come from the bundle) |
 | Ground grid | 512 × 512 cells of 0.5 m, cell (0, 0) at the south-west corner |
 | Ground height | 0.000–8.589 m above the crop minimum, which is 255.00 m NAVD88 |
@@ -83,6 +84,11 @@ The bundle is exported from a tagged Blender scene the operator keeps outside th
 ```sh
 blender -b capitol.blend --python tools/blend_export.py -- worlds/capitol --audit 4096
 ```
+
+The scene needs `eco_latitude_deg = 42.73365` as a scene custom property (shot S9). It is required,
+so a scene that predates the property stops the export by name rather than writing a bundle with no
+latitude in it; the committed `bundle.json` already carries the value, and a re-export from a scene
+that has it is byte-identical as before.
 
 The export is deterministic — the same `.blend` gives a byte-identical bundle — so a re-export
 should leave `git status` clean and `sha256sum -c SHA256SUMS` passing. `tools/blend_export.py`'s

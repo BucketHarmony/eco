@@ -18,6 +18,7 @@
     "water"
   ],
   "source": "USGS 3DEP MI 31Co Ingham 2017 LPC (public domain), tiles 070447 070450 072447 072450; 256 m crop centred on the Michigan State Capitol dome; walks, plazas and parking in the medium grid from OpenStreetMap as of 2017-05-01: Map data (c) OpenStreetMap contributors, available under the Open Database License (ODbL) https://www.openstreetmap.org/copyright",
+  "latitude_deg": 42.73365,
   "counts": {
     "trees": 81,
     "shrubs": 64,

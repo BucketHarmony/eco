@@ -149,7 +149,7 @@ runs/g1/
     pipes.json        [{id, inlet: [x, y], outlet: [x, y], capacity_m3h, illustrative}], metres from the SW corner
 ```
 
-`meta.json` gains `"world": {"name", "bundle", "ground_cell_m", "ground_width", "ground_depth", "media": [...]}`, where `bundle` is false for a noise world (`name` is then `"noise"`), `ground_width` × `ground_depth` is the ground grid (`gw`, `gd` above), and `media` maps a `medium.bin` code to its name. The ground grid is finer than the ecology grid: `ground_width = dims.x / ground_cell_m`, with cell (0, 0) at the south-west corner, x east and y north, the same orientation as the voxel fields.
+`meta.json` gains `"world": {"name", "bundle", "ground_cell_m", "ground_width", "ground_depth", "media": [...], "latitude_deg"}`, where `bundle` is false for a noise world (`name` is then `"noise"`), `ground_width` × `ground_depth` is the ground grid (`gw`, `gd` above), and `media` maps a `medium.bin` code to its name. The ground grid is finer than the ecology grid: `ground_width = dims.x / ground_cell_m`, with cell (0, 0) at the south-west corner, x east and y north, the same orientation as the voxel fields. `latitude_deg` (shot S9) is where on Earth the world is, in degrees north, copied from the bundle; it is `null` for a noise world and for a bundle exported before the key existed. Nothing in the simulator reads it — it is there so a renderer draws this site's sun rather than a constant of its own.
 
 Version 4 also adds two water files to each snapshot, written when the water tier is on. `--format-version 2` writes neither, and neither does a run with `hydro.enabled = false`:
 

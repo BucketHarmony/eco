@@ -153,11 +153,24 @@ class Layout(unittest.TestCase):
 
     def test_bundle_json_names_every_medium_with_soil_first(self):
         grid = bx.grid_of(16.0, 0.5, (-8.0, -8.0))
-        meta = bx.bundle_json("x", 16.0, grid, "s", {"trees": 0, "shrubs": 0, "pipes": 0})
-        self.assertEqual(list(meta), "format version name size_m ground_cell_m ground_width ground_depth media source counts".split())
+        meta = bx.bundle_json("x", 16.0, grid, "s", 42.73365, {"trees": 0, "shrubs": 0, "pipes": 0})
+        self.assertEqual(
+            list(meta),
+            "format version name size_m ground_cell_m ground_width ground_depth media source latitude_deg counts".split(),
+        )
         self.assertEqual(meta["media"][0], "soil")
         self.assertEqual((meta["version"], meta["ground_width"], meta["ground_depth"]), (2, 32, 32))
         self.assertEqual(json.loads(json.dumps(meta))["format"], "ecosim-world-bundle")
+
+    def test_latitude_is_rounded_and_range_checked(self):
+        # Rounded to 1e-6 of a degree, and -0.0 written as 0.0 so the bytes cannot differ.
+        self.assertEqual(bx.latitude(42.7336512345), 42.733651)
+        self.assertEqual(bx.latitude(-0.0000001), 0.0)
+        self.assertEqual(repr(bx.latitude(-0.0000001)), "0.0")
+        self.assertEqual(bx.latitude(-33.8688), -33.8688)
+        for bad in (90.5, -91.0, 1000.0):
+            with self.assertRaises(ValueError):
+                bx.latitude(bad)
 
     def test_f32_is_little_endian(self):
         self.assertEqual(bx.f32le([1.0, -2.5]).hex(), "0000803f000020c0")

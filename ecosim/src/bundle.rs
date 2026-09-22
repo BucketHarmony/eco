@@ -189,6 +189,10 @@ pub struct Bundle {
     pub size_m: usize,
     /// Provenance: data source, licence, crop centre.
     pub source: String,
+    /// Where on Earth the crop is, in degrees north of the equator, or `None` when the scene did
+    /// not say (shot S9). Only the sun's path needs it, and nothing in the simulator reads it: it
+    /// is carried from the scene into the run's `meta.json` for a renderer to draw with.
+    pub latitude_deg: Option<f64>,
     /// The ground grid.
     pub ground: Ground,
     /// Ground height per ground cell, metres above the crop minimum.
@@ -217,6 +221,10 @@ struct BundleJson {
     media: Vec<String>,
     #[serde(default)]
     source: String,
+    /// Added in shot S9. Additive, so it does not bump `version`: a bundle written before it has
+    /// no latitude and is still a valid version-2 bundle.
+    #[serde(default)]
+    latitude_deg: Option<f64>,
 }
 
 /// `v` as a whole number, or `None` when it is not finite or not whole.
@@ -278,6 +286,11 @@ impl Bundle {
         if media.first() != Some(&Medium::Soil) {
             return bad("media[0] must be \"soil\"".into());
         }
+        if let Some(lat) = j.latitude_deg {
+            if !(lat.is_finite() && (-90.0..=90.0).contains(&lat)) {
+                return bad(format!("latitude_deg = {lat} must be a degree of latitude, -90 to 90"));
+            }
+        }
         let ground = Ground { width: j.ground_width, depth: j.ground_depth, ratio, medium: Vec::new(), media };
         let n = ground.cells();
         let ground_h = read_f32(dir, "ground_h.f32", n)?;
@@ -299,6 +312,7 @@ impl Bundle {
             name: j.name,
             size_m,
             source: j.source,
+            latitude_deg: j.latitude_deg,
             ground,
             ground_h,
             building_h,
@@ -463,6 +477,7 @@ pub(crate) mod tests {
             name: "synthetic".into(),
             size_m,
             source: "test".into(),
+            latitude_deg: None,
             ground: Ground { width: w, depth: d, ratio, medium: vec![1; w * d], media: Medium::ALL.to_vec() },
             ground_h: vec![0.0; w * d],
             building_h: vec![0.0; w * d],
@@ -721,9 +736,12 @@ pub(crate) mod tests {
         let dir = scratch_dir();
         fs::create_dir_all(&dir).unwrap();
         let media: Vec<String> = b.ground.media.iter().map(|m| format!("{:?}", m.name())).collect();
+        // A bundle with no latitude writes no key at all, which is how every bundle written
+        // before shot S9 reads. The `Some` case is the new key.
+        let lat = b.latitude_deg.map_or(String::new(), |l| format!(",\"latitude_deg\":{l:?}"));
         let json = format!(
             "{{\"format\":\"{BUNDLE_FORMAT}\",\"version\":{version},\"name\":\"{}\",\"size_m\":{},\
-             \"ground_cell_m\":{},\"ground_width\":{},\"ground_depth\":{},\"media\":[{}],\"source\":\"{}\"}}",
+             \"ground_cell_m\":{},\"ground_width\":{},\"ground_depth\":{},\"media\":[{}],\"source\":\"{}\"{lat}}}",
             b.name,
             b.size_m,
             b.ground.cell_m(),
@@ -758,9 +776,11 @@ pub(crate) mod tests {
             capacity_m3h: 20.0,
             illustrative: true,
         });
+        b.latitude_deg = Some(-33.8688);
         let dir = write_bundle(&b, BUNDLE_VERSION);
         let got = Bundle::load(&dir).unwrap();
         assert_eq!((got.size_m, got.ground.ratio), (16, 2));
+        assert_eq!(got.latitude_deg, b.latitude_deg, "the latitude survives the round trip, sign and all");
         assert_eq!(got.ground_h, b.ground_h);
         assert_eq!(got.building_h, b.building_h);
         assert_eq!(got.ground.medium, b.ground.medium);
@@ -786,6 +806,16 @@ pub(crate) mod tests {
                 "short ground_h.f32",
                 Box::new(|d: &Path| fs::write(d.join("ground_h.f32"), vec![0u8; 8]).unwrap()),
                 "8 bytes, expected 4096",
+            ),
+            (
+                "a latitude that is not one",
+                Box::new(|d: &Path| {
+                    let t = fs::read_to_string(d.join("bundle.json"))
+                        .unwrap()
+                        .replace("\"source\"", "\"latitude_deg\":95.5,\"source\"");
+                    fs::write(d.join("bundle.json"), t).unwrap();
+                }),
+                "latitude_deg = 95.5 must be a degree of latitude",
             ),
             (
                 "unknown medium",

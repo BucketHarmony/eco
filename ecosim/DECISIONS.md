@@ -1981,3 +1981,56 @@ eighteen full-length sims were running in parallel on the same machine; the comp
 line's numbers (it is matched by name), but a golden that reads FAIL misleads every future reader.
 The line was replaced with the `PASS … 64782 ms` a standalone run of the same seed produces. No
 other line in the file was touched.
+
+## Shot S9 — the world says where on Earth it is
+
+`bundle.json` gains `latitude_deg`, degrees north of the equator, and every format-4 run copies it
+into `meta.json`'s `world` object. Nothing in the simulator reads it. Its one purpose is that a
+renderer's sun path comes from the world instead of from a constant the renderer invented, which is
+the thing shot V6 handed up: `ecoview-native` holds 42.7 N because no bundle and no run could tell
+it otherwise, and that number happens to be right for the one committed bundle and would be
+silently wrong for any other site.
+
+**Latitude only, no longitude.** A sun path needs a latitude and a date; a longitude only matters
+once an hour is tied to a civil clock and a time zone, and nothing in either project has one — the
+viewer's hour is its own, and it says so. A key nothing can use is a key that goes stale, so it is
+not written.
+
+**Additive, so `version` stays 2 and `format_version` stays 4.** Every other key of both files
+keeps its bytes, and a reader that ignores the new one reads exactly what it read before. The
+project's rule that adding a `meta.json` key does not bump `format_version` (CLAUDE.md) is extended
+to the bundle here for the same reason: a version bump would make every bundle written before today
+unreadable in exchange for nothing.
+
+**The reader takes `None`; the writer refuses to.** `Bundle::load` treats the key as optional,
+because bundles without it exist and must keep loading. `tools/blend_export.py` requires
+`eco_latitude_deg` and stops the export by name if the scene has no such property. A reader has to
+cope with old files and a writer never has to make a new one, so the tolerance belongs on exactly
+one side. The alternative — an exporter that writes no latitude when the scene is silent — produces
+a bundle that looks complete, loads without complaint, and puts the viewer back on its constant.
+
+**`null`, not absent, when there is no latitude.** A noise world is nowhere on Earth and a bundle
+exported before today has no latitude, and both write `"latitude_deg": null` into `meta.json`
+rather than omitting the key. Omitting it would leave a reader unable to tell a run with no
+latitude from a run written before the key existed — the same distinction shot S2 restored for
+`params` when it removed the `skip_serializing_if` that hid defaults.
+
+**The Capitol's number is 42.73365 N**, which is the dome, and is the latitude `worlds/capitol/
+README.md` has given the crop centre in prose since shot G2. Nothing was measured here: the prose
+became machine-readable. `tests/bundle.rs` pins it alongside the bundle's other committed facts, so
+a re-export that moved it fails there.
+
+**Regenerated, and why.** `worlds/capitol/bundle.json` gains the key, so `SHA256SUMS` is re-cut for
+that one file (the other six hashes are unchanged, and `sha256sum -c` passes). `fixtures/capitol-
+mini` and `fixtures/capitol-animals-mini` gain the key in their `meta.json`; nothing else in either
+fixture moved, which the pre-regeneration run confirmed — `diff_runs` reported exactly
+`["differs: meta.json"]`. No `s42-*` manifest changed, because `meta.json` is not in a manifest and
+no noise-world byte moved.
+
+**Handed on, and not done here.** The viewer is a different component and this row may not touch it
+(MASTER.md, component isolation), so `ecoview-native` still holds its 42.7 N default: reading
+`world.latitude_deg` and keeping the fallback for bundles that have none is a viewer shot. Two
+things for whoever takes it. `ecoview-native/src/bundle.rs` *writes* `bundle.json` when the editor
+saves a world, and as it stands it would drop the latitude of any bundle it round-trips. And the
+committed copy under `ecoview/public/fixtures/capitol-world` is stale until the next
+`scripts/sync-data.sh`, which CI's `ecoview` job runs on every push.

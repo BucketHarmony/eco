@@ -507,6 +507,34 @@ fn light_is_the_v1_file_re_extincted(got: &[u8], want: &[u8], rel: &str) {
     }
 }
 
+/// A run-directory file as the pre-crown ecosim wrote it (shot S3): the three crown fields cut from
+/// every tree in `entities.json`. Unlike the cuts in `common` there is no rate that turns the fields off
+/// — they are published for every tree of every run — so this one removes them rather than
+/// asserting they are inert. They are the last three fields of a tree object, in the order
+/// `TreeOut` declares them, so each runs from `,"height_m":` to the object's closing brace; that
+/// both are there is asserted for every tree, so a reordering fails here rather than silently
+/// cutting the wrong span.
+fn without_crown(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    match name.file_name().and_then(|n| n.to_str()) {
+        Some("entities.json") => {
+            let text = String::from_utf8(bytes).unwrap();
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find(",\"height_m\":") {
+                out.push_str(&rest[..at]);
+                let end = rest[at..].find('}').expect("a tree object ends in a brace");
+                let cut = &rest[at..at + end];
+                assert!(cut.contains("\"crown_radius_m\":") && cut.contains("\"crown_light\":"), "{cut}");
+                rest = &rest[at + end..];
+            }
+            out.push_str(rest);
+            assert!(!out.contains("height_m"), "a crown field outside a tree object");
+            out.into_bytes()
+        }
+        _ => bytes,
+    }
+}
+
 /// Format version 2, fire and traits only add files, fields and columns. A fresh seed-42 mini run
 /// with fire, crowding and mutation off, the hunter refractory at the old cooldown and the water tier
 /// off, on the square world (`common::SQUARE`) the fixtures were made on, is compared with the v1
@@ -546,7 +574,7 @@ fn format_2_and_fire_only_add_to_version_1_files() {
     let cut = |rel: &str| {
         let f = Path::new(rel);
         let b = common::without_water(f, fs::read(fresh.join(rel)).unwrap());
-        common::without_fire(f, common::without_traits(f, b))
+        without_crown(f, common::without_fire(f, common::without_traits(f, b)))
     };
     let text = |b: Vec<u8>| String::from_utf8(b).unwrap();
     let (got, want) = (text(cut("series.csv")), text(fs::read(v1.join("series.csv")).unwrap()));
@@ -786,4 +814,41 @@ fn animals_off_run_has_no_animals_and_marks_the_animal_invariants_na() {
     let sig = ecosim::check::signature_of(&dir, None).unwrap();
     assert_eq!(sig, ecosim::check::Signature::NotApplicable);
     assert!(ecosim::check::signature_line(&sig).contains("not applicable"));
+}
+
+/// Shot S3 publishes; it does not decide. The crown a tree has is written to `entities.json` and is
+/// read by nothing in the simulator, so changing the crown's own parameter changes that file and
+/// no other: two runs that differ only in `tree.crown_radius_frac` have the same `series.csv`, the
+/// same `events.csv`, the same `light.bin` and the same `state.bin` at every snapshot. Only
+/// `meta.json`, which carries the parameter, and `entities.json`, which carries what it produced,
+/// move. This is the identity anchor a rate-0 test would be for a mechanism with a rate; the crown
+/// has none, because there is no setting of it at which a tree stops having a crown.
+#[test]
+fn the_crown_changes_only_what_it_publishes() {
+    let each = |frac: &str, name: &str| {
+        let set = common::small_set(&[&format!("tree.crown_radius_frac={frac}")]);
+        let dir = tmp(name);
+        run(small_with(&set), 1, 3_000, 500, &set, &dir).unwrap();
+        dir
+    };
+    let (a, b) = (each("0.30", "crown_frac_default"), each("0.90", "crown_frac_wide"));
+    let diff = ecosim::check::diff_runs(&a, &b).unwrap();
+    let want: Vec<String> = std::iter::once("differs: meta.json".to_string())
+        .chain((0..=6).map(|i| format!("differs: snap_{:06}/entities.json", i * 500)))
+        .collect();
+    assert_eq!(diff, want, "a crown radius moved something it does not write");
+
+    // And the radius is what moved in it: three times the crown, three times the radius, on a tree
+    // whose height and age are untouched.
+    let trees = |dir: &Path| -> Vec<Value> {
+        let v: Vec<Value> = serde_json::from_slice(&fs::read(dir.join("snap_003000/entities.json")).unwrap()).unwrap();
+        v.into_iter().filter(|e| e["kind"] == "tree").collect()
+    };
+    let (ta, tb) = (trees(&a), trees(&b));
+    assert!(!ta.is_empty() && ta.len() == tb.len());
+    for (x, y) in ta.iter().zip(&tb) {
+        assert_eq!((&x["id"], &x["age"], &x["height_m"]), (&y["id"], &y["age"], &y["height_m"]));
+        let (ra, rb) = (x["crown_radius_m"].as_f64().unwrap(), y["crown_radius_m"].as_f64().unwrap());
+        assert!((rb - 3.0 * ra).abs() <= 0.001, "{ra} -> {rb}");
+    }
 }

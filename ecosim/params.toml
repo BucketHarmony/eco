@@ -224,6 +224,13 @@ seed_radius = 6.0
 sapling_light = 0.5882
 min_spacing = 2
 death_detritus = 40.0
+# The crown a tree has, as fractions of its height (shot S3). Measured, not chosen: the medians over
+# the 81 surveyed trees in worlds/capitol/trees.json are 0.3040 and 0.3684 (n = 81, radius/height sd
+# 0.126). They describe the crown, which is 6-12 m across on a mature tree and is not the 3x3 column
+# footprint the canopy voxels shade -- that mismatch is what this shot measures and publishes rather
+# than hides. These are also the two constants ecoview-native has been holding its own copy of.
+crown_radius_frac = 0.30
+crown_base_frac = 0.37
 light = [0.2353, 0.5882, 1.0, 1.0039]
 moisture = [0.1176, 0.3922, 1.0, 1.004]
 temp = [-3.0, 2.0, 26.0, 31.0]

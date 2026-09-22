@@ -73,6 +73,34 @@ pub fn import_age(height: f32, p: &Params) -> u32 {
     age.round().clamp(0.0, u32::MAX as f32) as u32
 }
 
+/// Height in metres of a tree of `age` ticks: [`import_age`] read backwards (shot S3).
+///
+/// The simulator has always had an age-to-height curve -- it is how a surveyed tree becomes a tree
+/// of an age -- but only ever ran it in the import direction, so nothing in a run said how tall a
+/// tree is. This is the same three-segment curve travelled the other way, and it is the simulator's
+/// own answer to how big a tree of a given age is, rather than a second curve fitted beside it.
+///
+/// It is the exact inverse on the middle segment and a left inverse everywhere the map is
+/// invertible: above `bundle.tree_tall_age_years` [`import_age`] is flat, so every age past it is
+/// `tree_tall_height` and only the age itself cannot be recovered. A tree of age 0 is 0 m, which is
+/// what the import curve says a seed is.
+pub fn height_of_age(age: u32, p: &Params) -> f32 {
+    let bp = &p.bundle;
+    let (hm, ht) = (bp.tree_mature_height.max(0.0), bp.tree_tall_height);
+    let ages = p.tree_ages();
+    let (mature, tall) = (ages.mature as f32, ages.tall_import.max(ages.mature) as f32);
+    let a = age as f32;
+    if a <= 0.0 {
+        0.0
+    } else if mature > 0.0 && a < mature {
+        hm * a / mature
+    } else if tall > mature && a < tall && ht > hm {
+        hm + (ht - hm) * (a - mature) / (tall - mature)
+    } else {
+        ht.max(hm)
+    }
+}
+
 /// Whether the point (px, py), in metres from the world's south-west corner, lies inside the
 /// shrub's ellipse. The ellipse has half-axes `rx` (east–west) and `ry` (north–south) before it is
 /// turned by `angle` radians counter-clockwise.

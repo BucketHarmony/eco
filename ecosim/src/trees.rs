@@ -281,6 +281,183 @@ impl Sim {
     }
 }
 
+/// The crown the allometry gives a tree, in metres and in world coordinates (shot S3).
+///
+/// The simulator's canopy **voxels** are a 3x3 m stamp two voxels deep, which is the shade a tree
+/// casts on the 1 m ecology grid. They are not the crown a tree *has*: run the age through
+/// [`height_of_age`](crate::plants::height_of_age) and the surveyed fractions
+/// (`tree.crown_radius_frac`, `tree.crown_base_frac`) and a mature tree's crown is 6-12 m across.
+/// That gap is why `light.bin` carries no per-tree information -- every mature tree reads the same
+/// `exp(-2k)` at its own trunk, because the only canopy over that column is its own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crown {
+    /// Trunk centre, in ecology-grid metres (the column's middle).
+    pub x: f32,
+    /// Trunk centre, in ecology-grid metres.
+    pub y: f32,
+    /// Absolute z of the ground the trunk stands on: the first air voxel of its column, so that a
+    /// height in metres above the tree's own ground and a `shade_top` are the same quantity.
+    pub ground: f32,
+    /// Height of the tree in metres.
+    pub height: f32,
+    /// Height of the lowest branch in metres.
+    pub base: f32,
+    /// Crown radius in metres.
+    pub radius: f32,
+}
+
+impl Crown {
+    /// Absolute z of the crown's middle, where [`Sim::crown_light`] measures its light.
+    #[inline]
+    pub fn mid(&self) -> f32 {
+        self.ground + 0.5 * (self.base + self.height)
+    }
+
+    /// Crown depth in metres, never negative.
+    #[inline]
+    pub fn depth(&self) -> f32 {
+        (self.height - self.base).max(0.0)
+    }
+
+    /// Metres of this crown a vertical ray passes through on its way down to absolute height `z`:
+    /// 0 for a ray that stops above the crown, and the whole depth for one that stops below it.
+    #[inline]
+    pub fn depth_above(&self, z: f32) -> f32 {
+        let (top, bottom) = (self.ground + self.height, self.ground + self.base);
+        (top - z.max(bottom)).clamp(0.0, self.depth())
+    }
+}
+
+/// Every tree's crown, by `Sim::trees` index, with the reach a neighbour search needs.
+pub struct Crowns {
+    /// One per entry of `Sim::trees`; a dead tree's is never read, because `trunk_at` has dropped it.
+    pub of: Vec<Crown>,
+    /// The largest live crown radius, which bounds how far a neighbour can reach.
+    pub max_radius: f32,
+}
+
+/// Area of the intersection of two discs over the area of the first: how much of crown `a`'s
+/// footprint crown `b` covers. An `a` of zero radius is a point, covered or not.
+pub fn overlap_fraction(a: &Crown, b: &Crown) -> f32 {
+    let (ra, rb) = (a.radius.max(0.0), b.radius.max(0.0));
+    let d = libm::sqrtf((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
+    if ra <= 0.0 {
+        return f32::from(rb > 0.0 && d <= rb);
+    }
+    if d >= ra + rb {
+        return 0.0;
+    }
+    if d <= (ra - rb).abs() {
+        // One disc contains the other: either all of a, or all of b sitting inside it.
+        return if rb >= ra { 1.0 } else { (rb * rb) / (ra * ra) };
+    }
+    let cos = |v: f32| libm::acosf(v.clamp(-1.0, 1.0));
+    let lens = ra * ra * cos((d * d + ra * ra - rb * rb) / (2.0 * d * ra))
+        + rb * rb * cos((d * d + rb * rb - ra * ra) / (2.0 * d * rb))
+        - 0.5 * libm::sqrtf((((ra + rb) * (ra + rb) - d * d) * (d * d - (ra - rb) * (ra - rb))).max(0.0));
+    (lens / (std::f32::consts::PI * ra * ra)).clamp(0.0, 1.0)
+}
+
+impl Sim {
+    /// The crown of one tree: its age through the simulator's own height curve, and the surveyed
+    /// fractions around that height.
+    pub fn crown_of(&self, t: &Tree) -> Crown {
+        let height = crate::plants::height_of_age(t.age, &self.params).max(0.0);
+        let tp = &self.params.tree;
+        Crown {
+            x: f32::from(t.x) + 0.5,
+            y: f32::from(t.y) + 0.5,
+            ground: f32::from(self.world.height[t.col(self.world.dims)]) + 1.0,
+            height,
+            base: tp.crown_base_frac.clamp(0.0, 1.0) * height,
+            radius: tp.crown_radius_frac.max(0.0) * height,
+        }
+    }
+
+    /// Every tree's crown, built once so a whole snapshot's worth of [`Sim::crown_light`] shares it.
+    pub fn crowns(&self) -> Crowns {
+        let of: Vec<Crown> = self.trees.iter().map(|t| self.crown_of(t)).collect();
+        let max_radius = self.trees.iter().zip(&of).filter(|(t, _)| t.alive).fold(0.0f32, |m, (_, c)| m.max(c.radius));
+        Crowns { of, max_radius }
+    }
+
+    /// The light tree `i`'s crown receives, as a fraction of full sun (shot S3).
+    ///
+    /// **Why this is not `light.bin`.** The light field is computed for canopy voxels, and a tree's
+    /// canopy covers its own 3x3 columns and no more, so the field at a trunk is `exp(-2k)` for
+    /// every mature tree in the world and `exp(-k)` for every young one -- measured on
+    /// `runs/capitol-s42` at tick 20000, exactly one distinct value per stage across 4,082 trees.
+    /// The number below is read at the **middle of the crown the allometry gives the tree**, which
+    /// is 6-12 m across on a mature tree, so who stands near it changes it.
+    ///
+    /// Two things darken it, and they multiply:
+    ///
+    /// 1. **Neighbouring crowns.** For every other live tree whose crown overlaps this one's
+    ///    footprint, the ray down to this crown's middle passes through [`Crown::depth_above`]
+    ///    metres of it. A whole crown has the optical depth of the voxel model's mature canopy,
+    ///    `2 x canopy_k x canopy_lai`, spread evenly down its depth, so a whole crown still passes
+    ///    the 13.5% of full sun `params.toml` calibrates: this is the same optics at the crown's own
+    ///    scale, not a second set of constants. Each neighbour covers [`overlap_fraction`] of the
+    ///    footprint and the factors multiply, which assumes the overlaps fall independently over the
+    ///    crown. That is a mean-field approximation and the only modelling liberty here -- it is
+    ///    exact for one neighbour and for neighbours that do not overlap each other, and it errs
+    ///    towards too dark when several cover the same side.
+    /// 2. **Buildings.** A crown standing in a roof's shadow gets nothing where the shadow reaches
+    ///    its middle, which is what `set_column_light` does to a voxel below `shade_top`. This term
+    ///    is the share of the footprint's columns lit at that height, and it is exactly 1 in a noise
+    ///    world, which has no buildings.
+    ///
+    /// It draws nothing from the RNG and writes no field: it is read at snapshot time and published,
+    /// and the ecology is untouched by it (DECISIONS.md, shot S3).
+    pub fn crown_light(&self, i: usize, crowns: &Crowns) -> f32 {
+        let me = &crowns.of[i];
+        let d = self.world.dims;
+        let mid = me.mid();
+        let tau = 2.0 * self.params.canopy_extinction();
+        let (tx, ty) = (me.x.floor() as i32, me.y.floor() as i32);
+        let mut light = 1.0f32;
+        // 1. Neighbouring crowns. Nothing whose trunk is outside this box can reach the footprint.
+        let reach = (me.radius + crowns.max_radius).ceil().max(0.0) as i32;
+        for ny in ty - reach..=ty + reach {
+            for nx in tx - reach..=tx + reach {
+                if !d.in_bounds(nx, ny) {
+                    continue;
+                }
+                let j = self.trunk_at[d.cidx(nx as usize, ny as usize)];
+                if j == NO_TREE || j as usize == i {
+                    continue;
+                }
+                let other = &crowns.of[j as usize];
+                let depth = other.depth();
+                let f = if depth > 0.0 { overlap_fraction(me, other) } else { 0.0 };
+                if f <= 0.0 {
+                    continue;
+                }
+                light *= 1.0 - f * (1.0 - libm::expf(-tau * other.depth_above(mid) / depth));
+            }
+        }
+        // 2. Buildings, which only a bundle world has. The trunk's own column always counts, so a
+        // crown of no radius is still asked whether it stands in a shadow.
+        let (mut cols, mut lit) = (0u32, 0u32);
+        let r = me.radius.max(0.0);
+        let span = r.ceil() as i32;
+        for cy in ty - span..=ty + span {
+            for cx in tx - span..=tx + span {
+                let (dx, dy) = (cx as f32 + 0.5 - me.x, cy as f32 + 0.5 - me.y);
+                if !d.in_bounds(cx, cy) || !((cx, cy) == (tx, ty) || dx * dx + dy * dy <= r * r) {
+                    continue;
+                }
+                cols += 1;
+                lit += u32::from(f32::from(self.world.shade_top[d.cidx(cx as usize, cy as usize)]) <= mid);
+            }
+        }
+        if cols > 0 {
+            light *= lit as f32 / cols as f32;
+        }
+        light.clamp(0.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +683,314 @@ mod tests {
         assert_eq!(sim.world.surface_light(cidx(21, 20)), 255);
         sim.plant_tree(30, 30, 0);
         assert_eq!(sim.world.surface_light(cidx(30, 30)), 255, "saplings cast no shade");
+    }
+
+    // ---- Shot S3: the crown the allometry gives a tree, and the light it receives ----
+
+    /// A sim with no trees in which every tree planted keeps the age it is given: `bare_sim` on
+    /// flat ground, with the crown fractions at their shipped values.
+    fn crown_sim() -> Sim {
+        let mut sim = bare_sim();
+        sim.params.tree.min_spacing = 1;
+        sim
+    }
+
+    /// Plant a tree of `age` at (x, y) without the spacing rule, so a test can put two crowns as
+    /// close as it likes; `plant_tree` draws one lifespan from the RNG, as it does in a run.
+    fn plant(sim: &mut Sim, x: usize, y: usize, age: u32) -> usize {
+        sim.plant_tree(x, y, age);
+        sim.trees.len() - 1
+    }
+
+    /// The age at which the height curve is flat: `bundle.tree_tall_age_years`, where a tree is
+    /// `tree_tall_height` metres tall and stays there.
+    fn tall_age(sim: &Sim) -> u32 {
+        sim.params.tree_ages().tall_import
+    }
+
+    /// `height_of_age` inverts `import_age` wherever the map is invertible: a height under
+    /// `tree_tall_height` survives the round trip to within the metre-per-tick the age grid rounds
+    /// to, and the map is monotone in both directions.
+    fn height_round_trips(height: f32, p: &crate::params::Params) -> Result<(), TestCaseError> {
+        let age = crate::plants::import_age(height, p);
+        let back = crate::plants::height_of_age(age, p);
+        let ages = p.tree_ages();
+        // One tick of age is at most this many metres anywhere on the curve, so one tick of
+        // rounding in `import_age` is at most this much height.
+        let per_tick = (p.bundle.tree_tall_height / ages.tall_import.max(1) as f32)
+            .max(p.bundle.tree_mature_height / ages.mature.max(1) as f32);
+        prop_assert!(
+            (back - height).abs() <= per_tick + 1e-3,
+            "{height} m -> age {age} -> {back} m, over one tick of {per_tick} m"
+        );
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(128)))]
+
+        #[test]
+        fn prop_height_of_age_inverts_import_age(height in 0.0f32..=20.0) {
+            height_round_trips(height, &crate::params::Params::load_square())?;
+        }
+
+        /// The other direction, and monotonicity: an older tree is never shorter.
+        #[test]
+        fn prop_height_of_age_is_monotone(a in 0u32..12_000, b in 0u32..12_000) {
+            let p = crate::params::Params::load_square();
+            let (lo, hi) = (a.min(b), a.max(b));
+            prop_assert!(crate::plants::height_of_age(lo, &p) <= crate::plants::height_of_age(hi, &p));
+        }
+    }
+
+    /// Regression sibling of the two properties above: the corners of the shipped curve. A seed is
+    /// 0 m, a tree of `mature_age` is exactly `tree_mature_height`, one of `tree_tall_age` is
+    /// exactly `tree_tall_height`, and every age past it is still that height.
+    #[test]
+    fn height_of_age_regression_curve_corners() {
+        let p = crate::params::Params::load_square();
+        let (a, b) = (p.tree_ages(), &p.bundle);
+        let h = |age| crate::plants::height_of_age(age, &p);
+        assert_eq!(h(0), 0.0);
+        assert!((h(a.mature) - b.tree_mature_height).abs() < 1e-4, "{}", h(a.mature));
+        assert!((h(a.tall_import) - b.tree_tall_height).abs() < 1e-4, "{}", h(a.tall_import));
+        assert_eq!(h(a.tall_import * 4), b.tree_tall_height, "the curve is flat above the tall age");
+        assert!((h(a.mature / 2) - b.tree_mature_height / 2.0).abs() < 1e-3, "half of mature is half the height");
+        for height in [0.0, 1.5, 3.0, 12.0, 20.0] {
+            height_round_trips(height, &p).unwrap();
+        }
+    }
+
+    /// `overlap_fraction` is an area ratio: `f(a, b) x area(a)` is the same lens as
+    /// `f(b, a) x area(b)`, it is 1 when b swallows a, and 0 once the discs are apart.
+    fn overlap_is_an_area_ratio(ra: f32, rb: f32, d: f32) -> Result<(), TestCaseError> {
+        let at = |x: f32, r: f32| Crown { x, y: 0.0, ground: 0.0, height: 10.0, base: 0.0, radius: r };
+        let (a, b) = (at(0.0, ra), at(d, rb));
+        let (fa, fb) = (overlap_fraction(&a, &b), overlap_fraction(&b, &a));
+        prop_assert!((0.0..=1.0).contains(&fa) && (0.0..=1.0).contains(&fb), "{fa}, {fb}");
+        if ra > 0.0 && rb > 0.0 {
+            let (la, lb) = (fa * ra * ra, fb * rb * rb);
+            prop_assert!((la - lb).abs() <= 1e-3 * (la.max(lb).max(1.0)), "lens {la} vs {lb}");
+        }
+        if d >= ra + rb {
+            prop_assert_eq!(fa, 0.0);
+        }
+        if rb >= ra + d && rb > 0.0 {
+            prop_assert_eq!(fa, 1.0, "b swallows a");
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(128)))]
+
+        #[test]
+        fn prop_overlap_fraction_is_an_area_ratio(
+            ra in 0.0f32..8.0,
+            rb in 0.0f32..8.0,
+            d in 0.0f32..20.0,
+        ) {
+            overlap_is_an_area_ratio(ra, rb, d)?;
+        }
+    }
+
+    /// Regression sibling: the three cases with a closed form. Equal discs centre on centre are
+    /// one disc; equal discs touching share nothing; a disc over the rim of an equal one shares
+    /// the standard lens, `(2 acos(1/2) - sin(2 acos(1/2))) / pi` of it at d = r.
+    #[test]
+    fn overlap_fraction_regression_closed_forms() {
+        let at = |x: f32, r: f32| Crown { x, y: 0.0, ground: 0.0, height: 10.0, base: 0.0, radius: r };
+        assert_eq!(overlap_fraction(&at(0.0, 4.0), &at(0.0, 4.0)), 1.0);
+        assert_eq!(overlap_fraction(&at(0.0, 4.0), &at(8.0, 4.0)), 0.0);
+        assert_eq!(overlap_fraction(&at(0.0, 4.0), &at(2.0, 2.0)), 0.25, "a quarter of the area, wholly inside");
+        let got = overlap_fraction(&at(0.0, 4.0), &at(4.0, 4.0));
+        let theta = 2.0 * libm::acosf(0.5);
+        let want = (theta - libm::sinf(theta)) / std::f32::consts::PI;
+        assert!((got - want).abs() < 1e-4, "{got} vs {want}");
+        // A point crown is covered or it is not.
+        assert_eq!(overlap_fraction(&at(0.0, 0.0), &at(3.0, 4.0)), 1.0);
+        assert_eq!(overlap_fraction(&at(0.0, 0.0), &at(5.0, 4.0)), 0.0);
+    }
+
+    /// Crown light is a fraction of full sun whatever the trees do: finite, in [0, 1], and 1 for a
+    /// tree standing alone.
+    fn crown_light_is_a_fraction(ops: &[(usize, usize, u32)]) -> Result<(), TestCaseError> {
+        let mut sim = crown_sim();
+        for &(x, y, age) in ops {
+            if sim.world.is_soil(x as i32, y as i32) && sim.trunk_at[cidx(x, y)] == NO_TREE {
+                plant(&mut sim, x, y, age);
+            }
+        }
+        let crowns = sim.crowns();
+        for i in 0..sim.trees.len() {
+            let l = sim.crown_light(i, &crowns);
+            prop_assert!(l.is_finite() && (0.0..=1.0).contains(&l), "tree {i}: {l}");
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(32)))]
+
+        #[test]
+        fn prop_crown_light_is_a_fraction_of_full_sun(
+            ops in prop::collection::vec((2usize..60, 2usize..60, 0u32..8000), 0..24),
+        ) {
+            crown_light_is_a_fraction(&ops)?;
+        }
+
+        /// A neighbour never brightens a crown, and moving it away never darkens one: light rises
+        /// with distance, from the two trees on top of each other to the two out of reach.
+        #[test]
+        fn prop_crown_light_rises_as_a_neighbour_retreats(
+            age in 1000u32..8000,
+            near in 0usize..7,
+            step in 1usize..8,
+        ) {
+            let light_at = |gap: usize| {
+                let mut sim = crown_sim();
+                let a = plant(&mut sim, 20, 20, age);
+                plant(&mut sim, 20 + gap, 20, age);
+                let crowns = sim.crowns();
+                sim.crown_light(a, &crowns)
+            };
+            let (close, far) = (light_at(near), light_at(near + step));
+            prop_assert!(close <= far + 1e-6, "gap {near}: {close}, gap {}: {far}", near + step);
+            prop_assert!(far <= 1.0 + 1e-6);
+        }
+    }
+
+    /// Regression sibling, and the numbers the model is pinned to. A tree alone is in full sun. A
+    /// crown wholly under an equally tall one loses the optical depth of that crown's upper half,
+    /// `exp(-tau/2)` at `tau = 2 x canopy_k x canopy_lai`. One wholly under a crown that is
+    /// entirely above it loses the whole `exp(-tau)`, which is the 13.5% of full sun `params.toml`
+    /// calibrates for a mature canopy. Two neighbours multiply.
+    #[test]
+    fn crown_light_regression_alone_under_one_and_under_two() {
+        let mut sim = crown_sim();
+        let tau = 2.0 * sim.params.canopy_extinction();
+        let age = tall_age(&sim);
+        let a = plant(&mut sim, 20, 20, age);
+        let crowns = sim.crowns();
+        assert_eq!(sim.crown_light(a, &crowns), 1.0, "a tree alone is in full sun");
+
+        // A second tree of the same age on the same column: same crown, so the ray to a's middle
+        // passes through the upper half of b's.
+        let mut sim = crown_sim();
+        let a = plant(&mut sim, 20, 20, age);
+        sim.trees.push(Tree { id: 999, x: 20, y: 20, age, dry_ticks: 0, lifespan: u32::MAX, alive: true });
+        sim.trunk_at[cidx(20, 20)] = 1;
+        let crowns = sim.crowns();
+        let want = libm::expf(-tau * 0.5);
+        let got = sim.crown_light(a, &crowns);
+        assert!((got - want).abs() < 1e-5, "{got} vs {want}");
+
+        // The same, twice over: two identical crowns overhead multiply to exp(-tau).
+        sim.trees.push(Tree { id: 1000, x: 21, y: 20, age, dry_ticks: 0, lifespan: u32::MAX, alive: true });
+        sim.trunk_at[cidx(21, 20)] = 2;
+        let crowns = sim.crowns();
+        let got = sim.crown_light(a, &crowns);
+        assert!(got < want, "a second neighbour darkens it further: {got} vs {want}");
+        assert!(got > libm::expf(-tau), "and not below two whole crowns: {got}");
+    }
+
+    /// The measurement this shot exists for, in miniature. On the simulator's own light field every
+    /// mature tree reads the same `exp(-2k)` at its trunk, however it stands; the published crown
+    /// light of the same trees takes three different values, because a crown 6 m across notices its
+    /// neighbours and a 3x3 m canopy stamp cannot.
+    #[test]
+    fn crown_light_varies_where_the_light_field_cannot() {
+        let mut sim = crown_sim();
+        let age = tall_age(&sim);
+        let alone = plant(&mut sim, 6, 6, age);
+        let pair = plant(&mut sim, 30, 30, age);
+        plant(&mut sim, 33, 30, age);
+        let crowded = plant(&mut sim, 50, 50, age);
+        for (dx, dy) in [(3, 0), (-3, 0), (0, 3), (0, -3)] {
+            plant(&mut sim, (50i32 + dx) as usize, (50i32 + dy) as usize, age);
+        }
+        let field: Vec<u8> =
+            [alone, pair, crowded].iter().map(|&i| sim.world.surface_light(sim.trees[i].col(D))).collect();
+        assert_eq!(field[0], field[1], "the light field cannot tell them apart");
+        assert_eq!(field[1], field[2]);
+        let crowns = sim.crowns();
+        let light: Vec<f32> = [alone, pair, crowded].iter().map(|&i| sim.crown_light(i, &crowns)).collect();
+        assert_eq!(light[0], 1.0);
+        assert!(light[1] < light[0] && light[2] < light[1], "{light:?}");
+    }
+
+    /// A building's shadow reaches a crown: `shade_top` above the crown's middle takes that share
+    /// of the footprint's columns to nothing, and a crown clear of it keeps full sun. In a noise
+    /// world `shade_top` is all zeroes, so the term is exactly 1 and nothing below changes there.
+    #[test]
+    fn crown_light_regression_a_roof_shadow_over_a_crown() {
+        let mut sim = crown_sim();
+        let age = tall_age(&sim);
+        let i = plant(&mut sim, 20, 20, age);
+        let crowns = sim.crowns();
+        assert_eq!(sim.crown_light(i, &crowns), 1.0, "no buildings in a noise world");
+        let mid = crowns.of[i].mid();
+
+        // Shade every column of the footprint to above the crown's middle.
+        for y in 12..=28 {
+            for x in 12..=28 {
+                sim.world.shade_top[cidx(x, y)] = (mid + 1.0) as u8;
+            }
+        }
+        assert_eq!(sim.crown_light(i, &sim.crowns()), 0.0, "a crown wholly in shadow gets nothing");
+
+        // Half of them, and the light halves with the lit share of the footprint.
+        for y in 12..=28 {
+            for x in 21..=28 {
+                sim.world.shade_top[cidx(x, y)] = 0;
+            }
+        }
+        let got = sim.crown_light(i, &sim.crowns());
+        assert!((0.3..0.7).contains(&got), "half a footprint in shadow: {got}");
+
+        // A shadow that stops below the crown's middle does not reach it.
+        for y in 12..=28 {
+            for x in 12..=28 {
+                sim.world.shade_top[cidx(x, y)] = (mid - 1.0) as u8;
+            }
+        }
+        assert_eq!(sim.crown_light(i, &sim.crowns()), 1.0, "a shadow under the crown is not on it");
+    }
+
+    /// A dead tree shades nothing: `kill_tree` clears `trunk_at`, which is what the neighbour
+    /// search reads, so the survivor is back in full sun at the same tick.
+    #[test]
+    fn crown_light_regression_a_dead_neighbour_stops_shading() {
+        let mut sim = crown_sim();
+        let age = tall_age(&sim);
+        let a = plant(&mut sim, 20, 20, age);
+        let b = plant(&mut sim, 22, 20, age);
+        assert!(sim.crown_light(a, &sim.crowns()) < 1.0);
+        sim.kill_tree(b, "old_age");
+        assert_eq!(sim.crown_light(a, &sim.crowns()), 1.0);
+    }
+
+    /// The crown of a tree the simulator grew: `crown_of` is the height curve and the two surveyed
+    /// fractions, and nothing else. A sapling of age 0 has no crown at all, which is why its light
+    /// is read at ground level, where a neighbour's whole crown stands over it.
+    #[test]
+    fn crown_of_regression_shape_by_age() {
+        let mut sim = crown_sim();
+        let age = tall_age(&sim);
+        let tp = sim.params.tree.clone();
+        let i = plant(&mut sim, 20, 20, age);
+        let c = sim.crown_of(&sim.trees[i]);
+        assert_eq!((c.x, c.y), (20.5, 20.5));
+        assert_eq!(c.height, sim.params.bundle.tree_tall_height);
+        assert!((c.radius - tp.crown_radius_frac * c.height).abs() < 1e-5);
+        assert!((c.base - tp.crown_base_frac * c.height).abs() < 1e-5);
+        assert!((c.mid() - (c.ground + 0.5 * (c.base + c.height))).abs() < 1e-5);
+        assert_eq!(c.depth_above(c.ground + c.height + 1.0), 0.0, "nothing above the crown");
+        assert!((c.depth_above(c.ground) - c.depth()).abs() < 1e-5, "everything below it");
+
+        let j = plant(&mut sim, 40, 40, 0);
+        let seed = sim.crown_of(&sim.trees[j]);
+        assert_eq!((seed.height, seed.radius, seed.base, seed.depth()), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(seed.mid(), seed.ground, "a seed's light is read at the ground");
     }
 }

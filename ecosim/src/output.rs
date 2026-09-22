@@ -193,6 +193,23 @@ struct TreeOut {
     age: u32,
     stage: Stage,
     lifespan: u32,
+    /// Height in metres, from the simulator's own age-to-height curve (shot S3). Nothing in a run
+    /// said how big a tree was before this: `stage` is three buckets and `age` needs the curve.
+    height_m: f32,
+    /// Crown radius in metres, `tree.crown_radius_frac` of the height.
+    crown_radius_m: f32,
+    /// Fraction of full sun the middle of that crown receives
+    /// ([`Sim::crown_light`](crate::sim::Sim::crown_light)). This is the per-tree light `light.bin`
+    /// could not carry: the field shades a 3x3 m footprint, so it reads one value per stage for
+    /// every tree in the world.
+    crown_light: f32,
+}
+
+/// Four decimals, the precision `series.csv` writes a float at. It keeps `entities.json` compact
+/// (three more fields on every tree of every snapshot) and the last bit of an `expf` out of a file
+/// the determinism tests compare byte for byte.
+fn dp4(v: f32) -> f32 {
+    (v * 10_000.0).round() / 10_000.0
 }
 
 #[derive(Serialize)]
@@ -276,9 +293,14 @@ fn surface_u8(field: &[f32], sim: &Sim) -> Vec<u8> {
 
 fn entities(sim: &Sim) -> Vec<EntityOut> {
     let mut out = Vec::new();
-    let mut trees: Vec<_> = sim.trees.iter().filter(|t| t.alive).collect();
-    trees.sort_by_key(|t| t.id);
-    for t in trees {
+    // Built once for the whole snapshot: every tree's crown light is read against every other's
+    // crown, so the geometry is shared rather than rebuilt 4,000 times (shot S3).
+    let crowns = sim.crowns();
+    let mut trees: Vec<usize> = (0..sim.trees.len()).filter(|&i| sim.trees[i].alive).collect();
+    trees.sort_by_key(|&i| sim.trees[i].id);
+    for i in trees {
+        let t = &sim.trees[i];
+        let crown = crowns.of[i];
         out.push(EntityOut::Tree(TreeOut {
             id: t.id,
             kind: "tree",
@@ -288,6 +310,9 @@ fn entities(sim: &Sim) -> Vec<EntityOut> {
             age: t.age,
             stage: sim.tree_stage(t),
             lifespan: t.lifespan,
+            height_m: dp4(crown.height),
+            crown_radius_m: dp4(crown.radius),
+            crown_light: dp4(sim.crown_light(i, &crowns)),
         }));
     }
     for group in [&sim.grazers, &sim.hunters] {

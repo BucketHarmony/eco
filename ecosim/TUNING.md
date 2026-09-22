@@ -682,3 +682,33 @@ is 0 at the defaults, so no immigration check has ever planted anything in a ref
 check on the derivation is `animals.rs`'s `a_tree_immigrates_at_its_rate_whatever_the_rate_is`, which
 raises the floor and lands the first arrival on the derived tick at 8, 4, 20, 1 and 4000 checks a
 year, and gets no arrival at all in 20000 ticks at a rate of 0.
+
+## Shot S3 — the crown fractions
+
+Two new keys and **no changed default**: nothing that existed before this shot has a different value
+after it, and every reference run's `series.csv`, `events.csv` and snapshot fields are byte-identical
+(`sweeps/shotS3/FINDINGS.md`, and the two tests that assert it). The row is the specification and it
+is the line that forced these keys: "*Shot V3 meanwhile draws a crown of radius `0.30 x height` (6 m
+on a 20 m tree), and **that constant is the well-founded one**: V3 measured it from the 81 surveyed
+trees in `ecosim/worlds/capitol/trees.json`*". A number that decides what the simulator publishes
+cannot live only in a viewer, and CLAUDE.md's "all species and tuning parameters live in
+`params.toml`" leaves nowhere else to put it.
+
+| Parameter | Before | After | Kind | Why, and the line that forced it |
+|---|---|---|---|---|
+| `tree.crown_radius_frac` | — (did not exist; `ecoview-native` held 0.30 privately) | 0.30 | new, measured | Median of `crown_radius/height` over the 81 trees in `worlds/capitol/trees.json`: 0.3040. The row, naming V3's constant as the well-founded one. |
+| `tree.crown_base_frac` | — (same, 0.37) | 0.37 | new, measured | Median of `crown_base/height` over the same 81 trees: 0.3684. Needed with the radius to fix the crown envelope, and so how deep a neighbour's crown a ray passes through. |
+
+Both are rounded to two places from the survey median, which is within the 0.005 tolerance
+`the_crown_fractions_are_the_surveyed_medians` allows and well inside the survey's own spread
+(radius/height sd 0.126 over n=81). The mean-of-ratios would be 0.3287 and 0.3851; the medians were
+taken because the survey's ratio distribution has a long right tail of young stems whose crowns are
+wide for their height, and V3 took the medians too (its comment calling them means is a documentation
+error, recorded in `sweeps/shotS3/FINDINGS.md`).
+
+**Neither key can move an ecology number.** They are read only by `Sim::crown_of`, which is called
+only from `Sim::crowns`, which is called only by the snapshot writer. The sweep over
+`tree.crown_radius_frac` at 0.15, 0.30, 0.60 and 1.20 on seeds 1–3 is in `sweeps/shotS3/FINDINGS.md`:
+every `check` margin is identical to four decimal places at all four radii, which is the sweep
+reporting the absence of a mechanism rather than the shape of one. What the radius does move is the
+published `crown_light`, and that table is there too.

@@ -406,6 +406,15 @@ pub struct TreeParams {
     pub min_spacing: i32,
     /// Detritus a dead tree adds to its patch.
     pub death_detritus: f32,
+    /// Crown radius as a fraction of the tree's height (shot S3). Measured, not chosen: the median
+    /// of that ratio over the 81 surveyed trees in `worlds/capitol/trees.json`, the only real crown
+    /// dimensions this project owns. It describes the crown the tree *has*, which is not the 3x3
+    /// column footprint its canopy voxels *shade*; see [`Sim::crown_light`](crate::sim::Sim::crown_light).
+    pub crown_radius_frac: f32,
+    /// Height of the lowest branch as a fraction of the tree's height, measured the same way. With
+    /// `crown_radius_frac` it fixes the crown envelope, and so how deep a neighbour's crown a ray
+    /// to this one's middle passes through.
+    pub crown_base_frac: f32,
     /// Germination suitability over surface light, as a fraction of full sun (low-opt replaced by
     /// `sapling_light`).
     pub light: Curve,

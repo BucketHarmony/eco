@@ -571,3 +571,24 @@ fn fork_matches_the_uninterrupted_run_from_the_fork_tick_on() {
         s.spawn(|| fork_all(42, fresh_s42()));
     });
 }
+
+/// Shot S3's identity claim, kept the way shot 14b kept the event log's: the manifest it
+/// regenerated differs from the one before it (`s42-manifest-preS3.sha256`, a copy of
+/// `s42-manifest.sha256` taken before the re-cut) on the 201 `entities.json` lines and on nothing
+/// else. The crown a tree has is published, not consumed — no field moves, no RNG draw is made and
+/// the series does not shift — and this is that claim as bytes rather than as prose.
+#[test]
+fn the_crown_fields_changed_only_entities_json() {
+    // Under `ECOSIM_REGEN_MANIFEST=1` the manifest this reads is being rewritten by
+    // `fresh_s42_matches_committed_manifest` in the same binary, and the two race. Every ordinary
+    // run compares two committed files, which is what the claim is about.
+    if regenerating() {
+        return;
+    }
+    let (before, after) = (read_manifest("s42-manifest-preS3.sha256"), read_manifest("s42-manifest.sha256"));
+    let keys: Vec<&String> = before.keys().collect();
+    assert_eq!(keys, after.keys().collect::<Vec<&String>>(), "the file set moved");
+    let differing: Vec<&String> = keys.iter().copied().filter(|k| before[*k] != after[*k]).collect();
+    assert!(differing.iter().all(|k| k.ends_with("/entities.json")), "{differing:?}");
+    assert_eq!(differing.len(), 201, "one per snapshot");
+}

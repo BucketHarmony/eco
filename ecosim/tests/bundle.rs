@@ -456,3 +456,68 @@ fn the_animals_fixture_carries_what_an_animals_off_run_cannot() {
     assert_eq!(meta(&old)["animals"], false);
     assert_eq!(animals_of(&old.join("snap_000100")), (0, 0, 0, vec![0; 32 * 32]));
 }
+
+/// The two crown fractions are the surveyed ones (shot S3), and this is where that claim is
+/// checked against the survey rather than asserted in a comment: the medians of `crown_radius /
+/// height` and `crown_base / height` over the 81 trees in the committed Capitol bundle are 0.3040
+/// and 0.3684, and `params.toml` carries them to two decimals. The spread is wide (radius sd 0.126)
+/// and the median is what a skewed sample of 81 supports, so the tolerance is the rounding, not the
+/// scatter. `ecoview-native` holds the same two constants for its own geometry and can read them
+/// from `meta.json` now that `params.tree` is published in full (shot S2).
+#[test]
+fn the_crown_fractions_are_the_surveyed_medians() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let trees: Vec<Value> = serde_json::from_slice(&fs::read(root.join("worlds/capitol/trees.json")).unwrap()).unwrap();
+    assert_eq!(trees.len(), 81, "the committed survey");
+    let median = |key: &str| {
+        let mut v: Vec<f64> = trees.iter().map(|t| t[key].as_f64().unwrap() / t["height"].as_f64().unwrap()).collect();
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let p = Params::load(&root.join("params.toml")).unwrap();
+    for (key, got, name) in [
+        ("crown_radius", p.tree.crown_radius_frac, "crown_radius_frac"),
+        ("crown_base", p.tree.crown_base_frac, "crown_base_frac"),
+    ] {
+        let want = median(key);
+        assert!((f64::from(got) - want).abs() <= 0.005, "{name} is {got}, the survey median is {want:.4}");
+    }
+}
+
+/// What shot S3 set out to publish, on the world it was measured on. Every tree of the committed
+/// Capitol fixture carries a height, a crown radius and a crown light; the light is a fraction of
+/// full sun; and it takes **many** values across the 79 planted survey trees, where the simulator's
+/// own `light.bin` takes exactly one per stage. The fixture is the real surveyed arrangement, so
+/// most of its trees stand in the open: the median is full sun and only the clustered ones are
+/// shaded, which is the shape a photograph of the site has.
+#[test]
+fn the_capitol_fixture_publishes_a_crown_light_that_varies() {
+    // Under `ECOSIM_REGEN_MANIFEST=1` the fixture this reads is being rewritten by
+    // `the_committed_capitol_mini_fixture_matches_a_fresh_run` in the same binary, and the two race.
+    // A re-cut is one commit's worth of work; every ordinary run, CI included, checks the file.
+    if std::env::var_os("ECOSIM_REGEN_MANIFEST").is_some() {
+        return;
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let snap = root.join("fixtures/capitol-mini/snap_000000");
+    let v: Vec<Value> = serde_json::from_slice(&fs::read(snap.join("entities.json")).unwrap()).unwrap();
+    let trees: Vec<&Value> = v.iter().filter(|e| e["kind"] == "tree").collect();
+    assert!(trees.len() > 50, "{} trees", trees.len());
+    let mut lights: Vec<f64> = Vec::new();
+    for t in &trees {
+        let (h, r, l) = (
+            t["height_m"].as_f64().unwrap(),
+            t["crown_radius_m"].as_f64().unwrap(),
+            t["crown_light"].as_f64().unwrap(),
+        );
+        assert!(h > 0.0 && h <= 20.0, "height {h}");
+        assert!((r - 0.30 * h).abs() < 0.01, "crown radius {r} of a {h} m tree");
+        assert!((0.0..=1.0).contains(&l), "crown light {l}");
+        lights.push(l);
+    }
+    lights.sort_by(f64::total_cmp);
+    lights.dedup();
+    assert!(lights.len() >= 10, "only {} distinct crown lights: {lights:?}", lights.len());
+    assert_eq!(*lights.last().unwrap(), 1.0, "a tree in the open is in full sun");
+    assert!(lights[0] < 0.9, "and the most crowded one is not: {}", lights[0]);
+}

@@ -1730,3 +1730,88 @@ them hashes `meta.json`. `fixtures/s42-mini` is version 1 and cannot be re-cut (
 that reads it checks that every version-1 params *key* is still present, which an addition cannot break.
 The anchor for the shot: a fresh 20,000-tick `runs/capitol-s42` against the one on disk from before it,
 `ecosim diff` says `differs: meta.json` and nothing else.
+
+## Shot S3 — the light a crown actually receives
+
+The row's finding, confirmed here before anything was written: on `runs/capitol-s42` at tick 20000 the
+per-tree light in `light.bin` has **exactly one distinct value per stage** — 0.1373 mature (n=2869),
+0.3686 young (n=96), 1.0000 sapling (n=1117) — and the same three numbers on the noise strip at every
+tick and on a second, unrelated world. A tree's canopy shades its own 3×3 columns, the tree is sampled
+at its own trunk, so every tree of a stage reads the extinction of its own canopy and nothing else.
+Light was `stage` wearing a decimal point.
+
+**The shot publishes the right number; it does not make the ecology consume it.** The row offers
+"sample or publish", and publish is the whole of what was done: `entities.json` gains `crown_light`
+(with `height_m` and `crown_radius_m`, the two numbers it is derived from), and no tick of any
+reference run moves. Widening the canopy footprint from 3×3 to the allometric 6–12 m across is an
+ecology change: it would darken every seedling under every tree, and CLAUDE.md's own history says what
+follows — G4c widened the *young* canopy by one step and germination on the Capitol went 7645 → 19408.
+That needs its own tuning pass, its own sweep and its own regression anchors, and MASTER forbids
+adding a mechanism the shot did not ask for. The proof that it was not added is in the tests, three
+ways: an integration test runs seed 1 at `crown_radius_frac` 0.30 and 0.90 and asserts the two runs
+differ in `meta.json` and every `entities.json` and in **nothing else**; a manifest test compares the
+pre-shot `s42-manifest-preS3.sha256` with the regenerated one and asserts the differing files are the
+201 `entities.json` and exactly those; and `crown_light` draws no RNG and writes no field, so it
+cannot.
+
+- **The crown's dimensions are two new `params.toml` keys, and they are measured, not chosen.**
+  `tree.crown_radius_frac = 0.30` and `tree.crown_base_frac = 0.37` are the medians of
+  `crown_radius/height` and `crown_base/height` over the 81 surveyed trees in
+  `worlds/capitol/trees.json` — the only real crown dimensions this project owns, and the same two
+  constants shot V3 measured for the viewer. A test in `tests/bundle.rs` re-reads `trees.json` and
+  fails if either drifts more than 0.005 from the median it is supposed to be, so the file and the
+  parameter cannot silently disagree. Medians rather than means: the mean-of-ratios is 0.3287/0.3851,
+  and the survey has a long right tail (radius/height sd 0.126) of young stems whose crowns are wide
+  for their height.
+- **The measurement is taken at the middle of the crown**, `ground + (base + height)/2`, not at its
+  top or at the trunk voxel. The top sees sky almost by construction and the trunk voxel is the
+  quantity that was already wrong. The middle is also where the crown's leaf area is, under the
+  uniform-density assumption the optics already make.
+- **The optics are the voxel model's, at the crown's scale.** A whole crown has optical depth
+  `2 × canopy_k × canopy_lai`, the same total a mature tree's two canopy voxels have, spread evenly
+  down the crown's depth; a ray to a neighbour's middle gets the share of that depth it passes
+  through. So the pair of numbers `params.toml` already calibrates (a full mature crown passes 13.5%
+  of full sun) is preserved rather than replaced by a second set of constants that could drift from
+  it.
+- **Overlapping neighbours multiply, mean-field.** Each neighbour covers `overlap_fraction` of this
+  crown's footprint — a circle-circle lens over the disc's area — and contributes a factor
+  `1 - f(1 - exp(-τ·depth_above/depth))`. This is the one modelling liberty in the shot and it is
+  named as such in the rustdoc: it is exact for one neighbour and for neighbours that do not overlap
+  *each other*, and it errs dark when several cover the same side. The alternative, ray-marching a
+  real canopy volume, is a rendering problem and costs per tree what the whole light field costs per
+  tick.
+- **Buildings darken a crown by the share of its footprint columns whose `shade_top` is above the
+  crown's middle.** That is the same `shade_top` the voxel light field uses, so a tree in a roof's
+  shadow and a voxel in a roof's shadow agree about where the shadow is. It affects exactly 1 of the
+  79 imported Capitol trees (1.0000 → 0.8482) and is identically 1 in a noise world, which has no
+  buildings.
+- **`height_m` and `crown_radius_m` are published next to it** because otherwise every reader
+  re-derives the height curve from `bundle.tree_mature_height`, `bundle.tree_tall_height` and the two
+  ages, which is what `ecoview-native/src/tree.rs` does today, with its own copy of the two crown
+  fractions besides. The run directory is the interface; the derivation belongs on the simulator's
+  side of it. `plants::height_of_age` is `import_age` read backwards and is tested as its left
+  inverse above the tall age.
+- **`format_version` does not move.** Adding fields to an `entities.json` record is the precedent set
+  by the heredity traits in shot 11, and version 1 readers are held to it by
+  `format_2_and_fire_only_add_to_version_1_files`, whose cut list gains a `without_crown` helper.
+  `fixtures/s42-mini` is version 1 and cannot be re-cut, which is exactly why that helper exists.
+- **No `check` invariant was added.** `check` reads `series.csv`, `crown_light` is per tree and
+  per snapshot, and an invariant on a number the ecology does not consume would be a bound on
+  arithmetic, not on the model. The bounds that matter — every value in [0,1], the radius equal to
+  the fraction times the height, and a distribution with more than one value in it — are asserted on
+  the committed `fixtures/capitol-mini` in `tests/bundle.rs`, where they run on every CI job.
+
+**What was regenerated, and what deliberately was not.** Every `s42` manifest (the default one and the
+five `g4b-*` variants) and the three re-cuttable fixtures were re-cut with `ECOSIM_REGEN_MANIFEST=1`;
+in each manifest exactly 201 lines moved and all 201 are `entities.json`. `tests/data/s42-check.txt`
+was **not** kept: the regeneration pass rewrote its wall-clock line to a `FAIL run time … 107314 ms`
+measured under a loaded parallel debug test run, and the golden compares that line by name, so the
+file was reverted. This shot changes no `check` behaviour. Two of the new tests return early under
+`ECOSIM_REGEN_MANIFEST`, because they read a fixture and a manifest that a sibling test in the same
+binary is rewriting at that moment; both run in full on every ordinary invocation, CI included.
+
+**Reported, not fixed** (component isolation — this is an `ecosim` shot): `ecoview-native/src/tree.rs`
+documents its `CROWN_RADIUS_FRACTION`/`CROWN_BASE_FRACTION` as "the mean of that ratio" when 0.30 and
+0.37 are the *medians* (the means are 0.3287 and 0.3851), and its comment that `params.bundle` reaches
+`meta.json` only when non-default — which `src/run.rs` carries too — has been stale since shot S2. Both are in
+`sweeps/shotS3/FINDINGS.md`.

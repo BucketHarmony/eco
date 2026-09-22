@@ -134,7 +134,19 @@ impl Sim {
             let (dgd, dsd) = (self.patches[p].grass as f64 - grass as f64, self.patches[p].shrub as f64 - shrub as f64);
             let n = n_soil as f64;
             let lit = [0, 1, 2].map(|i| got[i] - n * (dgd * ng[i] as f64 + dsd * ns[i] as f64));
-            debug_assert!(lit.iter().all(|&v| v >= -1e-9), "a patch grew more than the soil paid for: {lit:?}");
+            // The check is made on the growth the update computed, in f64, and not on the change
+            // in the stored f32 cover: storing rounds a cover by up to half an f32 ulp, and over a
+            // patch's columns and a species' needs that alone reaches 3e-8 g (shot G10 met it on
+            // seed 1 at a sward of 2e-8 cover). The stored cover still drives `lit` above.
+            #[cfg(debug_assertions)]
+            {
+                let exact = |c: f32, gain: f32, g: f32| {
+                    ((c as f64 + gain as f64 - g as f64 * c as f64).clamp(0.0, 1.0)) - c as f64
+                };
+                let (eg, es) = (exact(grass, gain_g, gg), exact(shrub, gain_s, gs));
+                let paid = [0, 1, 2].map(|i| got[i] - n * (eg * ng[i] as f64 + es * ns[i] as f64));
+                debug_assert!(paid.iter().all(|&v| v >= -1e-9), "a patch grew more than the soil paid for: {paid:?}");
+            }
             self.npk_to_detritus(p, lit.map(|v| v.max(0.0)));
         }
 

@@ -297,6 +297,18 @@ crowding_overlap = 0.55
 # range for an open-grown temperate deciduous tree, chosen low because the draw is charged to one
 # column while a mature crown covers nine (UNITS.md R8 and finding 3).
 transpiration_mm_h = 0.0342
+# Leaf-off (shot G10). A leafless tree gives up `deciduous` of its draw, and the canopy fills
+# linearly between leaf_off_temp and leaf_on_temp (patch temperature, degrees C). The draw above stays
+# the year's mean: what a bare tree does not draw in winter it draws in leaf, so a year is still 300 mm
+# and only its season moves. At 0 the tree is an evergreen and the run is the model before G10, byte
+# for byte. 5 and 10 C bracket the mean daily temperature at which temperate broadleaves break bud and
+# drop leaves; on the model's 12 +/- 15 C year they leave a tree bare a third of the year and in full
+# leaf just over half, against about five leafless months at Lansing (DECISIONS.md, shot G10).
+# 0.5, not the 1 a real broadleaf is: above 0.5 the regression anchor fails, because the water a bare
+# tree saves in winter is drawn in the dry summer from one trunk column (TUNING.md, shot G10).
+deciduous = 0.5
+leaf_off_temp = 5.0
+leaf_on_temp = 10.0
 # Fraction of the column's available water capacity below which a tree is in drought (was 30 of 255).
 dry_fraction = 0.12
 # 45.66 days of continuous drought kills a tree: the same 500 ticks, and the one tree constant the

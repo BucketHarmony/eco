@@ -2398,3 +2398,86 @@ and a scale would describe a field the run does not contain. The hues stay. Test
 are compared byte for byte with a fresh run, so their `meta.json` was re-cut with
 `ECOSIM_REGEN_MANIFEST=1` and nothing else in them changed (their `timing.json` was restored, since
 the comparison skips it). No manifest or golden file changed: none hashes `meta.json`.
+
+## Shot G10 — a deciduous year
+
+Worked from the BACKLOG row; there is no prompt file. The row was UNITS.md finding 4: the tree draw
+had no season, so a tree transpired the same in January and July. `sweeps/shotG10/FINDINGS.md` has
+the measurements.
+
+**Not merged with G9.** The row said to check whether G9 (a moving sun) and a leaf-off season are one
+shot. They are not, here: G9 is light geometry — a per-column annual light budget from buildings and
+the sun's path — and depends on G8, which is three rows away; the row's defect is water. This shot
+gives the *draw* a season and leaves the canopy's *shade* as it was. A bare canopy shading the ground
+exactly as a leafy one does is the half of leaf-off that belongs with G9, which will be recomputing
+per-column light by season anyway; it is recorded in UNITS.md finding 4 and nowhere as a hook.
+
+**The mechanism, and what it reads.** `Sim::leaf_on(patch)` is linear in the patch temperature
+between `tree.leaf_off_temp` and `tree.leaf_on_temp` (a step if they coincide). A tree's draw is
+`transpiration_mm_h × leaf_draw(deciduous, leaf_on) / Sim::leaf_draw_mean()`, with
+`leaf_draw = 1 − deciduous × (1 − leaf_on)`. It reads the **patch** temperature, which includes
+canopy cooling, because that is what the germination curve already reads; it reads no new state, so
+nothing is added to `state.bin` and a restored run is unchanged. No column is added to `series.csv`.
+
+**The year's water is kept, not saved.** `transpiration_mm_h` was calibrated in G4b as an annual
+figure, 300 mm a year over 8766 h (R8). Multiplying it by the leaf share alone would have cut a
+deciduous tree's year to 179 mm, below R8's range, and passed the anchor comfortably (the first
+version of this shot did exactly that, and the Capitol ended at 3693 trees against 1522). Dividing by
+the leaf share's own mean over the model year keeps 300 mm and moves only its season, which is what
+the row describes. The mean is taken from the open-ground season — `temp_base + amplitude ×
+sin(2πt / year_len)` sampled at every `schedule.temperature_every` step, as the patches are updated —
+not from each patch, so a tree whose canopy cools its patch is bare a little longer and draws a little
+less than 300 mm. That is a real effect with the right sign, and computing a per-patch mean would
+need state. `a_year_of_leaf_off_moves_the_water_and_saves_none` asserts the year's total within 1% at
+three values of the knob, with canopy cooling off.
+
+**Why 0.5.** The mechanism's intended value is 1. The sim-shot rules say that if the regression
+anchor fails the default drops to where it holds; at 1.0 seed 2 loses its trees in the first summer.
+The anchor holds on the whole interval [0, 0.5] and fails at 0.6 (seed 1), holds at 0.7, and fails
+at 0.75 and 1 (seed 2), so 0.5 — the top of the passing region contiguous with 0 — is the default
+and 0.7 is not (TUNING.md). What the failure measures is UNITS.md finding 3: a crown's year of water
+comes out of one trunk column, and leaf-off puts it into the season the column is driest. Root spread
+would let this go to 1; it is not added here, and this shot adds nothing else to compensate.
+
+**Rate 0.** At `deciduous = 0` the tree loop computes no mean and reads no temperature — the check is
+`(tp.deciduous > 0.0).then(...)`, outside the loop — and seed 42 reproduces
+`tests/data/s42-manifest-preG10.sha256` byte for byte. That manifest is a copy of `s42-manifest.sha256`
+at the parent commit 1add456, whose own `fresh_s42_matches_committed_manifest` reproduces it, and it
+is compared with `assert_same_manifest`, so regeneration cannot overwrite it. The two older frozen
+identities (pre-S11 and pre-G5) now set `deciduous = 0` too. `leaf_draw_mean` is 0 only when a tree
+never carries a leaf; the draw is then 0 rather than a division by zero, and
+`forced_tree_extinction_while_bare_runs_to_the_end` runs that path to an extinction.
+
+**Forced extinction.** No setting of the three new keys forces one on its own: leaf-off moves a
+tree's water, it never adds a cause of death. The test forces an old-age extinction
+(`tree.max_age_years = 0.2`, under maturity, so nothing seeds) with every canopy held bare all year,
+so the leaf-off path, including the zero-mean branch, runs until the last tree and then on an empty
+stand for the rest of the 20000 ticks.
+
+**Regenerated, once, in this commit.** The s42 manifest and the five regenerable `g4b-*` manifests,
+`fixtures/capitol-mini`, `fixtures/capitol-animals-mini` and `fixtures/s42-mini-v2`, with
+`ECOSIM_REGEN_MANIFEST=1 cargo test --release --no-fail-fast`. `tests/data/s42-check.txt` was re-cut
+by the same pass, and its wall-clock line was then replaced by hand with a serial run's (65042 ms,
+PASS) because the regeneration measured 129057 ms under a parallel test load and wrote FAIL; every
+other line is the regeneration's. Two pinned literals in `tests/bundle.rs` moved with the animals
+fixture: the herd at tick 2000 is 9236 grazers, not 9240, and the busiest patch holds 130, not 61,
+with 5 patches at or over the crowding scale's top rather than 7. `forced_hunter_starvation_by_hunt_cost_runs_to_the_end`
+moved from `hunt_cost` 8 to 10 (TUNING.md). `ecoview-native`'s tests pass against the regenerated
+fixtures (109 in `mesh_golden`), so V11's decoupling held.
+
+**A G5 debug check was below the precision of what it checked, and the gate found it.** `cargo test`
+(debug) panicked in `Sim::update_patch_cover` on seed 1: `a patch grew more than the soil paid for:
+[-1.73e-8, -1.38e-9, -1.38e-8]`. It is not an overdraw. The check compared what the soil paid with
+the change in the *stored* f32 cover, and storing rounds by up to half an ulp: the patch (49 soil
+columns, grass at 2.3e-8) grew 4.843254249e-3 as stored against 4.843253992e-3 as computed, and
+49 columns × 2.5 g of nitrogen per unit of cover turns that 2.6e-10 into 3e-8 g, thirty times the
+check's 1e-9. Computed from the update's own f64 growth, the same patch's surplus is +1.42e-8 g, as
+it must be. The tolerance was never reachable by the stored value in general; G5's runs were lucky
+and G10's trajectory was not. The `debug_assert` now checks the computed growth at the same 1e-9
+and says why in a comment; the stored cover still decides `lit`, so release bytes do not move (a
+debug seed-1 run's `series.csv` is identical to the release sweep cell's). This is a correction to
+G5's code made in G10 because it blocked G10's gate. It narrows what the assert inspects — it no
+longer bounds f32 storage rounding, which was never the model's to bound — and does not widen its
+tolerance; if the operator reads it as a widening, the fix is one hunk in `src/producers.rs` to revert
+and this shot's block reason is this paragraph.
+

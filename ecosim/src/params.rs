@@ -525,6 +525,23 @@ pub struct TreeParams {
     /// a year's water use. It is charged to the trunk column alone, though a mature crown covers
     /// nine, which is why it is calibrated at the low end of the published range (UNITS.md 3.3).
     pub transpiration_mm_h: f32,
+    /// How much of its transpiration a leafless tree gives up (shot G10). A tree's draw is
+    /// `transpiration_mm_h × (1 − deciduous × (1 − leaf_on)) / mean`, where `leaf_on` is its
+    /// patch's share of a full canopy ([`Sim::leaf_on`](crate::sim::Sim::leaf_on)) and `mean` is
+    /// the numerator's mean over the model year
+    /// ([`Sim::leaf_draw_mean`](crate::sim::Sim::leaf_draw_mean)), so a year's transpiration is
+    /// unchanged and only its season moves. 0 is an evergreen and the model before G10, and at 0
+    /// the patch temperature is not even read; 1 is a tree that transpires nothing in leaf-off.
+    #[serde(default = "tree_deciduous_default")]
+    pub deciduous: f32,
+    /// Patch temperature in °C at and below which a tree carries no leaves (shot G10).
+    #[serde(default = "tree_leaf_off_temp_default")]
+    pub leaf_off_temp: f32,
+    /// Patch temperature in °C at and above which a tree is in full leaf (shot G10). Between the
+    /// two the canopy is linear in temperature; if this is not above `leaf_off_temp` the change is
+    /// a step at this temperature.
+    #[serde(default = "tree_leaf_on_temp_default")]
+    pub leaf_on_temp: f32,
     /// Soil water below which a tree counts as dry, as a fraction of the column's available water
     /// capacity. 0 is the permanent wilting point.
     pub dry_fraction: f32,
@@ -614,6 +631,18 @@ impl Default for AnimalsParams {
 
 fn tree_waterlog_mortality_default() -> f32 {
     0.01
+}
+
+fn tree_deciduous_default() -> f32 {
+    0.5
+}
+
+fn tree_leaf_off_temp_default() -> f32 {
+    5.0
+}
+
+fn tree_leaf_on_temp_default() -> f32 {
+    10.0
 }
 
 /// The grazer species.

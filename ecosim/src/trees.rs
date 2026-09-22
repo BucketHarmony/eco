@@ -240,6 +240,36 @@ impl Sim {
         (1.0 - open).clamp(0.0, 1.0)
     }
 
+    /// The share of a full canopy a tree in patch `p` carries (shot G10): 0 at and below
+    /// `tree.leaf_off_temp`, 1 at and above `tree.leaf_on_temp`, linear between, on the patch
+    /// temperature. A step at `leaf_on_temp` if the ramp has no width.
+    pub fn leaf_on(&self, p: usize) -> f32 {
+        let tp = &self.params.tree;
+        leaf_fraction(self.patches[p].temperature, tp.leaf_off_temp, tp.leaf_on_temp)
+    }
+
+    /// The mean over one model year of [`leaf_draw`] at the season's temperature (shot G10),
+    /// sampled at every temperature update, as the patches see it. `transpiration_mm_h` is an
+    /// annual figure (UNITS.md R8, 300 mm a year), so a tree's draw is divided by this and a
+    /// deciduous tree transpires the same year's water as an evergreen, all of it while in leaf.
+    /// It reads the open-ground season, not a patch's: a tree whose own canopy cools its patch
+    /// spends a little longer bare and so draws a little less than the year's figure. 0 when the
+    /// tree never carries a leaf at all.
+    pub fn leaf_draw_mean(&self) -> f64 {
+        let (cl, tp) = (&self.params.climate, &self.params.tree);
+        let (year, step) = (cl.year_len.max(1), self.params.schedule.temperature_every.max(1));
+        let n = year.div_ceil(step);
+        let sum: f64 = (0..n)
+            .map(|k| {
+                let t = cl.temp_base
+                    + self.params.season.amplitude
+                        * libm::sinf(2.0 * std::f32::consts::PI * (k * step) as f32 / year as f32);
+                leaf_draw(tp.deciduous, leaf_fraction(t, tp.leaf_off_temp, tp.leaf_on_temp)) as f64
+            })
+            .sum();
+        sum / n as f64
+    }
+
     /// Germination probability on a soil column: f_L(surface light)·f_M(moisture)·f_T(patch temp).
     pub fn germination_prob(&self, x: usize, y: usize) -> f32 {
         let c = self.world.dims.cidx(x, y);
@@ -273,6 +303,9 @@ impl Sim {
         // `crowding_mortality = 0` is the one setting that reads no crown at all, and it must not
         // pay for one either — nor may it touch the RNG (the rate-0 identity, tests/sweep.rs).
         let crowns = (tp.crowding_mortality > 0.0).then(|| self.crowns());
+        // Leaf-off moves a year's transpiration into the leafy part of it rather than removing
+        // any (shot G10), so the draw is divided by its own mean over the model's year.
+        let norm = (tp.deciduous > 0.0).then(|| self.leaf_draw_mean());
         let n = self.trees.len();
         for i in 0..n {
             if !self.trees[i].alive {
@@ -294,9 +327,16 @@ impl Sim {
                     *v += g;
                 }
             }
-            // Transpiration over the update's length, in mm (shot G4b).
+            // Transpiration over the update's length, in mm (shot G4b), less what a bare canopy
+            // does not draw (shot G10). The rate check sits outside, so an evergreen reads no
+            // temperature and draws exactly what it drew before the leaves could fall.
             let hours = tp.update_every as f64 * crate::hydro::tick_hours(&self.params);
-            self.draw_water_mm(c, (tp.transpiration_mm_h as f64 * hours) as f32);
+            let mut mm = tp.transpiration_mm_h as f64 * hours;
+            if let Some(norm) = norm {
+                let leaf = self.leaf_on(self.world.dims.patch_of(self.trees[i].x as usize, self.trees[i].y as usize));
+                mm = if norm > 0.0 { mm * leaf_draw(tp.deciduous, leaf) as f64 / norm } else { 0.0 };
+            }
+            self.draw_water_mm(c, mm as f32);
             if self.water_fraction(c) < tp.dry_fraction {
                 self.trees[i].dry_ticks += tp.update_every;
             } else {
@@ -525,6 +565,21 @@ impl Sim {
         }
         light.clamp(0.0, 1.0)
     }
+}
+
+/// Leaf-on fraction at temperature `t` for a canopy bare at `off` and full at `on` (shot G10).
+pub fn leaf_fraction(t: f32, off: f32, on: f32) -> f32 {
+    if on <= off {
+        return if t >= on { 1.0 } else { 0.0 };
+    }
+    ((t - off) / (on - off)).clamp(0.0, 1.0)
+}
+
+/// The share of its full-leaf draw a tree takes at leaf-on fraction `leaf`, when leaf-off gives up
+/// `deciduous` of it (shot G10). Both are clamped to [0, 1], so the draw is never negative and
+/// never more than a tree in full leaf takes.
+pub fn leaf_draw(deciduous: f32, leaf: f32) -> f32 {
+    1.0 - deciduous.clamp(0.0, 1.0) * (1.0 - leaf.clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
@@ -1168,5 +1223,139 @@ mod tests {
         let seed = sim.crown_of(&sim.trees[j]);
         assert_eq!((seed.height, seed.radius, seed.base, seed.depth()), (0.0, 0.0, 0.0, 0.0));
         assert_eq!(seed.mid(), seed.ground, "a seed's light is read at the ground");
+    }
+
+    /// The leaf-on share stays in [0, 1] and never falls as the patch warms (shot G10).
+    fn leaf_fraction_monotone(t: (f32, f32), off: f32, width: f32) -> Result<(), TestCaseError> {
+        let (lo, hi) = if t.0 <= t.1 { t } else { (t.1, t.0) };
+        let on = off + width;
+        let (a, b) = (leaf_fraction(lo, off, on), leaf_fraction(hi, off, on));
+        prop_assert!((0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b), "{a} {b}");
+        prop_assert!(a <= b, "leaf fell from {a} at {lo} to {b} at {hi} (off {off}, on {on})");
+        Ok(())
+    }
+
+    /// A tree's draw is never negative, never more than in full leaf, never falls as the canopy
+    /// fills, and is exactly the full-leaf draw for an evergreen (shot G10).
+    fn leaf_draw_bounded(deciduous: f32, leaf: (f32, f32)) -> Result<(), TestCaseError> {
+        let (lo, hi) = if leaf.0 <= leaf.1 { leaf } else { (leaf.1, leaf.0) };
+        let (a, b) = (leaf_draw(deciduous, lo), leaf_draw(deciduous, hi));
+        prop_assert!((0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b), "{a} {b}");
+        prop_assert!(a <= b, "the draw fell from {a} to {b} as the canopy filled");
+        prop_assert_eq!(leaf_draw(0.0, lo), 1.0);
+        prop_assert_eq!(leaf_draw(deciduous, 1.0), 1.0);
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(crate::cases(256)))]
+
+        #[test]
+        fn prop_leaf_fraction_monotone(
+            t in (-40.0f32..50.0, -40.0f32..50.0),
+            off in -10.0f32..20.0,
+            width in -5.0f32..15.0,
+        ) {
+            leaf_fraction_monotone(t, off, width)?;
+        }
+
+        #[test]
+        fn prop_leaf_draw_bounded(deciduous in -0.5f32..1.5, leaf in (-0.5f32..1.5, -0.5f32..1.5)) {
+            leaf_draw_bounded(deciduous, leaf)?;
+        }
+    }
+
+    #[test]
+    fn leaf_fraction_regression_ramp_ends_and_step() {
+        assert_eq!(leaf_fraction(5.0, 5.0, 10.0), 0.0);
+        assert_eq!(leaf_fraction(7.5, 5.0, 10.0), 0.5);
+        assert_eq!(leaf_fraction(10.0, 5.0, 10.0), 1.0);
+        // No width: a step at the on temperature, from either side.
+        assert_eq!(leaf_fraction(9.99, 10.0, 10.0), 0.0);
+        assert_eq!(leaf_fraction(10.0, 10.0, 10.0), 1.0);
+        assert_eq!(leaf_fraction(9.0, 12.0, 8.0), 1.0);
+        leaf_fraction_monotone((4.0, 6.0), 5.0, 0.0).unwrap();
+        leaf_fraction_monotone((6.0, 4.0), 5.0, -3.0).unwrap();
+    }
+
+    #[test]
+    fn leaf_draw_regression_corners() {
+        assert_eq!(leaf_draw(1.0, 0.0), 0.0, "a bare fully deciduous tree draws nothing");
+        assert_eq!(leaf_draw(0.5, 0.0), 0.5);
+        assert_eq!(leaf_draw(2.0, -1.0), 0.0, "out-of-range inputs clamp, never go negative");
+        leaf_draw_bounded(1.0, (0.0, 1.0)).unwrap();
+        leaf_draw_bounded(-0.5, (1.5, -0.5)).unwrap();
+    }
+
+    /// One tree over one update: in a cold patch a deciduous tree draws nothing, in a warm one it
+    /// draws what it always did, and an evergreen draws the same in both (shot G10).
+    #[test]
+    fn a_bare_tree_does_not_drink() {
+        let drop = |deciduous: f32, temperature: f32| {
+            let mut sim = bare_sim();
+            sim.params.tree.deciduous = deciduous;
+            sim.moisture.fill(200.0);
+            for p in sim.patches.iter_mut() {
+                p.temperature = temperature;
+            }
+            sim.plant_tree(20, 20, 2000);
+            let c = cidx(20, 20);
+            let before = sim.moisture[c];
+            sim.update_trees();
+            before - sim.moisture[c]
+        };
+        let full = drop(0.0, 20.0);
+        assert!(full > 0.0, "a tree in leaf draws water");
+        assert_eq!(drop(0.0, -5.0), full, "an evergreen draws the same in winter");
+        assert_eq!(drop(1.0, -5.0), 0.0, "a bare deciduous tree draws nothing");
+        // In leaf it draws the year's water in less of the year, so more than an evergreen does.
+        let norm = {
+            let mut sim = bare_sim();
+            sim.params.tree.deciduous = 1.0;
+            sim.leaf_draw_mean() as f32
+        };
+        assert!((0.5..0.7).contains(&norm), "the model year is {norm} in leaf");
+        let leafy = drop(1.0, 20.0);
+        assert!((leafy - full / norm).abs() < 1e-3 * leafy, "in full leaf it draws {leafy}, not {full} / {norm}");
+        let half = drop(1.0, 7.5);
+        assert!((half - leafy / 2.0).abs() < 1e-3 * leafy, "half a canopy draws half: {half} of {leafy}");
+    }
+
+    /// Over a whole model year a deciduous tree draws what an evergreen draws, to within the
+    /// stepping of the temperature update, at any `deciduous` (shot G10): leaf-off moves the water,
+    /// it does not save it. A tree that never leafs draws nothing, and the mean is then 0.
+    #[test]
+    fn a_year_of_leaf_off_moves_the_water_and_saves_none() {
+        let year = |deciduous: f32, on: f32| {
+            let mut sim = bare_sim();
+            (sim.params.tree.deciduous, sim.params.tree.leaf_on_temp) = (deciduous, on);
+            sim.params.tree.leaf_off_temp = on - 5.0;
+            (sim.params.tree.max_age_years, sim.params.tree.dry_fraction) = (1000.0, 0.0);
+            sim.params.climate.canopy_cool = 0.0;
+            sim.moisture.fill(255.0);
+            sim.plant_tree(20, 20, 2000);
+            let c = cidx(20, 20);
+            let mut drawn = 0.0f64;
+            for t in 0..sim.params.climate.year_len {
+                if t % sim.params.schedule.temperature_every == 0 {
+                    sim.update_temperature(t);
+                }
+                if t % sim.params.tree.update_every == 0 {
+                    sim.moisture[c] = 255.0;
+                    sim.update_trees();
+                    drawn += (255.0 - sim.moisture[c]) as f64;
+                }
+            }
+            drawn
+        };
+        let evergreen = year(0.0, 10.0);
+        for d in [0.25, 0.5, 1.0] {
+            let got = year(d, 10.0);
+            assert!((got - evergreen).abs() < 0.01 * evergreen, "deciduous {d}: {got} against {evergreen}");
+        }
+        assert_eq!(year(1.0, 60.0), 0.0);
+        let mut sim = bare_sim();
+        sim.params.tree.deciduous = 0.0;
+        assert_eq!(sim.leaf_draw_mean(), 1.0, "at deciduous 0 there is nothing to move");
     }
 }

@@ -152,7 +152,9 @@ AWC reading above — a documentation change, not a numeric one.
 | key | old value | unit today | new unit | new value | ref | status |
 |---|---|---|---|---|---|---|
 | `tree.moisture_draw` | 50.0 | index units per 50-tick update, **scaled by the column's AWC** | replaced by `tree.transpiration_mm_h` | — | — | converted |
-| `tree.transpiration_mm_h` | *(new)* | — | **mm/h over the trunk column** | 0.0342 | R8 | converted |
+| `tree.transpiration_mm_h` | *(new)* | — | **mm/h over the trunk column, annual mean** (since G10) | 0.0342 | R8 | converted |
+| `tree.deciduous` | *(new, G10)* | — | **fraction of the draw a bare tree gives up** | 0.5 | model | dimensionless |
+| `tree.leaf_off_temp`, `tree.leaf_on_temp` | *(new, G10)* | — | **°C of patch temperature** | 5.0, 10.0 | model | new |
 | `cover.moisture_draw` | 15.0 | index units per unit of cover gained, **scaled by the column's AWC** | replaced by `cover.water_per_growth_mm` | — | — | converted |
 | `cover.water_per_growth_mm` | *(new)* | — | **mm of water per unit of cover fraction gained** | 8.8 | model | converted |
 | `tree.dry_moisture` | 30.0 | index units | replaced by `tree.dry_fraction` | — | — | converted |
@@ -411,6 +413,13 @@ tree draw has none (finding 4). Adding one is a mechanism, so shot G4c recorded 
 its prompt required. Nothing in `params.toml` stands for it — there is no key to mark — which is
 exactly why it is written down here.
 
+**Closed by shot G10.** `tree.deciduous`, `tree.leaf_off_temp` and `tree.leaf_on_temp` give the tree
+draw a season: a leaf-on share linear in patch temperature between 5 and 10 °C, and a bare tree
+giving up `deciduous` of its draw. The draw is renormalised over the model year, so
+`tree.transpiration_mm_h` keeps its meaning — the **annual mean** rate, 300 mm a year (R8) — and only
+the season of it moves. The shipped `deciduous` is 0.5, not the 1 a broadleaf is; the reason is
+finding 3 (TUNING.md, G10).
+
 **The legacy moisture model.** `climate.rain_base` = 8.0, `rain_amp` = 4.0, `evap_base` = 2.0,
 `evap_div` = 8.0, `pond_moisture` = 255.0, `initial_moisture` = 128.0, `climate.diffusion` = 0.10.
 These drive the pre-G4 moisture path, which runs only when `hydro.enabled = false`. They are index
@@ -514,6 +523,9 @@ sun, and the tree ages are not in real years.
    calibrated at the low end of its published range.
 4. **Deciduous phenology is a missing mechanism.** The model's trees transpire at the same rate in
    January and July. `hydro.et_mm_h` has a temperature factor; the tree draw has none.
+   *Closed by shot G10* (section 6): the draw now has a season, and its annual total is unchanged.
+   Leaf-off light is not modelled — the canopy shades the same bare as in leaf — and belongs with the
+   moving sun (backlog G9).
 5. **Two documentation errors, both fixed by this shot.** `CLAUDE.md:58` and `DECISIONS.md:1168`
    called `moisture` a `u8` field; it is `Vec<f32>` in memory and `u8` only in `moisture.bin`.
    `TUNING.md:523` said "0.25 mm/h is 5.5 mm a tick against a lawn's 40 mm field capacity": 5.5 mm

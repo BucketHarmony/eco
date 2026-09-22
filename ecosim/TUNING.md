@@ -782,3 +782,17 @@ margin in the set is the fertility ceiling at +0.038 (seed 3): the index's top i
 when the litter is decaying into a pool no sward has grown into yet, and `npk.init_n` is the knob
 that sets it. Nothing else moved: the nutrient tier costs about 1% of run time (seed 1 at 60000
 ticks, 123.8 s against the pre-G5 binary's 128.5 s on the same machine).
+
+## Shot G10 — leaf-off
+
+| Parameter | Before | After | Kind | Why, and the line that forced it |
+|---|---|---|---|---|
+| `tree.deciduous` | — (evergreen, i.e. 0) | **0.5** | new, forced down from 1.0 by the regression anchor | The share of its draw a leafless tree gives up; the year's draw is renormalised so it stays 300 mm (DECISIONS.md, G10). Shipped first at 1.0, a real broadleaf. **Seed 2 fails `ecosim check` at 1.0** — `no species reaches 0` (trees 0), `trees at end >= 1.5x`, `mature trees at 2.5 years >= 35`, and `fertility_mean` at 221.34 — because its first-summer cohort dies of drought before it seeds. Probed at 0.5, 0.6 and 0.7 on seeds 1, 2, 3 and 42, and at 0.25 on 42 as well: 0.25 and 0.5 pass all four; 0.6 fails seed 1 on `mature trees at 2.5 years` (11 against 35); 0.7 passes all four; 0.75 fails seed 2 like 1.0. **0.5 is the top of the passing region contiguous with 0.** 0.7 would pass today, but it is an island between two failures that are the same knife edge, and a default parked on an island fails the next unrelated change to the random stream. `sweeps/shotG10/FINDINGS.md` has every cell. |
+| `tree.leaf_off_temp`, `tree.leaf_on_temp` | — | 5.0, 10.0 °C | new, not tuned | The mean daily temperatures between which a temperate broadleaf drops and regains its leaves, from general knowledge, to one significant figure. Not moved by any acceptance line. |
+| `hunter.hunt_cost` in `forced_hunter_starvation_by_hunt_cost_runs_to_the_end` | 8 | 10 | test setting, not a default | Leaf-off moved the random stream, and at 8 the hunters of seed 1 on the small world now die out at tick 11338 with the last one's cause `old_age`, not `starved`. 10 forces starvation again (tick 4030). `params.toml` is unchanged. |
+
+The regression anchor at the shipped value: seeds 1, 2, 3 and 42 at 20000 ticks and the Capitol
+reference run pass every `ecosim check` line, run serially (run in parallel with four others, seeds
+2, 3 and 42 failed only the wall-clock line, at 90.7–100.6 s, which is the machine and not the
+model).
+

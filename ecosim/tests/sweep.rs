@@ -396,6 +396,8 @@ fn tree_crowding_off_cuts_to_its_manifest() {
     let mut p = Params::load_default();
     p.tree.crowding_mortality = 0.0;
     common::pre_g5(&mut p);
+    // The S11 binary predates leaf-off too (shot G10), and an evergreen is that code exactly.
+    p.tree.deciduous = 0.0;
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
     let got = hash_run(&dir, common::without_npk);
     assert_eq!(got.len(), 2 + 201 * 10 + 4);
@@ -461,10 +463,32 @@ fn npk_off_cuts_to_the_pre_g5_manifest() {
     let mut p = Params::load_default();
     p.npk.enabled = false;
     p.climate.decay_k = 6.0;
+    // The pre-G5 binary predates leaf-off too (shot G10), and an evergreen is that code exactly.
+    p.tree.deciduous = 0.0;
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
     assert!(!dir.join("snap_000000").join("npk.bin").exists(), "no nutrient field with the tier off");
     let got = hash_run(&dir, common::without_npk);
     assert_same_manifest(&read_manifest("s42-manifest-preG5.sha256"), &got);
+}
+
+/// Leaf-off at rate 0 (shot G10): with `tree.deciduous=0` seed 42 on the reference strip
+/// reproduces the run the pre-G10 ecosim wrote, byte for byte. The tree update reads no patch
+/// temperature and multiplies nothing, so the draw, the soil water and everything downstream of it
+/// are the code before the leaves could fall. G10 adds no column and no file, so nothing is cut.
+///
+/// `s42-manifest-preG10.sha256` is a byte copy of `s42-manifest.sha256` as the commit before G10
+/// left it (1add456), which that commit's `fresh_s42_matches_committed_manifest` reproduces. It is
+/// compared with `assert_same_manifest`, never `assert_manifest`, so a regeneration cannot
+/// overwrite it.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn deciduous_off_cuts_to_the_pre_g10_manifest() {
+    let dir = tmp("s42_deciduous_off");
+    let mut p = Params::load_default();
+    p.tree.deciduous = 0.0;
+    run(p, 42, 20_000, 100, &[], &dir).unwrap();
+    let got = hash_run(&dir, |_, b| b);
+    assert_same_manifest(&read_manifest("s42-manifest-preG10.sha256"), &got);
 }
 
 /// A 2-value × 1-seed × 500-tick sweep writes 2 rows and 2 cell CSVs, and each cell equals a

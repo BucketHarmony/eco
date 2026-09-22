@@ -343,6 +343,31 @@ fn forced_tree_extinction_by_crowding_runs_to_the_end() {
     assert!(crowded * 2 > deaths.len(), "crowded is {crowded} of {} tree deaths", deaths.len());
 }
 
+/// Forced extinction with every tree permanently bare (shot G10). Leaf-off can only take water
+/// away from a tree's draw, never add to it, so no setting of `tree.deciduous` forces an extinction
+/// on its own: the extinction is forced by age instead (`tree.max_age_years=0.2`, below maturity at
+/// 0.25, so no tree ever seeds and immigration is off at the default floor of 0), with
+/// `tree.leaf_on_temp=60` holding every canopy at 0 leaves all year. So the leaf-off path runs on
+/// every tree update until the last tree dies, and then on an empty stand. The run still completes
+/// 20000 ticks with valid snapshots, and every tree death in the log is `old_age`.
+#[test]
+fn forced_tree_extinction_while_bare_runs_to_the_end() {
+    let dir = tmp("forced_bare_extinction");
+    let last = run_with(
+        &dir,
+        &["tree.max_age_years=0.2", "tree.leaf_off_temp=50", "tree.leaf_on_temp=60", "fire.base_rate=0"]
+            .map(String::from),
+    );
+    assert_eq!(last.trees, 0, "the trees are gone by the end");
+    let text = assert_valid_run(&dir);
+    assert!(text.contains("extinction: trees at tick"), "{text}");
+    let events = ecosim::events::parse_events(&fs::read_to_string(dir.join("events.csv")).unwrap()).unwrap();
+    let deaths: Vec<&str> =
+        events.iter().filter(|e| e.kind == ecosim::events::EventKind::TreeDeath).map(|e| e.cause).collect();
+    assert!(!deaths.is_empty(), "no tree died");
+    assert!(deaths.iter().all(|c| *c == "old_age"), "{deaths:?}");
+}
+
 /// Forced extinction by starvation of the soil (shot G5): a world with no nitrogen in its soil at
 /// all -- none in the mineral pool, none in the litter, none falling out of the sky -- has a growth
 /// factor of essentially 0 for every plant, because Liebig's minimum is a minimum. The grass the
@@ -496,15 +521,18 @@ fn forced_hunter_extinction_by_refractory_runs_to_the_end() {
     assert_eq!((sim.tick, sim.count_hunters()), (20_000, 0), "the last snapshot restores");
 }
 
-/// Forced extinction by hunting cost: at `hunter.hunt_cost=8` an attack costs more than a hunter
-/// can win back at the typical success rate, so the hunters starve out on seed 1 (tick 6622). The run continues
+/// Forced extinction by hunting cost: at `hunter.hunt_cost=10` an attack costs more than a hunter
+/// can win back at the typical success rate, so the hunters starve out on seed 1 (tick 4030). It was
+/// 8 until shot G10, whose leaf-off moved the random stream enough that at 8 the last hunter
+/// lived until tick 11338 and died of old age: still an extinction, but not the cause this test
+/// names, so the cost was raised to the next value that forces it again. The run continues
 /// to 20000 ticks with valid snapshots, `ecosim stats` names `starved`, the predator–prey signature
 /// is reported as undefined with that cause, and the last snapshot restores.
 #[test]
 #[cfg_attr(coverage, ignore = "full-length run that reaches no line the unit tests miss; runs in `cargo test`")]
 fn forced_hunter_starvation_by_hunt_cost_runs_to_the_end() {
     let dir = tmp("forced_hunt_cost_extinction");
-    let set = ["hunter.hunt_cost=8".to_string()];
+    let set = ["hunter.hunt_cost=10".to_string()];
     let last = run_with(&dir, &set);
     assert_eq!(last.hunters, 0, "hunters extinct by the end");
     let text = assert_valid_run(&dir);

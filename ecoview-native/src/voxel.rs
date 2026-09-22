@@ -9,6 +9,7 @@ use crate::bundle::{Bundle, Shrub};
 use crate::cover::{CellPlant, Cover, SHRUB_HEIGHT_M};
 use crate::overlay::PondLevels;
 use crate::palette::{BAND_BASE, POND};
+use crate::run::RunMeta;
 use crate::tree::TreeForm;
 use crate::ECO_CELL_M;
 
@@ -101,13 +102,8 @@ pub struct VoxelWorld {
     /// so unlike [`VoxelWorld::bands`] nothing is resampled on the way in. `None` and an all-zero
     /// grid draw the same site; they differ only in what the HUD says about why.
     ponds: Option<Vec<u8>>,
-    /// Can ground cover root in each medium code? Indexed by `medium`, not by voxel id.
-    ///
-    /// This is the simulator's own `Medium::is_sealed` (`ecosim/src/bundle.rs`) plus open water,
-    /// matched on the name the bundle publishes rather than on a code, and **copied rather than
-    /// shared**: the two projects have no common code, only the files on disk (CLAUDE.md). A medium
-    /// the viewer does not recognise grows things, which is the harmless way to be wrong.
-    grows: Vec<bool>,
+    /// Can ground cover root in each medium code? See [`Plantable`], which says where it came from.
+    pub plantable: Plantable,
     /// Bake ambient occlusion into the voxel ids when this world is meshed (shot V6)?
     ///
     /// **Off by default, and the viewer turns it on.** A `VoxelWorld` built by the library alone
@@ -133,6 +129,121 @@ pub struct ColumnBands {
     pub y: usize,
     pub cell_m: f32,
     pub bands: Vec<u8>,
+}
+
+/// Which media a plant roots in, and where that answer came from.
+///
+/// The rule is the simulator's: a column is plantable unless its surface is sealed or open water,
+/// and `ecosim` publishes the result per medium as `params.medium.<name>.plantable` in the run's
+/// `meta.json` (`ecosim/src/world.rs`, `is_plantable`). Shot V4 re-derived the same set from a
+/// hard-coded name list -- `concrete`, `asphalt`, `roof`, `water` -- on the grounds that the two
+/// projects share no code. They do not, and reading the run does not change that: the run directory
+/// **is** the documented interface between them (CLAUDE.md), so shot S4 reads the value instead of
+/// copying it. The simulator decides, the viewer expresses.
+///
+/// The name list stays, as the fallback, because it has to: the viewer opens a bundle with no run at
+/// all (`--world` alone, and `--stress`), and a site with nothing to ask still has to draw. Which of
+/// the two is in force is named in [`Plantable::source`] and printed on screen, the way shot V3's
+/// height curve is -- a fallback that does not say so is indistinguishable from a reading.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Plantable {
+    /// The bundle's medium names, in code order, kept so the gate can be re-read from a run without
+    /// the bundle in hand: a `VoxelWorld` already owns its copy of every other column field.
+    pub media: Vec<String>,
+    /// One flag per medium **code**, in `media` order. Not indexed by voxel id.
+    grows: Vec<bool>,
+    /// Where the flags came from, in words, for the HUD and for `ecoview.stats`.
+    pub source: String,
+    /// False if any medium's flag is this viewer's fallback rather than the run's.
+    pub from_meta: bool,
+}
+
+/// The media shot V4 hard-coded as growing nothing, kept as the no-run fallback only.
+const SEALED_NAMES: [&str; 4] = ["concrete", "asphalt", "roof", "water"];
+
+impl Plantable {
+    /// The fallback: the V4 name list, for a bundle opened with no run.
+    pub fn fallback(media: &[String]) -> Plantable {
+        let grows: Vec<bool> = media
+            .iter()
+            .map(|m| !SEALED_NAMES.contains(&m.as_str()))
+            .collect();
+        let source = format!(
+            "this viewer's fallback name list, because no run is loaded to ask; {}",
+            sealed_line(media, &grows)
+        );
+        Plantable {
+            media: media.to_vec(),
+            grows,
+            source,
+            from_meta: false,
+        }
+    }
+
+    /// The run's own answer, medium by medium, falling back by name for any the run does not carry.
+    ///
+    /// Per medium rather than all-or-nothing: a run written before a medium existed still says the
+    /// truth about the eight it does name, and only the ninth is guessed at. Every guess is named.
+    pub fn of(media: &[String], meta: &RunMeta) -> Plantable {
+        let rows = &meta.params.medium;
+        let mut missing: Vec<&str> = Vec::new();
+        let grows: Vec<bool> = media
+            .iter()
+            .map(|m| match rows.get(m).and_then(|r| r.plantable) {
+                Some(p) => p,
+                None => {
+                    missing.push(m.as_str());
+                    !SEALED_NAMES.contains(&m.as_str())
+                }
+            })
+            .collect();
+        let sealed = sealed_line(media, &grows);
+        let source = if missing.is_empty() {
+            format!("the run's meta.json, params.medium.<name>.plantable; {sealed}")
+        } else {
+            format!(
+                "the run's meta.json, params.medium.<name>.plantable, and this viewer's fallback                  name list for {}, which it does not carry; {sealed}",
+                missing.join(", ")
+            )
+        };
+        Plantable {
+            media: media.to_vec(),
+            grows,
+            source,
+            from_meta: missing.is_empty(),
+        }
+    }
+
+    /// Does a plant root in medium `code`? Indexed by the bundle's own medium code.
+    #[inline]
+    pub fn grows(&self, code: u8) -> bool {
+        self.grows[code as usize]
+    }
+
+    /// The media that grow nothing, in medium-code order.
+    pub fn sealed(&self) -> Vec<&str> {
+        self.media
+            .iter()
+            .zip(self.grows.iter())
+            .filter(|(_, g)| !**g)
+            .map(|(m, _)| m.as_str())
+            .collect()
+    }
+}
+
+/// "concrete, asphalt, roof, water grow nothing", or that none of them do.
+fn sealed_line(media: &[String], grows: &[bool]) -> String {
+    let sealed: Vec<&str> = media
+        .iter()
+        .zip(grows.iter())
+        .filter(|(_, g)| !**g)
+        .map(|(m, _)| m.as_str())
+        .collect();
+    if sealed.is_empty() {
+        "every medium on this site grows something".to_string()
+    } else {
+        format!("{} grow nothing", sealed.join(", "))
+    }
 }
 
 impl VoxelWorld {
@@ -178,11 +289,7 @@ impl VoxelWorld {
             plants: vec![Vec::new(); chunks.x * chunks.y * chunks.z],
             bands: None,
             ponds: None,
-            grows: b
-                .media
-                .iter()
-                .map(|m| !matches!(m.as_str(), "concrete" | "asphalt" | "roof" | "water"))
-                .collect(),
+            plantable: Plantable::fallback(&b.media),
             ao: false,
             chunks,
             levels,
@@ -258,6 +365,18 @@ impl VoxelWorld {
         }
     }
 
+    /// Re-reads the plantable gate from a run's `meta.json`, keeping this world's medium names.
+    ///
+    /// Called every time a snapshot is applied rather than once at load, because a run can arrive
+    /// after the world does: shot E4's round trip grows a run from the edited site and adopts it
+    /// mid-session, and a gate read only at startup would still be the fallback's.
+    pub fn read_plantable(&mut self, meta: &RunMeta) {
+        let next = Plantable::of(&self.plantable.media, meta);
+        if next != self.plantable {
+            self.plantable = next;
+        }
+    }
+
     /// Draws one snapshot's ground cover and its vines, cell by cell over the whole ground grid.
     ///
     /// **This is expression, not ecology** (`overnight/DIRECTION-native-viewer.md`). The simulator
@@ -265,9 +384,10 @@ impl VoxelWorld {
     /// decides only which of the patch's ground cells show it and how far up a wall a climber goes.
     /// Nothing here competes, accumulates or feeds back, and no vine is an entity in any run.
     ///
-    /// Both are gated on the surface medium: a cell of asphalt or roof or open water grows nothing,
-    /// so paving a lawn in the viewer strips its blades and the vines on the wall beside it. That
-    /// gate is the only place the viewer decides *whether* a plant is there rather than where.
+    /// Both are gated on the surface medium ([`Plantable`], which the run decides and this world
+    /// only applies), so paving a lawn in the viewer strips its blades and the vines on the wall
+    /// beside it. That gate is the only place the *whether* of a plant is decided here at all, and
+    /// since shot S4 even that answer is read from the run rather than re-derived.
     ///
     /// Sweeping every ground cell is O(width x depth) -- 0.26 M on the Capitol -- which is the same
     /// order as the fill that follows it, so the loop is left plain rather than restricted to the
@@ -282,7 +402,7 @@ impl VoxelWorld {
             let ey = self.to_col(gy, c.dims.y);
             for gx in 0..self.width {
                 let i = gx + self.width * gy;
-                if self.building_h[i] > 0.0 || !self.grows[self.medium[i] as usize] {
+                if self.building_h[i] > 0.0 || !self.plantable.grows(self.medium[i]) {
                     continue;
                 }
                 let ex = self.to_col(gx, c.dims.x);

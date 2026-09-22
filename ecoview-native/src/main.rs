@@ -951,6 +951,9 @@ fn load_snapshot(
     let Some(run) = &t.run else {
         return Vec::new();
     };
+    // Which media grow things is the run's answer, not this viewer's (shot S4). Read here rather
+    // than at load because a run can arrive later -- the round trip grows one from the edited site.
+    world.read_plantable(&run.meta);
     let start = Instant::now();
     let snap = match run.trees_at(t.index) {
         Ok(s) => s,
@@ -2165,6 +2168,18 @@ fn hud(
             ),
         });
     }
+    // The gate under all of that, and whose answer it is (shot S4). Printed whether or not a run is
+    // open, because the case worth naming is the one where there is nothing to ask: a fallback that
+    // does not say it is a fallback is indistinguishable on screen from a reading.
+    s.push_str(&format!(
+        "sealed ground grows nothing -- from {}{}\n",
+        site.world.plantable.source,
+        if site.world.plantable.from_meta {
+            ""
+        } else {
+            "  (!)"
+        }
+    ));
     // Standing water, and the one number in it that is this viewer's: the lattice. Printed with the
     // millimetres beside it so a screenshot of a site under 50 mm of water cannot be read as a site
     // under half a metre of it.
@@ -2680,6 +2695,15 @@ fn stats_method(
                 "vine_vigour": t.cover_stats.vigour,
             },
             "note": "expression, not simulation: the run owns grass, shrub, moisture and light; the viewer owns only where a blade stands and how far a vine climbs. No vine is an entity in any run and nothing here feeds back into the simulation.",
+        },
+        // The one gate that decides *whether* a plant is drawn, and whose answer it is. Since shot
+        // S4 it is the run's `params.medium.<name>.plantable`, with the old name list kept only for
+        // a bundle opened without a run -- and `from_meta` says which of the two is in force.
+        "plantable": {
+            "source": site.world.plantable.source,
+            "from_meta": site.world.plantable.from_meta,
+            "media": site.world.plantable.media,
+            "sealed": site.world.plantable.sealed(),
         },
         // Shot S5's standing water. Every number is the run's except `voxels` and `min_drawn_mm`,
         // which are this viewer's lattice, and the note says so.

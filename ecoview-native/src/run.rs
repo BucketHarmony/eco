@@ -12,6 +12,7 @@
 use crate::bundle::Bundle;
 use crate::tree::{mix, Life, TreeForm};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -149,6 +150,18 @@ pub struct BundleParams {
     pub tree_tall_age_years: Option<f32>,
 }
 
+/// One row of `params.medium`: what the simulator says a surface does.
+///
+/// Only `plantable` is read. The three hydrology numbers beside it in the file are the simulator's
+/// business -- this viewer draws no infiltration -- and leaving them out of the struct is what keeps
+/// that true rather than merely unimplemented.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+pub struct MediumRow {
+    /// Whether a plant roots in this medium. `None` when the run predates the field.
+    pub plantable: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Params {
@@ -158,6 +171,13 @@ pub struct Params {
     pub bundle: BundleParams,
     pub disease: DiseaseParams,
     pub fire: FireParams,
+    /// `params.medium`, keyed by the medium's name -- the same names the bundle publishes in its own
+    /// `media` list, which is what lets a code in `medium.u8` be looked up here (shot S4).
+    ///
+    /// A `BTreeMap` rather than a struct of nine fields on purpose: the scene contract's media are
+    /// the simulator's to name, and a tenth one added there should arrive here as data rather than
+    /// as a parse error or a silently dropped row.
+    pub medium: BTreeMap<String, MediumRow>,
 }
 
 /// The three tree stages `ecosim` writes.

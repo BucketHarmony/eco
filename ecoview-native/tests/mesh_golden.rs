@@ -1365,9 +1365,10 @@ fn the_same_seed_scatters_the_same_cover() {
 
 /// Sealed ground grows nothing, and neither does the wall standing in it.
 ///
-/// This is the only place the viewer decides *whether* a plant is there rather than where, and it
-/// is the simulator's own rule (`Medium::is_sealed`) copied rather than shared. It is also what
-/// makes an edit legible: pave a lawn in the viewer and its blades and its climbers both go.
+/// This is the only place the viewer decides *whether* a plant is there rather than where. With no
+/// run to ask it is the fallback name list that answers, which is what this test drives; the run's
+/// own answer is in `the_run_decides_which_media_grow_things` below. It is also what makes an edit
+/// legible: pave a lawn in the viewer and its blades and its climbers both go.
 #[test]
 fn sealed_ground_grows_nothing() {
     let n = 64;
@@ -1390,6 +1391,21 @@ fn sealed_ground_grows_nothing() {
     assert!(g > 1000 && s > 100 && v > 100, "lawn grew {g}/{s}/{v}");
     assert_eq!(count(6), (0, 0, 0)); // asphalt
     assert_eq!(count(8), (0, 0, 0)); // open water
+
+    // And it says out loud that this was its own list and not a reading, because no run was open.
+    let w = VoxelWorld::from_bundle(&with_building(n, 8.0));
+    assert!(!w.plantable.from_meta);
+    assert!(
+        w.plantable
+            .source
+            .starts_with("this viewer's fallback name list"),
+        "{}",
+        w.plantable.source
+    );
+    assert_eq!(
+        w.plantable.sealed(),
+        ["concrete", "asphalt", "roof", "water"]
+    );
 }
 
 /// A vine is drawn on the open side of a wall, from the ground up, and stops at the wall's top.
@@ -2530,4 +2546,143 @@ fn the_pond_id_sits_past_the_bands() {
         "dry ground is off the ramp"
     );
     assert_eq!(id_name(POND), "standing water");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shot S4: the plantable gate is read from the run, not re-derived from a list of names.
+//
+// The behaviour these pin has not changed -- the run's `params.medium.<name>.plantable` is false for
+// exactly the four media V4 hard-coded, and `the_capitol_run_and_the_name_list_agree` measures that
+// on a committed fixture rather than asserting it in prose. What has changed is where the answer
+// comes from, so the tests that matter are the ones that make the two disagree: a run that calls
+// lawn sealed must strip a lawn, and a run that calls asphalt plantable must grow on it. A viewer
+// still reading its own list would pass none of them.
+
+use ecoview_native::run::RunMeta;
+use ecoview_native::voxel::Plantable;
+
+/// The nine media of the scene contract, in code order, as every bundle publishes them.
+fn media() -> Vec<String> {
+    [
+        "soil", "lawn", "bed", "mulch", "gravel", "concrete", "asphalt", "roof", "water",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// A `RunMeta` carrying just a `params.medium` table, for driving the gate directly.
+fn meta_with_media(rows: &str) -> RunMeta {
+    let raw = format!(
+        r#"{{"format_version":4,"dims":{{"x":8,"y":8,"z":32,"patch":8}},"seed":1,"ticks":100,
+            "snapshot_every":100,"snapshots":[0],"params":{{"medium":{rows}}}}}"#
+    );
+    serde_json::from_str(&raw).unwrap()
+}
+
+/// The run decides, and the viewer follows it even where it contradicts the old name list.
+///
+/// Both halves matter. A run that calls lawn unplantable has to strip the lawn -- so the gate is not
+/// the name list with the run ignored. A run that calls asphalt plantable has to grow on asphalt --
+/// so the gate is not the name list *and* the run, intersected. It is the run.
+#[test]
+fn the_run_decides_which_media_grow_things() {
+    let n = 64;
+    let d = eco(n);
+    let f = drivers(d, 0.9, 0.09, 255, 0);
+    let count = |medium: u8, meta: Option<&RunMeta>| {
+        let mut b = with_building(n, 8.0);
+        for y in 0..n {
+            for x in 0..n {
+                if b.building_h[x + n * y] == 0.0 {
+                    b.medium[x + n * y] = medium;
+                }
+            }
+        }
+        let mut w = VoxelWorld::from_bundle(&b);
+        if let Some(m) = meta {
+            w.read_plantable(m);
+        }
+        w.set_scene(&[], &[], Some(&Cover::of(&f, d, 7)));
+        w.cover_counts()
+    };
+    // A run that seals the lawn. Everything else keeps the value the run gives it.
+    let sealed_lawn = meta_with_media(
+        r#"{"soil":{"plantable":true},"lawn":{"plantable":false},"bed":{"plantable":true},
+            "mulch":{"plantable":true},"gravel":{"plantable":true},"concrete":{"plantable":false},
+            "asphalt":{"plantable":true},"roof":{"plantable":false},"water":{"plantable":false}}"#,
+    );
+    let free = count(1, None);
+    assert!(free.0 > 1000, "the fallback grows a lawn: {free:?}");
+    assert_eq!(count(1, Some(&sealed_lawn)), (0, 0, 0), "the run sealed it");
+    // The same run calls asphalt plantable, and asphalt then grows exactly what the lawn used to.
+    assert_eq!(count(6, Some(&sealed_lawn)), free, "the run opened asphalt");
+
+    // And the gate says whose answer it is, with no fallback left in it.
+    let mut w = VoxelWorld::from_bundle(&with_building(n, 8.0));
+    w.read_plantable(&sealed_lawn);
+    assert!(w.plantable.from_meta);
+    assert!(
+        w.plantable.source.starts_with("the run's meta.json"),
+        "{}",
+        w.plantable.source
+    );
+    assert_eq!(w.plantable.sealed(), ["lawn", "concrete", "roof", "water"]);
+}
+
+/// A run that names only some of the media is read for those, and the fallback covers the rest --
+/// by name, in the source line, rather than quietly.
+///
+/// Per medium rather than all-or-nothing, because the alternative throws away eight true answers to
+/// avoid one guess. `from_meta` is false, which is the flag the HUD and `ecoview.stats` report.
+#[test]
+fn a_run_that_names_only_some_media_is_still_read_for_those() {
+    let partial = meta_with_media(r#"{"lawn":{"plantable":false},"asphalt":{"plantable":true}}"#);
+    let p = Plantable::of(&media(), &partial);
+    assert!(!p.grows(1), "the run sealed the lawn");
+    assert!(p.grows(6), "the run opened the asphalt");
+    assert!(!p.grows(7), "the fallback still seals a roof");
+    assert!(p.grows(0), "the fallback still grows soil");
+    assert!(!p.from_meta);
+    assert!(
+        p.source
+            .contains("soil, bed, mulch, gravel, concrete, roof, water"),
+        "the guessed media are named: {}",
+        p.source
+    );
+
+    // A row with the key absent is a guess; a row with `plantable` present is not. A run written
+    // before the field existed must not read as "everything grows".
+    let empty_rows = meta_with_media(r#"{"lawn":{},"asphalt":{}}"#);
+    let e = Plantable::of(&media(), &empty_rows);
+    assert!(!e.from_meta);
+    assert!(e.grows(1) && !e.grows(6), "both fell back to the name list");
+}
+
+/// The claim that this shot changes no picture, measured on a committed run rather than asserted.
+///
+/// `ecosim/fixtures/capitol-mini` is a real format-4 run of the reference bundle, committed, and its
+/// `params.medium` seals exactly the four media shot V4 hard-coded. That is why S4 is a
+/// correctness-of-source fix and not a bug fix -- and if a later shot changes a default in
+/// `params.toml`, this test goes red and the viewer follows the change instead of drifting from it.
+#[test]
+fn the_capitol_run_and_the_name_list_agree() {
+    let dir = std::path::Path::new("../ecosim/fixtures/capitol-mini");
+    let run = Run::load(dir).unwrap();
+    let from_run = Plantable::of(&media(), &run.meta);
+    let from_names = Plantable::fallback(&media());
+    assert!(from_run.from_meta, "the fixture names every medium");
+    assert_eq!(
+        from_run.sealed(),
+        from_names.sealed(),
+        "the run's plantable set and the V4 name list still agree"
+    );
+    assert_eq!(
+        from_run.sealed(),
+        ["concrete", "asphalt", "roof", "water"],
+        "and it is the set V4 wrote down"
+    );
+    for code in 0..media().len() as u8 {
+        assert_eq!(from_run.grows(code), from_names.grows(code));
+    }
 }

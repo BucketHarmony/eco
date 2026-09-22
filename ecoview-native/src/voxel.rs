@@ -291,6 +291,24 @@ impl Plantable {
         self.grows[code as usize]
     }
 
+    /// The one sentence that says whose answer this gate is, for every surface that prints it.
+    ///
+    /// Shot S4 put it in the HUD and left the headless console summary saying nothing, while V3's
+    /// height-curve provenance went into both. The two are separate code paths, so the surface that
+    /// CI and every scripted capture actually read was the one with the sentence missing. One
+    /// function now, the way V9's season word is one function over three surfaces, so they cannot
+    /// drift apart again.
+    ///
+    /// The `(!)` is the whole point of it: a fallback that does not say it is a fallback is
+    /// indistinguishable from a reading.
+    pub fn line(&self) -> String {
+        format!(
+            "sealed ground grows nothing -- from {}{}",
+            self.source,
+            if self.from_meta { "" } else { "  (!)" }
+        )
+    }
+
     /// The media that grow nothing, in medium-code order.
     pub fn sealed(&self) -> Vec<&str> {
         self.media

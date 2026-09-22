@@ -2731,6 +2731,98 @@ fn the_capitol_run_and_the_name_list_agree() {
 }
 
 // -----------------------------------------------------------------------------------------------
+// Shot S12: the sentence above is one sentence, and every surface that answers the question says it.
+//
+// S4 gave the plantable gate its provenance line and put it in the HUD. V3's height-curve provenance
+// went into the HUD *and* the startup console summary, which are separate code paths -- so a headless
+// run said whose answer the height curve was and nothing at all about the gate. A headless run is
+// what CI and every scripted capture see, which made the one surface missing the sentence the one
+// surface nobody was looking at a screen for. The sentence now lives on `Plantable::line`.
+
+/// The sentence says when it is a guess, and says it only then.
+///
+/// Three sources, three lines: the run that answered for every medium carries no mark, and the two
+/// that fell back -- wholly, or for a single medium -- both carry `(!)`. The mark is the load-bearing
+/// half. A fallback that does not say it is a fallback reads exactly like a reading.
+#[test]
+fn the_plantable_sentence_says_when_it_is_a_guess() {
+    let full = meta_with_media(
+        r#"{"soil":{"plantable":true},"lawn":{"plantable":true},"bed":{"plantable":true},
+            "mulch":{"plantable":true},"gravel":{"plantable":true},"concrete":{"plantable":false},
+            "asphalt":{"plantable":false},"roof":{"plantable":false},"water":{"plantable":false}}"#,
+    );
+    let read = Plantable::of(&media(), &full);
+    assert!(read.from_meta);
+    assert!(
+        !read.line().contains("(!)"),
+        "a reading is not marked: {}",
+        read.line()
+    );
+
+    let guessed = Plantable::fallback(&media());
+    assert!(
+        guessed.line().ends_with("(!)"),
+        "a guess is marked: {}",
+        guessed.line()
+    );
+
+    // One guessed medium out of nine is still a guess, and the mark does not grade.
+    let partial = meta_with_media(r#"{"lawn":{"plantable":false}}"#);
+    let part = Plantable::of(&media(), &partial);
+    assert!(!part.from_meta);
+    assert!(part.line().ends_with("(!)"), "{}", part.line());
+
+    // Whatever the source, the line carries it verbatim: the mark is added to the sentence, never
+    // substituted for it.
+    for p in [&read, &guessed, &part] {
+        assert!(
+            p.line().starts_with("sealed ground grows nothing -- from "),
+            "{}",
+            p.line()
+        );
+        assert!(p.line().contains(&p.source), "{}", p.line());
+    }
+}
+
+/// The named regression sibling: two surfaces, one sentence, and neither writing its own.
+///
+/// This is the defect itself rather than the helper under it. It reads `src/main.rs` because that is
+/// where the two surfaces are and there is no other way to see both from a test that runs with the
+/// renderer switched off -- the HUD needs a `World` and the console summary needs a window. What it
+/// pins is cheap and exact: the sentence's words exist in exactly one file, and `main.rs` asks for
+/// it twice. Delete the console line, or hand-roll a second copy of the sentence, and this goes red.
+#[test]
+fn both_surfaces_print_the_plantable_sentence() {
+    let main = std::fs::read_to_string("src/main.rs").unwrap();
+    assert_eq!(
+        main.matches("plantable.line()").count(),
+        2,
+        "the HUD and the startup console summary each print it, and both ask `Plantable` for it"
+    );
+    let mut wrote_it = Vec::new();
+    for f in [
+        "src/main.rs",
+        "src/voxel.rs",
+        "src/brp.rs",
+        "src/overlay.rs",
+        "src/run.rs",
+    ] {
+        let n = std::fs::read_to_string(f)
+            .unwrap()
+            .matches("sealed ground grows nothing")
+            .count();
+        if n > 0 {
+            wrote_it.push((f, n));
+        }
+    }
+    assert_eq!(
+        wrote_it,
+        vec![("src/voxel.rs", 1)],
+        "the sentence is written once, in `Plantable::line`; every surface calls it"
+    );
+}
+
+// -----------------------------------------------------------------------------------------------
 // Shot S6: digging below the bundle's zero.
 //
 // A bundle's `ground_h` is relative to its own lowest point and the voxel lattice has a floor at

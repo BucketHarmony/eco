@@ -1991,3 +1991,121 @@ Leaf fall is geometry and the simulator's to model (row G10); this viewer draws 
 **It did not re-accept a reference screenshot.** No mesh moves -- the name is not an input to any
 palette or any mesh key -- so `ecoview-native`'s goldens are untouched and no `REACCEPT` file is
 needed.
+
+# S12 -- the console summary answers the second provenance question too
+
+The row, filed by the operator on 2026-09-21 and verified by them the same evening: `ecoview-native`
+prints two provenance sentences, one in the HUD and one in the startup console summary, and they are
+separate code paths. V3's height-curve provenance is in both. S4's plantable provenance was in the
+HUD only. A headless run is what CI and every scripted capture see, so the surface missing the
+sentence was the one nobody was looking at a screen for.
+
+**No prompt file.** The row is the specification (MASTER step 5).
+
+## The defect, reproduced before it was touched
+
+From the shipped binary at `e67a9b4`, stdout only, `INFO` lines stripped:
+
+```
+$ ecoview-native --run ../ecosim/runs/capitol-s42 --tick 10000 --headless --frames 60
+trees: 694 at tick 10000 ... height from age: params.tree ages and params.bundle heights, ...
+cover: 117543 grass, 108180 shrub, 7166 vine voxels ...
+water: standing water: 8812 of 262144 ground cells wet ...
+sky: ... 21 September, autumn -- 42.7 N, ...
+```
+
+Four provenance sentences, and not one of them about the gate that decides where anything grows.
+The same binary with no run at all prints **no** provenance line for the gate either -- and that is
+the case where the gate is entirely this viewer's guess.
+
+## After
+
+```
+$ ecoview-native --run ../ecosim/runs/capitol-s42 --tick 10000 --headless --frames 60
+...
+water: standing water: 8812 of 262144 ground cells wet ...
+plantable: sealed ground grows nothing -- from the run's meta.json, params.medium.<name>.plantable; concrete, asphalt, roof, water grow nothing
+sky: ...
+```
+
+All three of `Plantable`'s sources reach stdout, each on a real invocation on this machine:
+
+| Invocation | The console line |
+| --- | --- |
+| `--run ../ecosim/runs/capitol-s42 --tick 10000` | `from the run's meta.json, params.medium.<name>.plantable; concrete, asphalt, roof, water grow nothing` -- no mark |
+| `--world` alone (the default Capitol bundle, no run) | `from this viewer's fallback name list, because no run is loaded to ask; ... (!)` |
+| `--run ../ecosim/runs/capitol-s42-grad06 --tick 10000` | `from this viewer's fallback name list, because the run carries no params.medium; ... (!)` |
+
+The third is a format-4 run written before shot S2 stopped omitting defaults from `meta.json`, so it
+carries no `params.medium` at all. It is the same run S4 used for its own third frame.
+
+## The frames
+
+Four PNGs in `shots/`, each viewed. They are the control, not the result: this shot changes no
+pixel, and the point of looking is that the HUD line reads exactly as S4 left it now that it is
+built by a shared function.
+
+| File | Arguments beyond the world | What it shows |
+| --- | --- | --- |
+| `s12-from-the-run.png` | `--run ../ecosim/runs/capitol-s42 --tick 10000` | `sealed ground grows nothing -- from the run's meta.json ...`, no `(!)`. Unchanged from `s4-from-the-run.png` |
+| `s12-no-run.png` | none -- the bundle alone | The fallback with its `(!)`, and the frame where the console used to say nothing at all |
+| `s12-run-without-the-table.png` | `--run ../ecosim/runs/capitol-s42-grad06 --tick 10000` | Both fallbacks on one frame: the height curve's and the gate's |
+| `s12-agent-loop.png` | the agent gate's own frame, on a round-trip run | The line survives the edit-run-grow path |
+
+Nothing under `eco-private/` was read or referenced. A private home-scene pass is owed for this shot
+and is the operator's; the change is on stdout, so it is read from a console rather than a frame.
+
+## One thing found beside the row, not queued
+
+On `s12-run-without-the-table.png` the two fallbacks sit one above the other, and only one of them
+is marked. The gate's line ends `(!)`; the height curve's reads `height from age: this viewer's
+fallback: meta.json has no params.tree ages and params.bundle ...` with no mark at all. Both
+surfaces agree with themselves -- the HUD and the console print the same words for each -- so this
+is not the defect S12 fixed recurring in a second place. It is that V3 and S4 chose different
+notations for the same idea, and a reader scanning for `(!)` finds one of the two guesses on the
+frame. **Grooming input, not queued.**
+
+## The tests
+
+`cargo test --release --no-default-features --test mesh_golden` is **104 pass**, V9's 102 plus two:
+
+- `the_plantable_sentence_says_when_it_is_a_guess` -- three sources, three lines. The reading is
+  unmarked; the whole fallback and the one-medium fallback both end `(!)`, and the mark does not
+  grade with how much was guessed. Every line starts with the same words and contains its own
+  `source` verbatim, so the mark is added to the sentence and never substituted for it.
+- `both_surfaces_print_the_plantable_sentence` -- the named regression sibling, and the defect
+  itself rather than the helper. `plantable.line()` appears twice in `src/main.rs`, and the
+  sentence's words appear in exactly one file in `src/`. It reads source text because the CI gate
+  compiles the renderer out; DECISIONS.md says why that was the right trade.
+
+Checked against the defect: before the fix the second test fails on a count of 0.
+
+## The gates
+
+| Gate | Result |
+| --- | --- |
+| `cargo test --release --no-default-features --test mesh_golden` (the CI gate) | **104 pass**, was 102 |
+| `cargo test --release` | 104 pass |
+| `cargo fmt --check` | clean |
+| `cargo clippy --release --all-targets` | the same three pre-existing `src/bundle.rs` findings (89:10, 153:37, 153:57), none new |
+| `cargo doc --no-deps --release` | the same three pre-existing private-link warnings |
+| `cargo build --release` | clean |
+| `agent_loop --run ../ecosim/runs/capitol-s42` | **PASS**, 19 calls, 0 retries, first screenshot 5.2 s |
+
+## Line budget
+
+119 net lines of code and tests over `ecoview-native/` against the row's default 1,500, plus this
+write-up and DECISIONS.md. The row called it "a few lines, no new state, no golden hash" and that
+held: three lines of code, one helper, and the rest is two tests and the reasons.
+
+## What this shot did not do
+
+**It did not change what the gate decides.** `Plantable::of`, `Plantable::fallback` and
+`Plantable::grows` are untouched. Not a voxel moves, no mesh golden shifts, and no reference
+screenshot is re-accepted.
+
+**It did not change the HUD's words.** The sentence the HUD prints is the same string S4 shipped;
+it is now built in `voxel.rs` instead of in `main.rs`, which is why the frames above are a control.
+
+**It did not touch `ecoview.stats`.** The BRP payload already published `source` and `from_meta` as
+fields, which is the right shape for a machine reader, and that is left alone.

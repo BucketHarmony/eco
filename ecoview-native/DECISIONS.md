@@ -1308,3 +1308,44 @@ function now, used by both, so a calendar with two answers in it is not possible
 also normalises with `rem_euclid` before the clamp, where `month_day` used a bare `as u32` cast --
 a day of `-1.0` named 1 January and now names 31 December. No caller passes one; the clock
 normalises its own day.
+
+## S12 the sentence is a function, not a string in two places
+
+The row is one missing line in the headless console summary, and a `println!` beside the
+height-curve line would have closed it. What went in instead is `Plantable::line()`, called by both
+surfaces. The row's own diagnosis is the reason: "They are separate code paths." S4 wrote the
+sentence into the HUD and nothing made the console's author write it too, so the fix that puts a
+second copy of the same words in the second path leaves the third path -- whatever it turns out to
+be -- exactly as unprotected as the second one was. One function is the same size as one `println!`
+and it cannot drift. This is the shape V9 used for the season word over three surfaces.
+
+`ecoview.stats` deliberately does **not** call it. The BRP payload publishes `source` and
+`from_meta` as separate JSON fields, which is what a machine reader wants; the sentence is for a
+human, and gluing a `(!)` into a JSON string would make it harder to read, not easier.
+
+## S12 the console line is printed with no run open, where the HUD's is
+
+The tree, cover and water lines of the startup summary all sit inside `if let Some(run)`, because
+each of them is a number the run owns. The plantable line is not: it answers a question that has an
+answer with no run at all, and the answer then is always the fallback -- the case the `(!)` exists
+to mark. Printing it inside the run block would have put the sentence in the one situation where it
+says nothing surprising and left it out of the one where it does. The HUD has been outside the
+equivalent branch since S4 for this exact reason, so this also makes the two surfaces agree about
+*when* they say it, not only about *what* they say.
+
+Measured on this machine, all three sources now reach stdout: the reference run reads
+`from the run's meta.json`, `--world` alone reads `from this viewer's fallback name list, because
+no run is loaded to ask ... (!)`, and `runs/capitol-s42-grad06` -- a format-4 run written before S2
+stopped omitting defaults -- reads `because the run carries no params.medium ... (!)`.
+
+## S12 the regression test reads `main.rs` as text
+
+`both_surfaces_print_the_plantable_sentence` opens `src/main.rs` and counts. That is an unusual
+test and it is deliberate: the defect is *one surface forgot*, and neither surface can be exercised
+by the test binary the CI gate runs. The HUD builder needs a Bevy `World` and the console summary
+needs a window, and the gate is `--no-default-features`, with the renderer compiled out. The choice
+was between a test that pins the helper (which was never the bug) and a test that pins the two call
+sites. It pins both: the helper's behaviour in its own test, and the call sites here. What it
+asserts is deliberately narrow -- `plantable.line()` appears twice in `main.rs`, and the sentence's
+words appear in exactly one file in `src/` -- so it goes red for a deleted console line or a
+hand-rolled second copy, and stays green for any refactor that keeps one sentence in one place.

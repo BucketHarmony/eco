@@ -1170,6 +1170,12 @@ fn setup(
                 .trim()
         );
     }
+    // And whose answer the plantable gate is, beside the height curve above it (shot S12). The HUD
+    // has carried this sentence since S4 and the console has not, and the console is the surface a
+    // headless run leaves behind -- the one place nobody is looking at a screen. Outside the `if
+    // let` for the reason the HUD prints it with no run open: the case worth naming is the one with
+    // nothing to ask, and that case is always the fallback the `(!)` marks.
+    println!("plantable: {}", site.world.plantable.line());
     apply_overlay_bands(
         &mut site.world,
         &mut overlays,
@@ -2366,16 +2372,9 @@ fn hud(
     }
     // The gate under all of that, and whose answer it is (shot S4). Printed whether or not a run is
     // open, because the case worth naming is the one where there is nothing to ask: a fallback that
-    // does not say it is a fallback is indistinguishable on screen from a reading.
-    s.push_str(&format!(
-        "sealed ground grows nothing -- from {}{}\n",
-        site.world.plantable.source,
-        if site.world.plantable.from_meta {
-            ""
-        } else {
-            "  (!)"
-        }
-    ));
+    // does not say it is a fallback is indistinguishable on screen from a reading. The sentence
+    // itself lives on `Plantable` so this surface and the console summary cannot drift (shot S12).
+    s.push_str(&format!("{}\n", site.world.plantable.line()));
     // Standing water, and the one number in it that is this viewer's: the lattice. Printed with the
     // millimetres beside it so a screenshot of a site under 50 mm of water cannot be read as a site
     // under half a metre of it.

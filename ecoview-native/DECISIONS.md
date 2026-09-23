@@ -1592,3 +1592,125 @@ As G5 said, these are three different pictures, and they can be told apart witho
 
 The heartbeat gains `top-nitrogen`, `top-phosphorus` and `top-potassium`. Each must differ from
 `top-surface` and from the view before it; they differ from each other by 35.6-35.9% of pixels.
+
+## G8 the row, not the prompt
+
+`overnight/shots/G8-renderer-water-npk.md` was written for the browser viewer and asks for three
+things: water, soil water and NPK loaders and overlays, pipes drawn by whether they carry water, and
+a rain/outflow chart with soil N. On 2026-09-22 the operator retargeted the G8 BACKLOG row to this
+viewer and narrowed it to the water group. V12 had already done NPK. The row wins where the two
+differ:
+- Loaders: `water.bin` was read already (S5). `soil_water.bin` is new, one f32 per ecology
+  column. A missing file means the water tier is off; a file of the wrong length is refused by
+  name, the rule `npk.bin` follows. Both now share `read_f32s`.
+- The chart's "soil N" is left out. Nitrogen is V12's overlay (key 9) with its own legend, and a
+  second nitrogen number in the timeline would repeat that with less detail.
+- "Remove any CI generator pins": `ecoview-native` has none. Its CI job builds no run and pins no
+  generator, so there was nothing to remove.
+
+## G8 soil water is the viewer's ramp on the run's scale
+
+`meta.json` has no `soil_water` row, so the hues are the viewer's own (sand `#f2d98c` to teal
+`#003b44`), and the legend says so. The scale is taken from the run: 0 up to the deepest
+`params.medium.*.field_capacity_mm` times `params.hydro.saturation`, which is the wettest any root
+zone can get. On the Capitol that is 200 x 1.2 = 240 mm. A run without those params falls back to
+`SOIL_WATER_FALLBACK_MM` (240) and says so. The ramp is linear, because the quantity has hard ends
+and a millimetre means the same amount at either end. Band 0 is the grey "none" band the nutrients
+use: a roof holds no soil water, and it is not the driest lawn. The stats skip those columns too.
+The first ramp's pale end (`#efe2c4`) left the lawns one flat beige, because blending in linear
+light keeps the lower half pale. The lawn median at tick 10000 is 86 mm, with quartiles 72-95 mm,
+so it sits in that lower half. The stronger ends show the patch grid and the wetter beds round the
+Capitol.
+
+Keys: **8** is water, and pressing **8** again switches to soil water. The two maps answer one
+question, where the storm went, and are best compared by pressing one key. **1-7** are unchanged.
+
+## G8 a drain is solid while it carries at the shown tick
+
+Pipes come from `meta.json` `world.pipes`. What they carried comes from `events.csv` `pipe` rows
+(detail `"<pipe> <captured> <overflow> <n> <p>"`, m3), read by header name. A pipe is drawn
+**solid, 1.5 m wide and blue `#1f4dff`** when its row at the snapshot's own tick captured more than
+0. Otherwise it is **dashed in 1 m pieces, 0.8 m wide and orange `#ff8c1a`**. The shown tick is used,
+not the interval before it, because the ponds drawn beside the pipe are that tick's ponds. The
+interval's per-pipe totals, overflow and storm count are printed on the HUD's drains line, so a pipe
+that ran an hour before the snapshot is not hidden. A row printed `0.0000` (83 on this run) is below
+the file's resolution and counts as dry.
+
+- **"Illustrative" does not mean dashed.** The prompt asks for dashed "when dry or illustrative".
+  Every Capitol pipe is illustrative, so that rule would dash every pipe forever and the solid/dashed
+  distinction would never show. Instead the HUD says "(all illustrative: placed by the scene, not
+  surveyed)" and the stdout line tags each pipe.
+- **Pipes sit on the ground's top, standing water included** (`surface_top`), plus 5 cm. Nothing in
+  the run says how deep they are buried. They are unlit, so a carrying pipe is the same blue in shadow,
+  and depth-tested, so a crown hides the pipe under it, as it would hide the ground.
+- The dry colour was near-white first. Over the Capitol's pale concrete a dry pipe was all but
+  invisible, so it became orange. Potassium's ramp is orange too, so under that overlay a dry pipe
+  is faint. That was accepted: the drains are about water.
+- **F** turns the standing water and the drains on and off together.
+- The pipe entity is spawned when its first mesh exists. A placeholder spawned with an empty mesh
+  made Bevy's slab allocator log `Use-after-free: attempted to copy element data for an unallocated
+  key` on every run.
+
+## G8 the storms are bars inside the timeline
+
+`series.csv`'s `rain_mm`, `outflow_mm` and `pipe_in_mm` (world means per tick) are summed per snapshot
+interval `(previous, this]`, and the wettest tick in each is kept. Each snapshot gets a bar inside the
+timeline bar: light blue for the rain, and dark blue inside it for what left over the edge. They are
+scaled to the wettest interval. A run older than ecosim G4 has no chart, and the HUD says why.
+`pipe_in_mm` is optional (a G4-G6 run had rain and no drains). The drains line prints it with
+significant figures: 1.56 m3 spread over 65,536 m2 is 0.0237 mm, which two decimals printed as none.
+
+## G8 measured on the run, and the acceptance line it cannot meet as written
+
+`ecosim/runs/capitol-s42` was regenerated at f74db55 (G6) with the recipe the heartbeat prints. The
+old copy is `runs/capitol-s42-preG6`. It took 28.9 s and `ecosim check` passed; 2,528 pipe rows.
+- The pipes carry at a snapshot's own tick only at 11400, 14500, 16300 and 17100. **At each of
+  those ticks all four pipes carry together, and at every other snapshot none does.** 14 of the 201
+  intervals have no pipe flow at all.
+- The busiest is 17100: pipe_1 took 1.4541 m3 at the tick, pipe_2 0.0788, pipe_3 and pipe_4 0.0073.
+- The largest storm is tick 7684 (37.47 mm). The first snapshot holding its water is 7700.
+  - At 7700, 14,263 ground cells are wet and 0 of the 24,705 roof cells are. The priority flood gives
+    a roof no depression storage (ecosim S5), and the heartbeat checks it.
+
+The prompt asks for "a drain carrying water drawn solid, and a dry one not". No single frame of this
+run can show both, because the pipes always carry together. The proof is therefore two frames of the
+same pipes at the same pose: `drains-wet` at 17100 (1,400 carrying-blue pixels, 0 dry-orange) and
+`drains-dry` at 17000 (0 blue, 211 orange). A pipe-level mix is in the unit test
+`a_carrying_pipe_is_solid_and_a_dry_one_dashed`, where one pipe carries at the tick and the other
+does not.
+
+## G8 the heartbeat reads the run for three views
+
+The heartbeat can now pin a view to a snapshot the run chooses: after its largest storm, or at and
+before its busiest drain. Two views check more than colour counts:
+- `top-water-storm` reads `water.bin` against the bundle's `roof` cells.
+- The drains views count the viewer's own pipe colours as they reach the frame after tonemapping.
+  Carrying blue came out (40, 86, 214) and dry orange (210, 126, 50). A pixel within 24 of one counts;
+  "present" means at least 100 pixels in the band and "absent" means under 20. No other pixel in the
+  band came within 24 of either.
+
+Pinning those colours is allowed here because they are the viewer's, not the simulator's.
+The drains pose is computed from `world.pipes`: over the middle of every inlet and outlet, high
+enough for their bounding box to fit the frame. It is not hand-placed.
+
+## G8 pictures
+
+In `shots/heartbeat/` (written by `cargo heartbeat`; INDEX.md has flags and measurements):
+
+| image | what it shows | how you would tell it was wrong |
+|---|---|---|
+| `top-soil-water.png` | tick 10000: lawns sand-to-khaki in patch-grid squares, beds round the Capitol darker; roads, paths and roofs grey (no soil); dry pipes as orange dashes at the north edge | it looks like `top-moisture`, a roof or road is coloured, or the lawns are one flat band |
+| `top-water-storm.png` | tick 7700, after the 37.5 mm storm: pale blue across roads and paths and in the lawn hollows, the Capitol and every roof bare | any roof is blue (the heartbeat also fails on `water.bin`), or there is less blue than `top-water` |
+| `drains-wet.png` | tick 17100 from above the pipes: all four solid blue from inlet to outlet (pipe_1 across the top left, three running north off the site), part of pipe_4 under crowns | a pipe is dashed or orange, or no blue pipe is in frame |
+| `drains-dry.png` | same pose at 17000: the same four pipes as thin orange dashes | a pipe is solid or blue, or no orange dash is in frame |
+
+In `shots/` (written by hand for this shot):
+
+| image | what it shows | how you would tell it was wrong |
+|---|---|---|
+| `g8-nitrogen-t20000.png` | the acceptance "n overlay at t=20000": a gradient, green-grey patch-grid lawns on the west, paler where trees stood, no-soil grey on paving | one flat colour, or roads coloured |
+| `g8-hud-t17100.png` | the HUD at the busiest drain: the storms line (37.8 mm rain, 10.5 mm out, 0.0237 mm down the drains) and the drains line (4 carrying, per-pipe m3); rain bars in the timeline | the drains line says 0 carrying, or the mm reads 0.00 |
+| `g8-soil-water-t17100.png` | soil water after the 17100 storm: lawns wetter than at 10000, pipes solid blue at the north edge and pipe_1 at the west | pipes dashed, or the map is the same as at 10000 |
+
+The other eleven heartbeat views are unchanged apart from the dry pipes, now drawn as orange dashes
+at the north edge. I checked each against the V13 and V12 verdicts.

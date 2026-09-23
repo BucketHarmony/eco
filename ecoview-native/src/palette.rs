@@ -84,10 +84,11 @@ const WATER_DRY_HEX: &str = "#6d6f66";
 /// The water overlay's first drawn band: dry ground is band 0 and depth starts at band 1.
 pub const WATER_DRY: u8 = 0;
 
-/// The eleven things the viewer can colour the ground by. `Surface` is V0's surface-type map, six are
+/// The twelve things the viewer can colour the ground by. `Surface` is V0's surface-type map, six are
 /// the ecological overlays shot V2 was asked for, `Water` is shot S5's: ponded depth, the one
-/// field the simulator writes every snapshot that had no picture at all -- and the last three are
-/// shot V12's, the three soil pools of `npk.bin` (`ecosim` shots G5 and G13).
+/// field the simulator writes every snapshot that had no picture at all -- `SoilWater` is shot G8's,
+/// `soil_water.bin` in millimetres, the absolute quantity `moisture.bin` is a fraction of -- and the
+/// last three are shot V12's, the three soil pools of `npk.bin` (`ecosim` shots G5 and G13).
 ///
 /// `Water` is the only one that is **not** read on the ecology grid. Its file, `water.bin`, is on the
 /// bundle's finer ground grid, which is the grid the water actually ran over
@@ -102,14 +103,16 @@ pub enum Overlay {
     Crowding,
     Fire,
     Water,
+    SoilWater,
     Nitrogen,
     Phosphorus,
     Potassium,
 }
 
 impl Overlay {
-    /// In the order the number keys select them, `Surface` first. **9** cycles the last three.
-    pub const ALL: [Overlay; 11] = [
+    /// In the order the number keys select them, `Surface` first. **8** pressed again is soil water,
+    /// and **9** cycles the last three.
+    pub const ALL: [Overlay; 12] = [
         Overlay::Surface,
         Overlay::Light,
         Overlay::Moisture,
@@ -118,6 +121,7 @@ impl Overlay {
         Overlay::Crowding,
         Overlay::Fire,
         Overlay::Water,
+        Overlay::SoilWater,
         Overlay::Nitrogen,
         Overlay::Phosphorus,
         Overlay::Potassium,
@@ -133,6 +137,7 @@ impl Overlay {
             Overlay::Crowding => "crowding",
             Overlay::Fire => "fire",
             Overlay::Water => "water",
+            Overlay::SoilWater => "soil_water",
             Overlay::Nitrogen => "nitrogen",
             Overlay::Phosphorus => "phosphorus",
             Overlay::Potassium => "potassium",
@@ -179,6 +184,10 @@ impl Overlay {
             // water in the soil and the other is water standing on top of it, and a screenshot of
             // either has to be recognisable as which (`Fields` against `Ponds`).
             Overlay::Water => ("#9fe8ff", "#08246b"),
+            // Soil water has no row in `meta.json` at all (shot G8), so these are the viewer's and
+            // say so. Dry sand to deep teal: water in the ground, told apart at a glance from
+            // moisture's white-to-blue fraction and from standing water's cyan.
+            Overlay::SoilWater => ("#f2d98c", "#003b44"),
             // `ecoview` has no nutrient overlay to copy, so there is no legend to fall back on. These
             // are G13's published hues, for a run written between G5 and G13 that carries `npk.bin`
             // and no row for it; the source line still says they are this viewer's copy.
@@ -363,8 +372,8 @@ pub fn palette(overlay: Overlay, meta: Option<&RunMeta>) -> Vec<[f32; 4]> {
         }
         out[ID_COUNT + WATER_DRY as usize] = linear_rgba(WATER_DRY_HEX);
     }
-    if overlay.nutrient().is_some() {
-        // Water's shape once more (shot V12): band 0 is soil the ecology does not have, and the
+    if overlay.nutrient().is_some() || overlay == Overlay::SoilWater {
+        // Water's shape once more (shot V12, and soil water's since G8): band 0 is soil the ecology does not have, and the
         // log ramp starts above it, so the poorest soil is already the palest tint rather than the
         // grey that means a roof.
         let first = NUTRIENT_NONE as usize + 1;

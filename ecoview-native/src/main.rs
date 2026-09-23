@@ -16,8 +16,8 @@
 //! Keys: WASD, Space and Shift to fly; right mouse to look; wheel for speed; **R** to reset the view;
 //! **P** to play or pause; **,** and **.** to step a snapshot; **Home** and **End** for the ends of
 //! the run; **[** and **]** for the play rate; left mouse on the timeline to scrub; **1**-**8** for
-//! the overlay and **9** for the nutrients, N, P and K in turn; **V** for the ground cover and
-//! vines; **F** for the standing water; **K** and **L** move the hour of the day; **;** and **'**
+//! the overlay, **8** again for the soil water, and **9** for the nutrients, N, P and K in turn; **V**
+//! for the ground cover and vines; **F** for the standing water and the storm drains; **K** and **L** move the hour of the day; **;** and **'**
 //! move the date a week without moving the tick and **\\** hands the date back to the run; **-** and **=** move the exposure and **0** hands it back to
 //! the measurement;
 //! and **O** turns the beauty pass -- ambient occlusion, sky, sun and seasonal colour -- off.
@@ -66,6 +66,12 @@
 //! [`ecoview_native::overlay::POND_MIN_MM`] is mapped but not drawn, and anything drawn at all is
 //! drawn at least one 0.5 m voxel deep. The HUD prints the millimetres beside the voxel count, every
 //! frame, for that reason.
+//!
+//! **So are the storm drains and the storms** (shot G8). A pipe from the run's `world.pipes` is
+//! drawn from inlet to outlet on the ground, solid and thick while its `events.csv` row at the shown
+//! tick says it is carrying water and dashed while it is not; the timeline bar carries the run's
+//! rain and outflow per snapshot interval from `series.csv`. Every pipe on the Capitol is
+//! illustrative -- placed by the scene's author, not surveyed -- and the HUD says so.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -87,9 +93,10 @@ use bevy_brp_extras::BrpExtrasPlugin;
 use serde_json::{json, Value};
 
 use ecoview_native::cover::{Cover, CoverStats};
+use ecoview_native::drains::{self, PipeFlow};
 use ecoview_native::mesh::{mesh_chunk, ChunkMesh, Scratch};
 use ecoview_native::overlay::{self, FieldStats, Fields, PondStats, Ponds, Scale};
-use ecoview_native::palette::{palette, Overlay, Ramp, BANDS};
+use ecoview_native::palette::{base_id, palette, Overlay, Ramp, BANDS, POND};
 use ecoview_native::run::Run;
 use ecoview_native::sim::{self, SimJob, SimState};
 use ecoview_native::sky::{self, shaded_palette, Adaptation, Clock, SkyState, DAYS_PER_YEAR};
@@ -514,6 +521,11 @@ struct Timeline {
     pond_site_cells: usize,
     /// Why the water could not be drawn, if it could not.
     water_error: Option<String>,
+    /// Shot G8's drains at this snapshot: what each pipe took at the shown tick and since the
+    /// previous snapshot, from `events.csv`. `pipes_applied` is the `(on, snapshot)` the drawn pipe
+    /// mesh was built for; the drains go on and off with the standing water, on **F**.
+    pipe_flow: PipeFlow,
+    pipes_applied: Option<(bool, usize)>,
 }
 
 impl Timeline {
@@ -632,6 +644,15 @@ fn apply_overlay_bands(
                 match fields {
                     // A run with the nutrient tier off writes no `npk.bin`. Say so rather than draw
                     // the whole site as "no soil".
+                    // Nor, with the water tier off, any `soil_water.bin` (shot G8).
+                    Some(Ok(f)) if ov.active == Overlay::SoilWater && f.soil_water.is_none() => {
+                        ov.error = Some(
+                            "this snapshot has no soil_water.bin (the run's water tier is off, \
+                             or it predates ecosim shot G4)"
+                                .into(),
+                        );
+                        None
+                    }
                     Some(Ok(f)) if ov.active.nutrient().is_some() && f.npk.is_none() => {
                         ov.error = Some(
                             "this snapshot has no npk.bin (the run's nutrient tier is off, \
@@ -919,6 +940,8 @@ fn main() {
             overlay_keys,
             sky_update,
             apply_world_state,
+            apply_pipes,
+            rain_chart,
             edit_keys,
             apply_edits,
             sim_tick,
@@ -1300,6 +1323,44 @@ fn setup(
         "mesh: {mesh_ms:.0} ms for {} chunks, {drawn} drawn, {quads} quads",
         chunks.len()
     );
+    // The drains (shot G8): one entity, spawned by `apply_pipes` once there is a mesh for it -- an
+    // empty placeholder mesh made Bevy's slab allocator log a use-after-free every run. Unlit, so a
+    // carrying pipe is the same blue in the shade of the Capitol as in the sun, and two-sided,
+    // because a schematic box has no inside worth culling.
+    commands.insert_resource(PipeMaterial(materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    })));
+    if let Some(run) = &timeline.run {
+        println!("{}", storm_line(run, timeline.index).trim_end());
+        let flow = run.pipe_flow(timeline.index);
+        let pipes = run.pipes();
+        println!(
+            "drains: {} pipes, {} carrying at tick {}: {}",
+            pipes.len(),
+            flow.carrying_count(),
+            run.tick_at(timeline.index),
+            pipes
+                .iter()
+                .enumerate()
+                .map(|(k, p)| format!(
+                    "{} {} now {:.4} m3, {:.4} m3 since the last snapshot{}",
+                    p.id,
+                    if flow.carrying(k) { "solid" } else { "dashed" },
+                    flow.now_m3[k],
+                    flow.since_m3[k],
+                    if p.illustrative {
+                        " (illustrative)"
+                    } else {
+                        ""
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
 
     let size = site.world.width as f32 * site.world.cell_m;
     let eye = args
@@ -1553,6 +1614,19 @@ fn spawn_hud(commands: &mut Commands, text: bool) {
                 },
                 BackgroundColor(Color::srgb(0.48, 0.71, 0.29)),
                 TimelineFill,
+            ));
+            // Shot G8's rain chart, drawn over the fill so a storm late in the run is not hidden
+            // under the part already played.
+            bar.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    right: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    bottom: Val::Px(0.0),
+                    ..default()
+                },
+                RainChart,
             ));
         });
 }
@@ -2043,8 +2117,9 @@ fn apply_world_state(
     }
 }
 
-/// **1**-**8** pick the overlay, in `Overlay::ALL` order, and **9** cycles the nutrients; **V**
-/// turns the cover and vines on and off, and **F** the standing water.
+/// **1**-**8** pick the overlay, in `Overlay::ALL` order, **8** again is soil water, and **9**
+/// cycles the nutrients; **V** turns the cover and vines on and off, and **F** the standing water
+/// and the drains.
 fn overlay_keys(
     keys: Res<ButtonInput<KeyCode>>,
     mut ov: ResMut<OverlayState>,
@@ -2056,7 +2131,7 @@ fn overlay_keys(
     if keys.just_pressed(KeyCode::KeyF) {
         t.water = !t.water;
     }
-    const DIGITS: [KeyCode; 8] = [
+    const DIGITS: [KeyCode; 7] = [
         KeyCode::Digit1,
         KeyCode::Digit2,
         KeyCode::Digit3,
@@ -2064,12 +2139,19 @@ fn overlay_keys(
         KeyCode::Digit5,
         KeyCode::Digit6,
         KeyCode::Digit7,
-        KeyCode::Digit8,
     ];
     for (i, k) in DIGITS.iter().enumerate() {
         if keys.just_pressed(*k) {
             ov.active = Overlay::ALL[i];
         }
+    }
+    // **8** is water, and pressed again the water in the ground rather than on it (shot G8): the
+    // two maps answer one question, where the storm went, and are compared by pressing the key.
+    if keys.just_pressed(KeyCode::Digit8) {
+        ov.active = match ov.active {
+            Overlay::Water => Overlay::SoilWater,
+            _ => Overlay::Water,
+        };
     }
     // **9** is the three soil pools (shot V12): nitrogen first, then round through P and K. Three
     // more digits do not exist -- **0** is the exposure's -- and the three maps are one question,
@@ -2339,7 +2421,7 @@ fn hud(
     }
     let mut s = format!("fly {speed:.1} m/s   [wheel] speed  [R] reset view\n");
     s.push_str(&format!(
-        "overlay {} ({} of {})   [1-8] switch  [9] N, P, K\n",
+        "overlay {} ({} of {})   [1-8] switch  [8] again soil water  [9] N, P, K\n",
         overlays.active.name(),
         Overlay::ALL
             .iter()
@@ -2363,7 +2445,7 @@ fn hud(
                 overlay::sig(st.max),
                 overlay::sig(st.mean),
                 sc.unit,
-                if overlays.active.nutrient().is_some() {
+                if overlays.active.nutrient().is_some() || overlays.active == Overlay::SoilWater {
                     " over the columns with soil"
                 } else {
                     ""
@@ -2372,6 +2454,12 @@ fn hud(
         }
         // The nutrient maps are the simulator's pools, read from `npk.bin`; the viewer models none of
         // it, and a picture this persuasive has to say so on its face (row V12).
+        if overlays.active == Overlay::SoilWater {
+            s.push_str(
+                "  soil_water.bin as the simulator computed it; the viewer models no water. \
+                 grey: no soil water (roof, paving, water)\n",
+            );
+        }
         if overlays.active.nutrient().is_some() {
             s.push_str(
                 "  npk.bin as the simulator computed it; the viewer models no nutrients. \
@@ -2432,8 +2520,10 @@ fn hud(
     // Standing water, and the one number in it that is this viewer's: the lattice. Printed with the
     // millimetres beside it so a screenshot of a site under 50 mm of water cannot be read as a site
     // under half a metre of it.
-    if timeline.run.is_some() {
+    if let Some(run) = &timeline.run {
         s.push_str(&water_line(&timeline, site.world.cell_m));
+        s.push_str(&storm_line(run, timeline.index));
+        s.push_str(&drains_line(run, &timeline));
     }
     // The sky says whose each of its numbers is, on the screen and not only in the write-up, for
     // the same reason the cover does: a screenshot travels further than a report.
@@ -2587,6 +2677,204 @@ fn water_line(t: &Timeline, cell_m: f32) -> String {
         ),
         _ => format!("{head}\n  not drawn   [F] on\n"),
     }
+}
+
+/// The rain that fell and the water that left since the previous snapshot, from `series.csv`
+/// (shot G8): the numbers the bars in the timeline are drawn from, for the snapshot on screen.
+fn storm_line(run: &Run, i: usize) -> String {
+    match &run.water {
+        Ok(w) => match w.get(i) {
+            Some(v) => format!(
+                "storms since the last snapshot: {:.1} mm of rain, {:.1} mm over the edge, \
+                 {} mm down the drains{}   (bars in the timeline)\n",
+                v.rain_mm,
+                v.outflow_mm,
+                // Significant digits, not two decimals: a pipe's take spread over the whole site is
+                // a few thousandths of a millimetre, which two decimals print as none.
+                ecoview_native::overlay::sig(v.pipe_mm),
+                if v.peak_mm > 0.0 {
+                    format!("; wettest tick {} with {:.1} mm", v.peak_tick, v.peak_mm)
+                } else {
+                    String::new()
+                },
+            ),
+            None => String::new(),
+        },
+        Err(e) => format!("storms: no series -- {e}\n"),
+    }
+}
+
+/// What the drains did at this snapshot (shot G8), and whose they are: every number is from the
+/// run's `events.csv`, the drawing is the viewer's, and an illustrative pipe is said to be one.
+fn drains_line(run: &Run, t: &Timeline) -> String {
+    let pipes = run.pipes();
+    if pipes.is_empty() {
+        return String::new();
+    }
+    let f = &t.pipe_flow;
+    let illustrative = pipes.iter().filter(|p| p.illustrative).count();
+    let mut s = format!(
+        "drains: {} pipes from meta.json world.pipes{}; {} carrying at this tick, {:.2} m3 taken \
+         since the last snapshot in {} storms{}\n",
+        pipes.len(),
+        match illustrative {
+            0 => String::new(),
+            n if n == pipes.len() =>
+                " (all illustrative: placed by the scene, not surveyed)".into(),
+            n => format!(" ({n} illustrative: placed by the scene, not surveyed)"),
+        },
+        f.carrying_count(),
+        f.since_m3.iter().sum::<f32>(),
+        f.storms,
+        match t.pipes_applied {
+            Some((true, _)) => "   solid: carrying, dashed: dry   [F] off",
+            _ => "   not drawn   [F] on",
+        },
+    );
+    let busy: Vec<String> = pipes
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| f.since_m3[*k] > 0.0)
+        .map(|(k, p)| {
+            format!(
+                "{} {:.2}{}",
+                p.id,
+                f.since_m3[k],
+                if f.carrying(k) { " (now)" } else { "" }
+            )
+        })
+        .collect();
+    if !busy.is_empty() {
+        s.push_str(&format!(
+            "  m3 since the last snapshot: {}\n",
+            busy.join(", ")
+        ));
+    }
+    s
+}
+
+/// The top of the drawn ground at a point in metres, standing water included, in the chunk meshes'
+/// frame: where a drain is laid so it is not hidden under the pond at its own inlet.
+fn surface_top(w: &VoxelWorld, x_m: f32, y_m: f32) -> f32 {
+    let gx = ((x_m / w.cell_m) as i32).clamp(0, w.width as i32 - 1);
+    let gy = ((y_m / w.cell_m) as i32).clamp(0, w.depth as i32 - 1);
+    let mut z = w.ground_level(gx, gy);
+    while base_id(w.voxel(gx, gy, z + 1)) == POND {
+        z += 1;
+    }
+    (z + 1) as f32 * w.cell_m - w.datum_m()
+}
+
+/// The drains' one entity, rebuilt when the snapshot or **F** moves (shot G8).
+#[derive(Component)]
+struct PipeMesh;
+
+#[derive(Resource)]
+struct PipeMaterial(Handle<StandardMaterial>);
+
+/// Brings the drawn drains up to the snapshot on the timeline. Runs after [`apply_world_state`],
+/// so the ponds the pipes are laid over are the ones this frame draws.
+fn apply_pipes(
+    mut commands: Commands,
+    site: Res<Site>,
+    material: Res<PipeMaterial>,
+    mut timeline: ResMut<Timeline>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut pipe: Query<(&mut Mesh3d, &mut Visibility), With<PipeMesh>>,
+) {
+    let want = (timeline.water, timeline.index);
+    if timeline.pipes_applied == Some(want) || timeline.run.is_none() {
+        return;
+    }
+    let (flow, mesh) = match &timeline.run {
+        Some(run) => {
+            let flow = run.pipe_flow(timeline.index);
+            let m = drains::pipe_mesh(run.pipes(), &flow, |x, y| surface_top(&site.world, x, y));
+            (flow, m)
+        }
+        None => (PipeFlow::default(), Default::default()),
+    };
+    let vis = if timeline.water {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    if !mesh.is_empty() {
+        let handle = meshes.add(to_bevy_mesh(&mesh));
+        match pipe.single_mut() {
+            Ok((mut h, mut v)) => {
+                h.0 = handle;
+                *v = vis;
+            }
+            Err(_) => {
+                commands.spawn((
+                    Mesh3d(handle),
+                    MeshMaterial3d(material.0.clone()),
+                    vis,
+                    NotShadowCaster,
+                    PipeMesh,
+                ));
+            }
+        }
+    }
+    timeline.pipe_flow = flow;
+    timeline.pipes_applied = Some(want);
+}
+
+/// The rain chart inside the timeline bar (shot G8): one bar per snapshot, as tall as the rain that
+/// fell in the interval it closes, with the share that left over the edge darker inside it. It is
+/// rebuilt only when the run changes, which a round trip can do while the viewer is open.
+#[derive(Component)]
+struct RainChart;
+
+fn rain_chart(
+    mut commands: Commands,
+    timeline: Res<Timeline>,
+    chart: Query<Entity, With<RainChart>>,
+    mut built: Local<Option<PathBuf>>,
+) {
+    let dir = timeline.run.as_ref().map(|r| r.dir.clone());
+    if *built == dir {
+        return;
+    }
+    *built = dir;
+    let Ok(root) = chart.single() else {
+        return;
+    };
+    commands.entity(root).despawn_related::<Children>();
+    let Some(Ok(w)) = timeline.run.as_ref().map(|r| &r.water) else {
+        return;
+    };
+    let top = w.iter().map(|v| v.rain_mm).fold(0.0f32, f32::max);
+    if top <= 0.0 || w.len() < 2 {
+        return;
+    }
+    let step = 100.0 / (w.len() - 1) as f32;
+    commands.entity(root).with_children(|c| {
+        for (i, v) in w.iter().enumerate() {
+            if v.rain_mm <= 0.0 {
+                continue;
+            }
+            let left = Val::Percent((i as f32 - 0.5).max(0.0) * step);
+            let width = Val::Percent(step.max(0.2));
+            for (mm, colour) in [
+                (v.rain_mm, Color::srgba(0.55, 0.8, 1.0, 0.85)),
+                (v.outflow_mm, Color::srgba(0.1, 0.25, 0.8, 0.95)),
+            ] {
+                c.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left,
+                        width,
+                        bottom: Val::Px(0.0),
+                        height: Val::Percent(100.0 * (mm / top).clamp(0.0, 1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(colour),
+                ));
+            }
+        }
+    });
 }
 
 /// What the crosshair is on and what has been done to the site.

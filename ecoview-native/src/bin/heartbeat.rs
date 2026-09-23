@@ -17,12 +17,20 @@
 //! from the surface it is laid over, and the run from the bare bundle under it. Those two
 //! comparisons are what go red when the palette or the run loader stops reaching the screen, without
 //! saying anything about what the run grew. The images are for a person to look at.
+//!
+//! Shot G8 added the water group, and with it the one place the heartbeat reads the run itself: a
+//! view can be pinned to a snapshot the run picks -- the one after its largest storm, the one whose
+//! drains carry most -- rather than the fixed tick, and three views carry a check on more than
+//! colour count. `top-water-storm` reads `water.bin` against the bundle's roofs, and the two drains
+//! views count the viewer's own pipe colours, which are the viewer's and so may be pinned here.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+use ecoview_native::drains::Pipe;
+use ecoview_native::run::Run;
 use ecoview_native::{Bundle, CAPITOL};
 
 /// The reference run, as `ecosim/justfile`'s `capitol` recipe writes it but under `runs/`, which is
@@ -38,6 +46,30 @@ enum Pose {
     /// Straight down over the site's centre, high enough to hold the whole of it in frame, with
     /// the HUD's text block off because it would cover a third of the map. The legend stays.
     Top,
+    /// Straight down over the run's drains (shot G8): the box round every pipe's inlet and outlet,
+    /// with a margin, and the HUD off.
+    Drains,
+}
+
+/// Which snapshot a view shows (shot G8). Every view before G8 is at `--tick`.
+#[derive(Clone, Copy, PartialEq)]
+enum When {
+    Tick,
+    /// The first snapshot at or after the tick with the most rain in `series.csv`.
+    LargestStorm,
+    /// The snapshot whose drains take the most water at its own tick, and the one before it.
+    BusiestDrain,
+    BeforeBusiestDrain,
+}
+
+/// What a view is checked for beyond being a picture (shot G8).
+#[derive(Clone, Copy, PartialEq)]
+enum Check {
+    None,
+    /// `water.bin` at the view's snapshot has water somewhere and none on a `roof` cell.
+    NoRoofWater,
+    /// The frame has the carrying pipes' colour and not the dry ones' (`true`), or the reverse.
+    Pipes(bool),
 }
 
 struct View {
@@ -55,9 +87,11 @@ struct View {
     differs_from: &'static [(&'static str, &'static str)],
     shows: &'static str,
     wrong_if: &'static str,
+    when: When,
+    check: Check,
 }
 
-const VIEWS: [View; 11] = [
+const VIEWS: [View; 15] = [
     View {
         name: "iso-surface",
         pose: Pose::Iso,
@@ -71,6 +105,8 @@ const VIEWS: [View; 11] = [
         wrong_if:
             "The frame is sky or clear colour only, the building is missing, or there are no \
                    trees on the lawns.",
+        when: When::Tick,
+        check: Check::None,
     },
     View {
         name: "iso-moisture",
@@ -83,6 +119,8 @@ const VIEWS: [View; 11] = [
                 dark-blue lines along the edges of paths and roads, where runoff from sealed ground \
                 collects.",
         wrong_if: "It looks like iso-surface, or the whole site is one band.",
+        when: When::Tick,
+        check: Check::None,
     },
     View {
         name: "top-no-run",
@@ -95,6 +133,8 @@ const VIEWS: [View; 11] = [
                 the scene itself carries. No run is loaded.",
         wrong_if: "The frame is blank or one colour, the Capitol's footprint is missing, or the \
                    site is not square in the frame.",
+        when: When::Tick,
+        check: Check::None,
     },
     View {
         name: "top-surface",
@@ -106,6 +146,8 @@ const VIEWS: [View; 11] = [
         shows: "The same frame with the run at the named tick over it: its trees, cover and \
                 standing water on the bundle.",
         wrong_if: "It looks like top-no-run, which means the run was not drawn.",
+        when: When::Tick,
+        check: Check::None,
     },
     View {
         name: "top-light",
@@ -118,6 +160,8 @@ const VIEWS: [View; 11] = [
                 one side of it, and small grey squares where a crown shades its own column. The \
                 crowns themselves keep their leaf colour.",
         wrong_if: "It looks like top-surface, or there is no black beside the building.",
+        when: When::Tick,
+        check: Check::None,
     },
     View {
         name: "top-moisture",
@@ -133,6 +177,8 @@ const VIEWS: [View; 11] = [
                 columns in dark-blue lines along the edges of paths and roads, where runoff from \
                 sealed ground collects.",
         wrong_if: "It looks like top-surface or top-light, or the lines along the paths are gone.",
+        when: When::Tick,
+        check: Check::None,
     },
     View {
         name: "top-fertility",
@@ -150,6 +196,8 @@ const VIEWS: [View; 11] = [
         shows: "Fertility from above, on the run's own ramp: the lawns brown in the patch grid's \
                 squares, paths, roads and roofs white.",
         wrong_if: "It looks like top-surface or top-moisture, or the lawns are one flat band.",
+        when: When::Tick,
+        check: Check::None,
     },
     View {
         name: "top-water",
@@ -167,6 +215,72 @@ const VIEWS: [View; 11] = [
         shows: "Ponded depth from above, on a log ramp: the ground grey where nothing stands, \
                 light-blue flecks of standing water along the roads and paths, none on the roofs.",
         wrong_if: "It looks like top-surface or top-fertility, or water stands on a roof.",
+        when: When::Tick,
+        check: Check::None,
+    },
+    // Shot G8: the water in the ground, the water on it after the run's worst storm, and the drains
+    // either side of the moment they carry most.
+    View {
+        name: "top-soil-water",
+        pose: Pose::Top,
+        overlay: "soil_water",
+        run: true,
+        flat: true,
+        differs_from: &[
+            ("top-surface", "the soil water palette reaches the screen"),
+            (
+                "top-moisture",
+                "soil water is not moisture's fraction drawn again",
+            ),
+        ],
+        shows: "Soil water from above, in millimetres on the viewer's sand-to-teal ramp: lawns and \
+                beds teal, the drier lawn lighter, paving, roads and roofs grey, which is no soil.",
+        wrong_if: "It looks like top-moisture, a roof or road is coloured, or the lawns are all one \
+                   band.",
+        when: When::Tick,
+        check: Check::None,
+    },
+    View {
+        name: "top-water-storm",
+        pose: Pose::Top,
+        overlay: "water",
+        run: true,
+        flat: true,
+        differs_from: &[("top-surface", "the water palette reaches the screen")],
+        shows: "Ponded depth at the first snapshot after the run's wettest tick: blue across the \
+                roads, paths and lawn hollows, and none on any roof.",
+        wrong_if: "A roof is blue (the check reads water.bin against the bundle's roof cells), or \
+                   there is less blue than in top-water.",
+        when: When::LargestStorm,
+        check: Check::NoRoofWater,
+    },
+    View {
+        name: "drains-wet",
+        pose: Pose::Drains,
+        overlay: "surface",
+        run: true,
+        flat: true,
+        differs_from: &[],
+        shows: "The drains from above at the snapshot whose pipes take the most water at its own \
+                tick: every pipe solid and blue from inlet to outlet, where the crowns do not hide \
+                it.",
+        wrong_if: "A pipe is dashed or orange, or there is no blue pipe at all (the check counts \
+                   both colours).",
+        when: When::BusiestDrain,
+        check: Check::Pipes(true),
+    },
+    View {
+        name: "drains-dry",
+        pose: Pose::Drains,
+        overlay: "surface",
+        run: true,
+        flat: true,
+        differs_from: &[("drains-wet", "the drawn drains follow the run's pipe rows")],
+        shows: "The same frame one snapshot earlier, when no pipe is carrying: every pipe dashed, \
+                narrower and orange.",
+        wrong_if: "A pipe is solid or blue, or no orange dash is in frame.",
+        when: When::BeforeBusiestDrain,
+        check: Check::Pipes(false),
     },
     // Shot V12: the three soil pools of `npk.bin`. Each has to differ from the one before it as well
     // as from the surface, for the reason every overlay does, and here the reason is sharper: G5
@@ -184,6 +298,8 @@ const VIEWS: [View; 11] = [
         ],
         shows: "Nitrogen from above, on the run's ramp, pale where the soil is poor and green where                 it is rich: lawns in soft patch-grid squares, paler on the east half, and pale specks                 where a tree stands or has stood and drew its own square metre down. Paving, roads                 and roofs grey, which is no soil at all.",
         wrong_if: "It looks like top-phosphorus or top-potassium, the lawns are one flat colour with                    no specks, or a roof is coloured.",
+        when: When::Tick,
+        check: Check::None,
     },
     View {
         name: "top-phosphorus",
@@ -197,6 +313,8 @@ const VIEWS: [View; 11] = [
         ],
         shows: "Phosphorus from above: nearly uniform dark purple, because the median column holds                 51 g/m2 of a pool that barely moves, with the drainage network etched pale across                 it -- the flow lines runoff has stripped of particulate P. The whole stored pool,                 not the tenth of it growth can reach.",
         wrong_if: "It is speckled like top-nitrogen, the pale flow lines are missing, or the lawns                    are pale and the lines dark (the ramp read the wrong way round).",
+        when: When::Tick,
+        check: Check::None,
     },
     View {
         name: "top-potassium",
@@ -213,6 +331,8 @@ const VIEWS: [View; 11] = [
         ],
         shows: "Potassium from above, between the other two: an even orange, with pale specks                 where trees stand or have stood. Nothing adds potassium in this model, so a column a                 tree drew down stays drawn down after the tree is gone.",
         wrong_if: "It looks like top-nitrogen's patch squares or top-phosphorus's flow lines, or it                    has no specks.",
+        when: When::Tick,
+        check: Check::None,
     },
 ];
 
@@ -230,6 +350,16 @@ const DIFF_STEP: i16 = 8;
 /// 51%, and the overlay's HUD lines made it "differ" from its pair by 21%. Both passed. In this band
 /// the same frame is sky and nothing else.
 const BAND: (f64, f64) = (0.55, 0.92);
+
+/// The drains' colours as they reach the frame, unlit but tonemapped, and how far a pixel may be from
+/// one and count: measured on shot G8's close-ups, where the carrying blue came out (40, 86, 214)
+/// and the dry orange (210, 126, 50), with no other pixel in the band within this of either.
+const PIPE_WET_RGB: [u8; 3] = [40, 86, 214];
+const PIPE_DRY_RGB: [u8; 3] = [210, 126, 50];
+const PIPE_TOL: i16 = 24;
+/// A pipe colour is present at this many pixels in the band and absent below [`PIPE_ABSENT`].
+const PIPE_PRESENT: usize = 100;
+const PIPE_ABSENT: usize = 20;
 
 /// Decoded to 8-bit RGB, whatever the PNG held.
 struct Frame {
@@ -296,6 +426,78 @@ fn differ(a: &Frame, b: &Frame) -> f64 {
     moved as f64 / (pa.len() / 3) as f64
 }
 
+/// Pixels of [`BAND`] within [`PIPE_TOL`] of `c` in every channel.
+fn near(f: &Frame, c: [u8; 3]) -> usize {
+    band(f)
+        .chunks_exact(3)
+        .filter(|p| (0..3).all(|i| (p[i] as i16 - c[i] as i16).abs() <= PIPE_TOL))
+        .count()
+}
+
+/// The view's snapshot index in the run, or why the run has none to give.
+fn snapshot_for(when: When, run: &Run, tick: u32) -> Result<usize, String> {
+    match when {
+        When::Tick => run
+            .meta
+            .snapshots
+            .iter()
+            .position(|&t| t >= tick as u64)
+            .ok_or(format!("the run has no snapshot at or after tick {tick}")),
+        When::LargestStorm => run
+            .largest_storm_snapshot()
+            .ok_or("the run's series.csv has no rain".into()),
+        When::BusiestDrain => run
+            .busiest_drain_snapshot()
+            .ok_or("no pipe in the run carries water at a snapshot's tick".into()),
+        When::BeforeBusiestDrain => match run.busiest_drain_snapshot() {
+            Some(0) | None => Err("no snapshot before the busiest drain's".into()),
+            Some(i) => Ok(i - 1),
+        },
+    }
+}
+
+/// `top-water-storm`'s data check: the ponds at snapshot `i`, read against the bundle's media.
+fn roof_water(run: &Run, i: usize, bundle: &Bundle) -> Result<String, String> {
+    let ponds = run.ponds_at(i).map_err(|e| e.to_string())?;
+    let roof = bundle
+        .media
+        .iter()
+        .position(|m| m == "roof")
+        .ok_or("the bundle has no roof medium")? as u8;
+    let wet = ponds.mm.iter().filter(|&&d| d > 0.0).count();
+    let on_roof = ponds
+        .mm
+        .iter()
+        .zip(&bundle.medium)
+        .filter(|(d, m)| **d > 0.0 && **m == roof)
+        .count();
+    let roofs = bundle.medium.iter().filter(|&&m| m == roof).count();
+    if wet == 0 {
+        return Err("water.bin is dry everywhere".into());
+    }
+    if on_roof > 0 {
+        return Err(format!("{on_roof} of {roofs} roof cells hold water"));
+    }
+    Ok(format!("{wet} ground cells wet, 0 of {roofs} roof cells"))
+}
+
+/// Eye and look for [`Pose::Drains`]: over the middle of every pipe's ends, high enough for the box
+/// round them and a tenth more to fit the 45-degree, 1.6-wide frame.
+fn drains_pose(pipes: &[Pipe]) -> Option<(String, String)> {
+    let pts: Vec<[f32; 2]> = pipes.iter().flat_map(|p| [p.inlet, p.outlet]).collect();
+    if pts.is_empty() {
+        return None;
+    }
+    let lo = |k: usize| pts.iter().map(|p| p[k]).fold(f32::MAX, f32::min);
+    let hi = |k: usize| pts.iter().map(|p| p[k]).fold(f32::MIN, f32::max);
+    let (cx, cz) = ((lo(0) + hi(0)) / 2.0, (lo(1) + hi(1)) / 2.0);
+    let h = 1.1
+        * ((hi(1) - lo(1)) / 0.8284)
+            .max((hi(0) - lo(0)) / (0.8284 * 1.6))
+            .max(20.0);
+    Some((format!("{cx},{h},{}", cz + 0.01), format!("{cx},0,{cz}")))
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let arg = |k: &str, d: &str| -> String {
@@ -326,6 +528,9 @@ fn main() {
     }
     let bundle = Bundle::load(Path::new(&world))
         .unwrap_or_else(|e| panic!("heartbeat: cannot load the bundle at {world}: {e}"));
+    let the_run = Run::load(Path::new(&run))
+        .unwrap_or_else(|e| panic!("heartbeat: cannot load the run at {run}: {e}"));
+    let drains_eye = drains_pose(the_run.pipes());
     let size = bundle.width as f32 * bundle.ground_cell_m;
     // Bevy's default vertical field of view is 45 degrees and the frame is wider than it is tall,
     // so the site fits when the eye is size / 2 / tan(22.5) above it; 1.2 of that leaves a margin
@@ -349,16 +554,28 @@ fn main() {
     for v in &VIEWS {
         let png = out.join(format!("{}.png", v.name));
         let _ = std::fs::remove_file(&png);
+        let snap = snapshot_for(v.when, &the_run, tick);
+        let shown = snap
+            .as_ref()
+            .map(|&i| the_run.tick_at(i))
+            .unwrap_or(tick as u64);
         let mut cmd = Command::new(&exe);
         cmd.args(["--world", &world, "--overlay", v.overlay, "--headless"]);
         if v.run {
-            cmd.args(["--run", &run, "--tick", &tick.to_string()]);
+            cmd.args(["--run", &run, "--tick", &shown.to_string()]);
         }
         if v.flat {
             cmd.args(["--no-sky", "--no-ao"]);
         }
         if v.pose == Pose::Top {
             cmd.args(["--eye", &top, "--look", &centre, "--no-hud"]);
+        }
+        if v.pose == Pose::Drains {
+            let Some((eye, look)) = &drains_eye else {
+                failures.push(format!("{}: the run has no world.pipes", v.name));
+                continue;
+            };
+            cmd.args(["--eye", eye, "--look", look, "--no-hud"]);
         }
         cmd.arg("--screenshot").arg(&png);
         let flags: Vec<String> = cmd
@@ -369,9 +586,10 @@ fn main() {
         let t = Instant::now();
         let status = cmd.output();
         let secs = t.elapsed().as_secs_f64();
-        let frame = match status {
-            Ok(o) if o.status.success() => decode(&png),
-            Ok(o) => Err(format!(
+        let frame = match (status, &snap) {
+            (_, Err(e)) => Err(e.clone()),
+            (Ok(o), _) if o.status.success() => decode(&png),
+            (Ok(o), _) => Err(format!(
                 "the viewer exited with {}: {}",
                 o.status,
                 String::from_utf8_lossy(&o.stderr)
@@ -380,7 +598,7 @@ fn main() {
                     .find(|l| !l.trim().is_empty())
                     .unwrap_or("")
             )),
-            Err(e) => Err(format!("cannot start {}: {e}", exe.display())),
+            (Err(e), _) => Err(format!("cannot start {}: {e}", exe.display())),
         };
         let verdict = match &frame {
             Err(e) => {
@@ -403,6 +621,30 @@ fn main() {
                     ));
                     notes.push("BLANK".into());
                 }
+                match (v.check, &snap) {
+                    (Check::NoRoofWater, Ok(i)) => match roof_water(&the_run, *i, &bundle) {
+                        Ok(s) => notes.push(s),
+                        Err(e) => {
+                            failures.push(format!("{}: {e}", v.name));
+                            notes.push(format!("WRONG: {e}"));
+                        }
+                    },
+                    (Check::Pipes(wet), _) => {
+                        let (w, d) = (near(f, PIPE_WET_RGB), near(f, PIPE_DRY_RGB));
+                        notes.push(format!("{w} carrying-blue and {d} dry-orange pixels"));
+                        let (want, not) = if wet { (w, d) } else { (d, w) };
+                        if want < PIPE_PRESENT || not >= PIPE_ABSENT {
+                            failures.push(format!(
+                                "{}: {w} carrying and {d} dry pipe pixels, expected the {} \
+                                 colour only",
+                                v.name,
+                                if wet { "carrying" } else { "dry" }
+                            ));
+                            notes.push("WRONG PIPES".into());
+                        }
+                    }
+                    _ => {}
+                }
                 for &(other, proves) in v.differs_from {
                     match frames.iter().find(|(n, _)| *n == other) {
                         Some((_, Some(g))) => {
@@ -423,7 +665,7 @@ fn main() {
                 notes.join(", ")
             }
         };
-        println!("{:<14} {secs:5.1} s  {verdict}", v.name);
+        println!("{:<16} {secs:5.1} s  {verdict}", v.name);
         rows.push(format!(
             "| `{0}.png` | `{1}` | {2} | {3} | {verdict} |",
             v.name,
@@ -438,7 +680,8 @@ fn main() {
         "# Viewer heartbeat\n\n\
          Written by `cargo heartbeat` (src/bin/heartbeat.rs), shot V13. Every file in this directory is \
          regenerated by that one command; do not edit it by hand.\n\n\
-         Run `{run}` at tick {tick}, world `{world}`. {n} views, 1280 x 800, headless. The checks are \
+         Run `{run}` at tick {tick} unless a view's flags name another, world `{world}`. {n} views, \
+         1280 x 800, headless. The checks are \
          coarse on purpose, and measured on the rows from {:.0}% to {:.0}% of the frame's height, \
          below the HUD's text and above the legend: there each frame must have at least \
          {MIN_COLOURS} colours at 5 bits a channel with no colour over {:.0}% of it, and a view \

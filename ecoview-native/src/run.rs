@@ -41,6 +41,10 @@ pub struct RunWorld {
     pub ground_cell_m: f32,
     pub ground_width: usize,
     pub ground_depth: usize,
+    /// The bundle's storm drains, as `pipes.json` gives them (`ecosim` shot G6). Empty on a noise
+    /// world and on a run older than G6; the viewer draws them since shot G8 (`crate::drains`).
+    #[serde(default)]
+    pub pipes: Vec<crate::drains::Pipe>,
 }
 
 /// `Default` exists so [`crate::tree::Life`] has something to read when no run is loaded; it is not
@@ -184,7 +188,8 @@ pub struct BundleParams {
 
 /// One row of `params.medium`: what the simulator says a surface does.
 ///
-/// Only `plantable` is read. The three hydrology numbers beside it in the file are the simulator's
+/// `plantable` is read for the plantable gate (shot S4) and `field_capacity_mm` for the top of the
+/// soil water overlay's scale (shot G8). The two rates beside them in the file are the simulator's
 /// business -- this viewer draws no infiltration -- and leaving them out of the struct is what keeps
 /// that true rather than merely unimplemented.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -192,6 +197,16 @@ pub struct BundleParams {
 pub struct MediumRow {
     /// Whether a plant roots in this medium. `None` when the run predates the field.
     pub plantable: Option<bool>,
+    /// How much water this medium's root zone holds at field capacity, in mm.
+    pub field_capacity_mm: Option<f32>,
+}
+
+/// `params.hydro`: the one number the soil water scale needs besides the media's capacities.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct HydroParams {
+    /// Soil water may stand this many times field capacity before it runs off.
+    pub saturation: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -203,6 +218,7 @@ pub struct Params {
     pub bundle: BundleParams,
     pub disease: DiseaseParams,
     pub fire: FireParams,
+    pub hydro: HydroParams,
     /// `params.medium`, keyed by the medium's name -- the same names the bundle publishes in its own
     /// `media` list, which is what lets a code in `medium.u8` be looked up here (shot S4).
     ///
@@ -306,6 +322,13 @@ pub struct Run {
     /// missing number named in [`Life::source`]. Held on the run because it is the run that says
     /// it: two runs of the same site with different parameters grow different trees.
     pub life: Life,
+    /// Every `pipe` row of `events.csv` (shot G8), kept whole for the reason `burnouts` is: one per
+    /// pipe per storm is 2,528 rows on the Capitol, and filtering once at load is cheaper than
+    /// re-reading the file at every scrub.
+    pub pipe_rows: Vec<crate::drains::PipeRow>,
+    /// Rain, surface outflow and drain intake per snapshot interval, from `series.csv`, or why the
+    /// run has none (shot G8).
+    pub water: Result<Vec<crate::drains::IntervalWater>, String>,
 }
 
 fn bad(msg: String) -> io::Error {
@@ -330,12 +353,16 @@ impl Run {
             return Err(bad(format!("{}: the run has no snapshots", dir.display())));
         }
         let burnouts = crate::overlay::read_burnouts(&dir.join("events.csv"));
+        let pipe_rows = crate::drains::read_pipe_rows(&dir.join("events.csv"));
+        let water = crate::drains::read_water_series(&dir.join("series.csv"), &meta.snapshots);
         let life = Life::of(&meta);
         Ok(Run {
             dir: dir.to_path_buf(),
             meta,
             burnouts,
             life,
+            pipe_rows,
+            water,
         })
     }
 

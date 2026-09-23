@@ -545,9 +545,12 @@ fn the_scale_and_the_species_colours_come_from_meta_json() {
     // Since shot V12 water's and the three nutrients' scales are read from `meta.json` when the run
     // publishes them (`ecosim` S10 and G13). This run is older than both -- seven rows, no `scale`
     // -- so all four fall back here and say so; the published half is
-    // `the_published_scales_are_read_from_meta_json`.
+    // `the_published_scales_are_read_from_meta_json`. Soil water (shot G8) has no row at all: its
+    // scale is the run's `params` when they carry the media table, and this run's do not, so it
+    // falls back too; the params half is `the_soil_water_scale_is_the_wettest_root_zone`.
     let late = [
         Overlay::Water,
+        Overlay::SoilWater,
         Overlay::Nitrogen,
         Overlay::Phosphorus,
         Overlay::Potassium,
@@ -602,10 +605,9 @@ fn the_overlay_ramp_hues_come_from_meta_json() {
     let r = Overlay::Light.ramp(Some(m));
     assert_eq!((r.lo.as_str(), r.hi.as_str()), ("#010203", "#fdfeff"));
     assert!(r.from_meta(), "{}", r.source);
-    for o in Overlay::ALL
-        .into_iter()
-        .filter(|o| o.is_field() && *o != Overlay::Water && o.nutrient().is_none())
-    {
+    for o in Overlay::ALL.into_iter().filter(|o| {
+        o.is_field() && *o != Overlay::Water && *o != Overlay::SoilWater && o.nutrient().is_none()
+    }) {
         assert!(
             o.ramp(Some(m)).from_meta(),
             "{}: {}",
@@ -1332,6 +1334,7 @@ fn drivers(d: Dims, grass: f32, shrub: f32, moisture: u8, light: u8) -> Fields {
         grass: vec![grass; d.patch_count()],
         shrub: vec![shrub; d.patch_count()],
         npk: None,
+        soil_water: None,
     }
 }
 
@@ -4184,4 +4187,285 @@ fn small_numbers_keep_their_digits_on_screen() {
     assert_eq!(sig(0.5), "0.50");
     assert_eq!(sig(10000.0), "10000.00");
     assert_eq!(sig(0.0), "0.00");
+}
+
+// Shot G8: the water group -- soil water, the storms, and the drains.
+
+use ecoview_native::drains::{
+    pipe_mesh, read_water_series, PipeFlow, DRY_HEX, DRY_WIDTH_M, WET_HEX, WET_WIDTH_M,
+};
+use ecoview_native::overlay::{linear_band_above_none, SOIL_WATER_FALLBACK_MM};
+
+/// Writes an `n` x `n` column `soil_water.bin` into the test run's second snapshot: column 0 holds
+/// none (a roof), the rest rise by 3 mm a column.
+fn write_soil_water(dir: &std::path::Path, n: usize) {
+    let v: Vec<u8> = (0..n * n)
+        .flat_map(|c| (3.0 * c as f32).to_le_bytes())
+        .collect();
+    std::fs::write(dir.join("snap_000100").join("soil_water.bin"), v).unwrap();
+}
+
+/// `soil_water.bin` is one f32 per ecology column; a snapshot without one is a run with the water
+/// tier off, and the reader says there is none rather than failing.
+#[test]
+fn soil_water_bin_is_read_per_column() {
+    let dir = tmp("soil-water");
+    write_overlay_run(&dir, 8, 4, true);
+    write_soil_water(&dir, 8);
+    let run = Run::load(&dir).unwrap();
+    let d = run.meta.dims;
+    assert!(run.fields_at(0).unwrap().soil_water.is_none());
+    let f = run.fields_at(1).unwrap();
+    assert_eq!(f.soil_water.as_ref().unwrap().len(), d.columns());
+    assert_eq!(f.value(Overlay::SoilWater, &d, 5, 0), 15.0);
+    assert_eq!(f.value(Overlay::SoilWater, &d, 1, 1), 27.0);
+
+    let s = Scale::of(Overlay::SoilWater, &run.meta);
+    let (bands, st) = f.bands(Overlay::SoilWater, &d, &s);
+    assert_eq!(
+        bands[0], WATER_DRY,
+        "a column with no soil water is off the ramp"
+    );
+    assert!(bands[63] > bands[1] && bands[1] >= 1);
+    assert_eq!(
+        (st.min, st.max),
+        (3.0, 189.0),
+        "the roof is not the driest lawn"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A short `soil_water.bin` is a corrupt run and refused by name.
+#[test]
+fn a_short_soil_water_bin_is_refused() {
+    let dir = tmp("soil-water-short");
+    write_overlay_run(&dir, 8, 4, true);
+    std::fs::write(
+        dir.join("snap_000100").join("soil_water.bin"),
+        vec![0u8; 63 * 4],
+    )
+    .unwrap();
+    let e = Run::load(&dir).unwrap().fields_at(1).unwrap_err();
+    assert!(e.to_string().contains("soil_water.bin"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The ramp's top is the wettest any root zone can be: the deepest field capacity in the run's
+/// media table times its saturation. Without the table it is the viewer's constant, and says so.
+#[test]
+fn the_soil_water_scale_is_the_wettest_root_zone() {
+    let dir = tmp("soil-water-scale");
+    write_overlay_run(&dir, 8, 4, true);
+    let path = dir.join("meta.json");
+    let meta = std::fs::read_to_string(&path).unwrap();
+    let old = r#""fire":{"duration":3}}"#;
+    assert!(meta.contains(old));
+    std::fs::write(
+        &path,
+        meta.replace(
+            old,
+            r#""fire":{"duration":3},
+               "hydro":{"saturation":1.5},
+               "medium":{"lawn":{"plantable":true,"field_capacity_mm":80.0},
+                         "bed":{"plantable":true,"field_capacity_mm":120.0},
+                         "roof":{"plantable":false,"field_capacity_mm":0.0}}}"#,
+        ),
+    )
+    .unwrap();
+    let s = Scale::of(Overlay::SoilWater, &Run::load(&dir).unwrap().meta);
+    assert_eq!((s.lo, s.hi), (0.0, 180.0), "120 mm x 1.5, not the fallback");
+    assert!(s.source.contains("hydro.saturation"), "{}", s.source);
+
+    write_overlay_run(&dir, 8, 4, true);
+    let s = Scale::of(Overlay::SoilWater, &Run::load(&dir).unwrap().meta);
+    assert_eq!(s.hi, SOIL_WATER_FALLBACK_MM);
+    assert!(!s.from_meta(), "{}", s.source);
+    // And no run publishes a soil water row, so the hues are always the viewer's.
+    assert!(!Overlay::SoilWater.ramp(None).from_meta());
+    assert_eq!(Overlay::parse("soil_water"), Some(Overlay::SoilWater));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Band 0 is none, band 1 the bottom of the linear ramp, the last band its top and past it.
+#[test]
+fn soil_water_bands_are_linear_above_none() {
+    let s = Scale {
+        lo: 0.0,
+        hi: 240.0,
+        unit: "mm",
+        source: String::new(),
+    };
+    assert_eq!(linear_band_above_none(0.0, &s), WATER_DRY);
+    assert_eq!(linear_band_above_none(0.001, &s), WATER_DRY + 1);
+    assert_eq!(linear_band_above_none(240.0, &s), (BANDS - 1) as u8);
+    assert_eq!(linear_band_above_none(999.0, &s), (BANDS - 1) as u8);
+    let mid = linear_band_above_none(120.0, &s);
+    assert!(
+        (15..=17).contains(&mid),
+        "half way up is the middle band: {mid}"
+    );
+}
+
+/// A run with drains: three snapshots, two pipes, a storm straight after tick 0 that fills both,
+/// and one at tick 200 that pipe 0 carries at the snapshot's own tick and pipe 1 does not. The rain
+/// peaks in the interval ending at 100.
+fn write_drain_run(dir: &std::path::Path, pipe_in: bool) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("meta.json"),
+        r#"{"format_version":4,"dims":{"x":8,"y":8,"z":8,"patch":4},
+           "seed":42,"ticks":200,"snapshot_every":100,"snapshots":[0,100,200],
+           "world":{"name":"test","bundle":true,"ground_cell_m":0.5,
+                    "ground_width":16,"ground_depth":16,
+                    "pipes":[{"id":"a","inlet":[1.0,1.0],"outlet":[1.0,7.0],
+                              "capacity_m3h":10.0,"illustrative":true},
+                             {"id":"b","inlet":[2.0,2.0],"outlet":[6.0,2.0]}]},
+           "species":[]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("events.csv"),
+        "tick,kind,species,patch_x,patch_y,x,y,cause,detail\n\
+         50,burnout,,0,0,0,0,,0\n\
+         60,pipe,,0,0,1,1,,0 1.5000 0.1000 0.2 0.01\n\
+         60,pipe,,0,0,2,2,,1 0.2500 0.0000 0.0 0.00\n\
+         61,pipe,,0,0,1,1,,0 0.5000 0.0000 0.1 0.00\n\
+         180,pipe,,0,0,2,2,,1 0.7500 0.0000 0.0 0.00\n\
+         200,pipe,,0,0,1,1,,0 0.0100 0.0000 0.0 0.00\n\
+         200,pipe,,0,0,2,2,,1 0.0000 0.0000 0.0 0.00\n",
+    )
+    .unwrap();
+    let mut series = String::from(if pipe_in {
+        "tick,grass,rain_mm,outflow_mm,pipe_in_mm\n"
+    } else {
+        "tick,grass,rain_mm,outflow_mm\n"
+    });
+    for t in 0..=200u32 {
+        let rain = match t {
+            60 => 30.0,
+            61 => 5.0,
+            180 => 12.0,
+            200 => 1.0,
+            _ => 0.0,
+        };
+        let out = rain / 4.0;
+        series.push_str(&if pipe_in {
+            format!("{t},0.5,{rain},{out},{}\n", rain / 100.0)
+        } else {
+            format!("{t},0.5,{rain},{out}\n")
+        });
+    }
+    std::fs::write(dir.join("series.csv"), series).unwrap();
+}
+
+/// `world.pipes` is read, `events.csv`'s pipe rows are read by header, and a snapshot's flow is
+/// its own tick for "carrying" and the interval since the previous snapshot for the totals.
+#[test]
+fn the_drains_are_read_from_meta_and_events() {
+    let dir = tmp("drains");
+    write_drain_run(&dir, true);
+    let run = Run::load(&dir).unwrap();
+    let p = run.pipes();
+    assert_eq!(p.len(), 2);
+    assert_eq!((p[0].id.as_str(), p[0].outlet), ("a", [1.0, 7.0]));
+    assert!(
+        p[0].illustrative && !p[1].illustrative,
+        "illustrative defaults to false"
+    );
+    assert_eq!(run.pipe_rows.len(), 6, "the burnout row is not a pipe row");
+
+    let f0 = run.pipe_flow(0);
+    assert_eq!(f0.carrying_count(), 0, "nothing ran at tick 0");
+    let f1 = run.pipe_flow(1);
+    assert_eq!(f1.since_m3, vec![2.0, 0.25]);
+    assert_eq!(f1.overflow_m3, vec![0.1, 0.0]);
+    assert_eq!(f1.storms, 2);
+    assert_eq!(f1.carrying_count(), 0, "both storms ended before tick 100");
+    let f2 = run.pipe_flow(2);
+    assert!(f2.carrying(0), "pipe a took water at tick 200");
+    assert!(
+        !f2.carrying(1),
+        "0.0000 at the tick is dry, whatever ran at 180"
+    );
+    assert_eq!(f2.since_m3, vec![0.01, 0.75]);
+    assert_eq!(run.busiest_drain_snapshot(), Some(2));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The storms are summed per snapshot interval, `(previous, this]`, with the wettest tick kept.
+#[test]
+fn the_storms_are_summed_per_snapshot_interval() {
+    let dir = tmp("storms");
+    write_drain_run(&dir, true);
+    let run = Run::load(&dir).unwrap();
+    let w = run.water.as_ref().unwrap();
+    assert_eq!(w.len(), 3);
+    assert_eq!(w[0].rain_mm, 0.0);
+    assert_eq!((w[1].rain_mm, w[1].outflow_mm), (35.0, 8.75));
+    assert!((w[1].pipe_mm - 0.35).abs() < 1e-6);
+    assert_eq!((w[1].peak_mm, w[1].peak_tick), (30.0, 60));
+    assert_eq!(
+        w[2].rain_mm, 13.0,
+        "tick 200 belongs to the interval it closes"
+    );
+    assert_eq!(run.largest_storm_snapshot(), Some(1));
+
+    // A run between ecosim G4 and G6: rain and no drains, which took nothing.
+    write_drain_run(&dir, false);
+    let w = read_water_series(&dir.join("series.csv"), &[0, 100, 200]).unwrap();
+    assert_eq!((w[1].rain_mm, w[1].pipe_mm), (35.0, 0.0));
+    // And one before G4 has no water columns, which is said, not drawn as a dry run.
+    std::fs::write(dir.join("series.csv"), "tick,grass\n0,0.5\n").unwrap();
+    let e = read_water_series(&dir.join("series.csv"), &[0]).unwrap_err();
+    assert!(e.contains("rain_mm"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A carrying pipe is one solid run of wide boxes in the wet colour, and a dry one every other
+/// piece, narrower, in the dry colour; both sit just above the ground they are laid on.
+#[test]
+fn a_carrying_pipe_is_solid_and_a_dry_one_dashed() {
+    let dir = tmp("pipe-mesh");
+    write_drain_run(&dir, true);
+    let run = Run::load(&dir).unwrap();
+    let pipes = run.pipes();
+    let flow = run.pipe_flow(2);
+    let m = pipe_mesh(pipes, &flow, |_, _| 2.0);
+    // Pipe a is 6 m long: six 1 m pieces, all drawn. Pipe b is 4 m: pieces 0 and 2. Six faces of
+    // four vertices a box.
+    assert_eq!(m.positions.len(), (6 + 2) * 24);
+    let (wet, dry) = (linear_rgba(WET_HEX), linear_rgba(DRY_HEX));
+    assert!(m.colors[..6 * 24].iter().all(|c| *c == wet));
+    assert!(m.colors[6 * 24..].iter().all(|c| *c == dry));
+    assert!(m.positions.iter().all(|p| p[1] > 2.0), "above the ground");
+    // Pipe a runs north along x = 1, so its width is across x.
+    let xs: Vec<f32> = m.positions[..6 * 24].iter().map(|p| p[0]).collect();
+    let span =
+        xs.iter().cloned().fold(f32::MIN, f32::max) - xs.iter().cloned().fold(f32::MAX, f32::min);
+    assert!((span - WET_WIDTH_M).abs() < 1e-5, "{span}");
+    let zs: Vec<f32> = m.positions[6 * 24..].iter().map(|p| p[2]).collect();
+    let span =
+        zs.iter().cloned().fold(f32::MIN, f32::max) - zs.iter().cloned().fold(f32::MAX, f32::min);
+    assert!((span - DRY_WIDTH_M).abs() < 1e-5, "{span}");
+
+    // With no flow at all, both are dashed, and no pipes at all is no mesh.
+    let dry_all = pipe_mesh(pipes, &PipeFlow::default(), |_, _| 0.0);
+    assert_eq!(dry_all.positions.len(), (3 + 2) * 24);
+    assert!(pipe_mesh(&[], &flow, |_, _| 0.0).is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A run with no `world.pipes` and no `series.csv` -- every run before ecosim G4 -- has no drains
+/// and says why it has no storms.
+#[test]
+fn a_run_without_drains_draws_none() {
+    let dir = tmp("no-drains");
+    write_overlay_run(&dir, 8, 4, true);
+    let run = Run::load(&dir).unwrap();
+    assert!(run.pipes().is_empty());
+    assert_eq!(run.pipe_flow(1).carrying_count(), 0);
+    assert_eq!(run.busiest_drain_snapshot(), None);
+    assert!(run.water.is_err());
+    assert_eq!(run.largest_storm_snapshot(), None);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

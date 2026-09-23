@@ -11,6 +11,7 @@
 pub mod brp;
 pub mod bundle;
 pub mod cover;
+pub mod drains;
 pub mod mesh;
 pub mod overlay;
 pub mod palette;

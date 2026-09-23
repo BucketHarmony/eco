@@ -138,6 +138,38 @@ pub const WATER_RAMP_MM: (f32, f32) = (1.0, 10_000.0);
 /// the source line says so. In N, P, K order, the file's.
 pub const NUTRIENT_RAMP_G_M2: [(f32, f32); 3] = [(0.01, 10.0), (0.001, 100.0), (0.01, 100.0)];
 
+/// The top of the soil water ramp when the run's `params` do not give one, in mm: the deepest
+/// field capacity in `ecosim`'s shipped media table (bed and mulch, 200 mm) at its shipped
+/// saturation of 1.2. Named as the viewer's in the source line whenever it is used.
+pub const SOIL_WATER_FALLBACK_MM: f32 = 240.0;
+
+/// The soil water ramp's top: the wettest any root zone in this run can be, which is the largest
+/// `params.medium.*.field_capacity_mm` times `params.hydro.saturation` (shot G8). Linear from 0,
+/// because the quantity is bounded at both ends and a millimetre means the same at either.
+fn soil_water_scale(p: &Params) -> Scale {
+    let fc = p
+        .medium
+        .values()
+        .filter_map(|m| m.field_capacity_mm)
+        .fold(0.0f32, f32::max);
+    match (fc > 0.0, p.hydro.saturation) {
+        (true, Some(sat)) if sat > 0.0 => Scale {
+            lo: 0.0,
+            hi: fc * sat,
+            unit: "mm in the root zone",
+            source: format!(
+                "params: deepest medium field capacity {fc:.0} mm x hydro.saturation {sat}"
+            ),
+        },
+        _ => Scale {
+            lo: 0.0,
+            hi: SOIL_WATER_FALLBACK_MM,
+            unit: "mm in the root zone",
+            source: viewer_fallback("medium field capacities and hydro.saturation"),
+        },
+    }
+}
+
 /// `npk.bin` is three whole f32 planes per ecology column (SAD 1, "Nutrients").
 pub const NPK_PLANES: usize = 3;
 
@@ -314,6 +346,7 @@ impl Scale {
             // that the run had none, which was false (DECISIONS.md, V13). A run older than S10 gets
             // `WATER_RAMP_MM`, named as the fallback it is.
             Overlay::Water => log_scale(o, meta, WATER_RAMP_MM, "mm standing, log10"),
+            Overlay::SoilWater => soil_water_scale(p),
             // The three soil pools, in g/m2 on the log10 ramps G13 measured (shot V12).
             Overlay::Nitrogen | Overlay::Phosphorus | Overlay::Potassium => {
                 let k = o.nutrient().unwrap_or(0);
@@ -377,6 +410,9 @@ pub struct Fields {
     /// a run with the nutrient tier off or one older than `ecosim` shot G5 -- not an error until a
     /// nutrient overlay asks for it.
     pub npk: Option<Vec<f32>>,
+    /// `soil_water.bin`: water in each ecology column's root zone, in mm (shot G8, from `ecosim`
+    /// G4). `None` when the snapshot has none -- the water tier off -- on the terms `npk` is.
+    pub soil_water: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -421,6 +457,21 @@ fn read_exact_len(path: &Path, want: usize) -> io::Result<Vec<u8>> {
         )));
     }
     Ok(raw)
+}
+
+/// An optional file of `n` little-endian f32s: `None` when absent, an error when the wrong length.
+fn read_f32s(path: &Path, n: usize) -> io::Result<Option<Vec<f32>>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = read_exact_len(path, n * 4)?;
+    Ok(Some(
+        raw.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect(),
+    ))
 }
 
 impl Run {
@@ -481,19 +532,8 @@ impl Run {
 
         // Absent is allowed and short is not: a missing `npk.bin` is a run without the tier, while a
         // file of the wrong length is a corrupt one and would draw one pool over another's columns.
-        let npk_path = dir.join("npk.bin");
-        let npk = if npk_path.exists() {
-            let raw = read_exact_len(&npk_path, cols * NPK_PLANES * 4)?;
-            Some(
-                raw.as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|b| f32::from_le_bytes(*b))
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let npk = read_f32s(&dir.join("npk.bin"), cols * NPK_PLANES)?;
+        let soil_water = read_f32s(&dir.join("soil_water.bin"), cols)?;
 
         Ok(Fields {
             moisture,
@@ -506,6 +546,7 @@ impl Run {
             grass,
             shrub,
             npk,
+            soil_water,
         })
     }
 }
@@ -562,6 +603,12 @@ impl Fields {
                     .copied()
                     .unwrap_or(0.0)
             }
+            Overlay::SoilWater => self
+                .soil_water
+                .as_ref()
+                .and_then(|v| v.get(c))
+                .copied()
+                .unwrap_or(0.0),
             // Standing water is not in `Fields` and never can be: it is per **ground cell**, on the
             // bundle's finer grid, and every field here is per ecology column. [`Ponds`] reads it,
             // and `apply_world_state` routes the water overlay there instead of here.
@@ -581,7 +628,9 @@ impl Fields {
         let mut out = vec![0u8; d.columns()];
         let (mut min, mut max, mut sum) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f64);
         let mut n = 0usize;
-        let nutrient = o.nutrient().is_some();
+        // Soil water leaves the no-soil columns out of its stats too, for the same reason: a roof
+        // holds no soil water, and it is not the driest lawn (shot G8).
+        let nutrient = o.nutrient().is_some() || o == Overlay::SoilWater;
         for y in 0..d.y {
             for x in 0..d.x {
                 let v = self.value(o, d, x, y);
@@ -596,6 +645,8 @@ impl Fields {
                     // Crowding is the third overlay with a categorical bottom band and a ramp above
                     // it, and it is log (shot S7, [`crowding_band`]).
                     Overlay::Crowding => crowding_band(v, s),
+                    // Soil water is linear above a "none here" band 0 (shot G8).
+                    Overlay::SoilWater => linear_band_above_none(v, s),
                     // The nutrients are water's shape: none is off the ramp, the rest log10.
                     _ if nutrient => log10_band(v, s),
                     _ => band_of(v, s),
@@ -823,6 +874,23 @@ pub fn log10_band(v: f32, s: &Scale) -> u8 {
     let (lo, hi) = (s.lo.max(f32::MIN_POSITIVE), s.hi);
     let t = if hi > lo {
         (v.max(lo).log10() - lo.log10()) / (hi.log10() - lo.log10())
+    } else {
+        1.0
+    };
+    (first + (t.clamp(0.0, 1.0) * span).round() as usize).min(BANDS - 1) as u8
+}
+
+/// Band 0 for nothing at all, and a linear ramp over `s` from band 1 up: soil water's shape (shot G8).
+/// A column holding no water is one with no soil -- a roof, paving -- or one wrung perfectly dry,
+/// and either way it is not the bottom of a millimetre ramp.
+pub fn linear_band_above_none(v: f32, s: &Scale) -> u8 {
+    if v <= 0.0 {
+        return WATER_DRY;
+    }
+    let first = WATER_DRY as usize + 1;
+    let span = (BANDS - first - 1) as f32;
+    let t = if s.hi > s.lo {
+        (v - s.lo) / (s.hi - s.lo)
     } else {
         1.0
     };

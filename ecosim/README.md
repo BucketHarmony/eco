@@ -78,8 +78,9 @@ its units, and the bundle's `size_m` sets `[world] width` and `depth`. The groun
 (0.5 m in the Capitol bundle), and is carried at full resolution in the world state. A column's
 surface layer is `[bundle] base_z + round(the mean ground height under it)`; it is Rock when more
 than half of its ground cells are sealed (`roof`, `asphalt`, `concrete`), Water when more than half
-are `water`, otherwise soil. A roof shades the columns north of it, `[bundle] shade_slope` columns
-per metre of height.
+are `water`, otherwise soil. Buildings shade the ground by a light budget computed once at load
+(shot G9): the sun walked through the day at the bundle's latitude in each `[sun] season_samples`
+slice of the year, plus the share of sky a column can see, written to `world/sun.bin`.
 
 A trunk needs more than a plantable column: no tree may root in a column any roof cell touches at
 all, however few (shot G12). A building outline rarely follows the ecology grid, so the columns

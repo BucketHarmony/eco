@@ -174,3 +174,14 @@ The GitHub CI job `ecosim-bench` runs it and fails when a world is more than 20%
 The baseline is 2827 ticks/s at 64×64 and 858 at 256×64 (CI run 35468533390). The runner is steady: criterion's interval on 13 samples of 64×64 was 705–708 ms. The bench step took 37 s and the whole job 1 min 36 s, well under the 3-minute limit.
 
 For reference, pinned runs on this machine give about 4000 ticks/s at 64×64 and 1200 at 256×64. Unpinned, a long bench run lands on an E-core and reads 1.5–3× lower, so a local `just bench` compared against the CI baseline doesn't mean much.
+
+## Shot G9 — the sun budget at load
+
+The Capitol's light budget (`src/sun.rs`) is computed once when the bundle loads: 4 season slices ×
+9 sun positions plus 16 sky azimuths, each a horizon walk over the 512×512 ground grid from every
+ecology column. Load went from about 150 ms to 1.6 s on this machine. The first version took 3.1 s;
+skipping 16×16 blocks of ground cells whose tallest roof is below the ray brought it to 1.96 s, and
+walking each sky azimuth once for all its elevation rings to 1.6 s, `sun.bin` byte-identical at every
+step. `day_samples = 1` loads in 767 ms, so most of the cost is the sun, not the sky. The
+20000-tick Capitol reference run took 30.4 s against 30.8 s for the commit before: relighting every
+column four times a year costs less than the noise between two runs. Noise worlds build no budget.

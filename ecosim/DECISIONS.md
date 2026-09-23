@@ -2570,3 +2570,87 @@ or over the crowding scale's top.
 
 `ecoview-native`'s tests pass against the regenerated fixtures, 109 in `mesh_golden`. That crate was
 not edited.
+
+## Shot G9 — a sun that moves
+
+The prompt is `overnight/shots/G9-sun-path.md`. The fixed 45° sun of shot G2 (`World::shade_top`,
+`bundle.sun_altitude_deg`; the G1, G4c and S3 entries above say what it was) is removed, not kept
+behind a switch. `src/sun.rs` computes a light budget per ecology column per season slice once at
+load. `sweeps/shotG9/FINDINGS.md` has the measurements.
+
+**The calendar.** Tick 0 is the spring equinox, as in ecoview-native's `sky.rs`, and the phase of the
+year is `(tick mod climate.year_len) / year_len`. Declination is `23.44° × sin(2π × phase)`, which is
+within a degree of the real one and exact at the four dates the default samples. Slice `k` of `N`
+is centred on phase `k/N`, and a tick belongs to the nearest centre. So at `N = 4` the slices are the
+equinoxes and solstices, and the light changes at ticks 500, 1500, 2500 and 3500 of each year,
+halfway between them.
+
+**The sun through the day.** `day_samples` hour angles at the midpoints of equal steps between
+sunrise and sunset (`cos H0 = −tan φ tan δ`), so no sample sits on the horizon. A position counts
+with weight `sin(altitude)`, the beam on level ground. `beam_fraction` is the weighted share of
+positions whose ray the buildings do not block. Polar day and night fall out of the clamp on
+`cos H0`; the reference site never meets either.
+
+**The sky.** An evenly bright sky in 16 azimuths and three elevation bands, 0–30°, 30–60° and
+60–82.5°, each ring weighted by `sin²(top) − sin²(bottom)` (the share of the cosine-weighted
+hemisphere it holds) and blocked if the horizon angle in its azimuth is above the band's middle.
+The cap above 82.5° always counts as open. That cap is 1.7% of the sky and is why no open column is
+ever black: a courtyard between high walls keeps a few percent, and the darkest plantable Capitol
+column keeps 6.1%. A roof over the column is handled separately (below), so the cap does not
+light ground under a roof.
+
+**How a ray is blocked.** A column's eye is the mean ground height of its ground cells. The walk
+goes out from the column's centre over the ground grid, a cell at a time along the ray, and asks
+whether a building top (`ground_h + building_h`) is above the ray's height there. It skips the
+column's own cells, stops at the grid's edge (the world outside the crop is open ground), and stops
+as soon as the ray is above the tallest top in the world. A 16×16-cell block maximum skips empty
+ground. A sky azimuth is walked once for the highest horizon angle it meets, and each ring compares
+against that.
+
+**Normalised to an open column.** The byte is `255 × (d × sky + (1 − d)(1 − c) × beam)`, as the
+prompt writes it, and `meta.json`'s `world.sun.open` is the same with sky and beam at 1 (179 at the
+defaults). The light field and crowns use `byte / open`, so an unshaded column is exactly 1.0 and
+the voxel light on it is what it was before. That is what keeps every noise world, and every
+column on the Capitol that nothing shades, byte-identical: cloud cover already dims the whole
+world equally, and applying it to the light field as well would have moved every tree's light on
+every world, which this shot was not asked for. `cloud_cover` and `diffuse_fraction` therefore
+change only how much shade a building casts relative to open ground.
+
+**A roof over the column.** A column part-covered by roof cells has its budget multiplied by the
+share of ground cells no roof covers, which is what `shade_top` did for its own column. A column
+wholly under a roof is 0. It is still Rock, so nothing grows there either way.
+
+**The budget is per column, not per height.** A crown above a low roof's line is charged the same
+budget as the ground under it. The prompt asks for a column budget; a height-resolved one would be
+`z` times bigger for the few crowns that stand next to buildings. `trees::crown_light` takes the mean
+budget over the crown's footprint.
+
+**Latitude.** A bundle that carries `latitude_deg` (S9) uses it. `sun.latitude` (42.7, Lansing) is
+used only by a bundle without one. A noise world builds no budget at all, since it has no
+buildings, so the latitude there is never read. `cloud_cover = 0.5` is from NOAA NCEI's Comparative
+Climatic Data, "Sunshine – Average Percent of Possible", about 50% annual for Lansing.
+
+**In the run directory.** `world/sun.bin` is `slices` planes of `x × y` bytes, slice-major, and
+`meta.json`'s `world.sun` is `{file, slices, open, tick_of_year, latitude_deg}`. Only a bundle world
+writes it; a noise world has `world.sun: null` and no file. Adding the key does not bump
+`format_version`.
+
+**When the light is recomputed.** `Sim::update_sun` runs after producers and before trees in the
+tick. When the slice has changed, every column's light is recomputed with its canopy, as a tree
+death does for one column. The tick-order line in CLAUDE.md is unchanged: this is part of the light
+field's upkeep, not a new phase, and it draws no random numbers.
+
+**Leaf-off is not in the budget.** G10's deciduous trees draw less in winter, but a bare crown still
+shades in the light field. The budget is buildings only.
+
+**Two tests re-pinned, both because the Capitol's light moved.** The pipes-off identity
+`capacity_scale_zero_cuts_the_capitol_to_the_pipes_off_manifest` now checks a new manifest,
+`tests/data/capitol-mini-manifest-G9-pipes-off.sha256`, cut the same way from this commit;
+`capitol-mini-manifest-preG6.sha256` stays as history. The animals fixture's literals in
+`tests/bundle.rs` moved with the re-cut fixture, and each carries a comment.
+
+**A pre-existing proptest failure, found and not fixed.** Run once without `PROPTEST_RNG_SEED`,
+`prop_handling_bounds_kills` failed on a random case, and it fails identically at 92db8fc, the
+commit before this shot. The justfile's pinned seed does not reach it, so CI is green. Animals are
+parked, and the case is in the gitignored `proptest-regressions/`, so it is named here rather than
+fixed in a shot about light.

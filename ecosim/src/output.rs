@@ -88,6 +88,22 @@ struct WorldMeta<'a> {
     /// first number of a `pipe` event is an index into this list. Empty, not omitted, on a world
     /// with none.
     pipes: &'a [crate::bundle::Pipe],
+    /// The shape of `world/sun.bin`, the annual light budget buildings leave each column (shot G9);
+    /// `null` on a noise world, which has no buildings and writes no such file.
+    sun: Option<SunMeta>,
+}
+
+/// `meta.json`'s `world.sun`: how to read `world/sun.bin`. The file is `slices` planes of x·y bytes
+/// (the ecology grid, `dims`), x-fastest, slice-major. Plane k is the part of the year centred on
+/// `tick_of_year[k]`, the tick within a `climate.year_len` year (0 is the spring equinox), and a
+/// column's light there is its byte over `open`, the byte of a column nothing shades.
+#[derive(Serialize)]
+struct SunMeta {
+    file: &'static str,
+    slices: usize,
+    open: u8,
+    tick_of_year: Vec<u32>,
+    latitude_deg: f64,
 }
 
 impl<'a> WorldMeta<'a> {
@@ -102,6 +118,15 @@ impl<'a> WorldMeta<'a> {
             media: g.media.iter().map(|m| m.name()).collect(),
             latitude_deg: bundle.and_then(|b| b.latitude_deg),
             pipes: &sim.world.pipes,
+            sun: sim.world.sun.as_ref().map(|b| SunMeta {
+                file: "sun.bin",
+                slices: b.slices,
+                open: b.open,
+                tick_of_year: (0..b.slices)
+                    .map(|k| (b.phase(k) * f64::from(sim.params.climate.year_len)).round() as u32)
+                    .collect(),
+                latitude_deg: b.latitude_deg,
+            }),
         }
     }
 }
@@ -581,10 +606,15 @@ fn write_meta_info(sim: &Sim, info: &RunInfo, run_dir: &Path) -> io::Result<()> 
 
 /// Write the run root's `world/` directory (format version 4): the ground grid's height, medium
 /// and building fields and the scene's pipes. A bundle run copies its own files, so its bytes are
-/// the bundle's; a noise world writes the 1 m grid its columns mirror, and no pipes.
+/// the bundle's, and adds `sun.bin`, the light budget (shot G9); a noise world writes the 1 m grid
+/// its columns mirror, no pipes and no budget.
 pub fn write_world_dir(world: &crate::world::World, bundle: Option<&Bundle>, run_dir: &Path) -> io::Result<()> {
     if let Some(b) = bundle {
-        return b.write_world_dir(run_dir);
+        b.write_world_dir(run_dir)?;
+        if let Some(sun) = &world.sun {
+            fs::write(run_dir.join("world").join("sun.bin"), &sun.bytes)?;
+        }
+        return Ok(());
     }
     let dir = run_dir.join("world");
     fs::create_dir_all(&dir)?;
@@ -1183,9 +1213,9 @@ mod tests {
     /// skips it from the expectation too.
     #[test]
     fn meta_json_names_every_params_section() {
-        const SECTIONS: [&str; 21] = [
+        const SECTIONS: [&str; 22] = [
             "animals", "bundle", "climate", "cover", "disease", "fire", "grass", "grazer", "heredity", "hunter",
-            "hydro", "medium", "npk", "pipes", "rain", "rng", "schedule", "season", "shrub", "tree", "world",
+            "hydro", "medium", "npk", "pipes", "rain", "rng", "schedule", "season", "shrub", "sun", "tree", "world",
         ];
         let dir = scratch_dir();
         run(Params::load_square(), 7, 100, 100, &[], &dir).unwrap();

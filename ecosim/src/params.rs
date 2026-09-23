@@ -51,6 +51,10 @@ pub struct Params {
     /// `[bundle]`. Always written to `meta.json`, even at its defaults (shot S2).
     #[serde(default)]
     pub bundle: BundleParams,
+    /// `[sun]`: the sun that moves and the light budget per column (shot G9). Always written to
+    /// `meta.json`, even at its defaults (shot S2's rule).
+    #[serde(default)]
+    pub sun: SunParams,
     /// `[animals]`. Always written to `meta.json`, even at its defaults (shot S2).
     #[serde(default)]
     pub animals: AnimalsParams,
@@ -132,11 +136,6 @@ pub struct BundleParams {
     /// Ecology layers under the bundle's lowest ground: a column's surface layer is
     /// `base_z + round(mean ground height)`, in 1 m layers.
     pub base_z: u8,
-    /// Altitude of the fixed sun above the horizon, in degrees; it sits due south, so a roof of
-    /// height h shades `h / tan(altitude)` columns north of it (shot G4c: this was `shade_slope`,
-    /// that cotangent itself). 0, or 90 and above, turns building shade off. The sun that moves
-    /// across the day and the year is backlog row G9.
-    pub sun_altitude_deg: f32,
     /// Scene height in metres that maps onto `tree.mature_age` when the bundle's trees are planted
     /// (shot G3): the height of a mature sim canopy above the ground it stands on.
     pub tree_mature_height: f32,
@@ -156,12 +155,39 @@ impl Default for BundleParams {
     fn default() -> Self {
         BundleParams {
             base_z: 8,
-            sun_altitude_deg: 45.0,
             tree_mature_height: 3.0,
             tree_tall_height: 20.0,
             tree_tall_age_years: 0.75,
             tree_move_radius: 2.0,
         }
+    }
+}
+
+/// The sun that moves (shot G9, `src/sun.rs`): a light budget per column from the sun's path
+/// over the day and the year. Only a world with buildings -- a bundle world -- has anything to
+/// shade; a noise world's light is the open sky's whatever these are.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SunParams {
+    /// Degrees north of the equator (negative south). A bundle that carries its own
+    /// `latitude_deg` uses that instead; this is the latitude of a world that has none. Like every
+    /// key here it is taken as given and clamped where it is used: a latitude past a pole is the
+    /// pole, a share outside 0 to 1 is the nearer end, and 0 samples is 1.
+    pub latitude: f32,
+    /// Mean share of daylight lost to cloud, 0 to 1.
+    pub cloud_cover: f32,
+    /// Sun positions per sampled day, sunrise to sunset.
+    pub day_samples: u32,
+    /// Sampled days per year, evenly spaced from the spring equinox: 4 is the two equinoxes and the
+    /// two solstices. The run's light follows the slice whose day is nearest.
+    pub season_samples: u32,
+    /// Share of daylight that arrives from the whole sky rather than straight from the sun, 0 to 1.
+    pub diffuse_fraction: f32,
+}
+
+impl Default for SunParams {
+    fn default() -> Self {
+        SunParams { latitude: 42.7, cloud_cover: 0.5, day_samples: 9, season_samples: 4, diffuse_fraction: 0.4 }
     }
 }
 
@@ -928,16 +954,6 @@ impl Params {
     /// Beer-Lambert transmittance `exp(-k·LAI)` each layer of canopy applies (shot G4c).
     pub fn canopy_extinction(&self) -> f32 {
         (self.world.canopy_k * self.world.canopy_lai).max(0.0)
-    }
-
-    /// Shadow length in columns per metre of building height, `1 / tan(sun_altitude_deg)`; 0 (no
-    /// shade) at an altitude of 0, or of 90° and up (shot G4c; it was the parameter itself).
-    pub fn shade_slope(&self) -> f32 {
-        let a = self.bundle.sun_altitude_deg as f64;
-        if !(0.0..90.0).contains(&a) || a == 0.0 {
-            return 0.0;
-        }
-        (1.0 / libm::tan(a.to_radians())) as f32
     }
 
     /// Ticks between two events that happen `per_year` times a year, from `climate.year_len`:

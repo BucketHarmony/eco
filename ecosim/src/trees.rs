@@ -121,6 +121,26 @@ impl Sim {
         zs
     }
 
+    /// Move the light field to the season slice tick `t` falls in (shot G9), relighting every column
+    /// when the slice changes and doing nothing otherwise: four times a year at the defaults. A
+    /// noise world has no light budget, so this never touches it.
+    pub fn update_sun(&mut self, t: u32) {
+        let Some(k) = self.world.sun.as_ref().map(|s| s.slice_of(t, self.params.climate.year_len)) else {
+            return;
+        };
+        if k == self.world.sun_slice {
+            return;
+        }
+        self.world.sun_slice = k;
+        let (extinction, d) = (self.params.canopy_extinction(), self.world.dims);
+        for y in 0..d.wy {
+            for x in 0..d.wx {
+                let zs = self.canopy_z(x as i32, y as i32);
+                self.world.set_column_light(x, y, &zs, extinction);
+            }
+        }
+    }
+
     /// Recompute light and canopy cover for the 3×3 columns around a trunk.
     pub fn refresh_canopy_columns(&mut self, x: u8, y: u8) {
         let (extinction, d) = (self.params.canopy_extinction(), self.world.dims);
@@ -405,7 +425,7 @@ pub struct Crown {
     /// Trunk centre, in ecology-grid metres.
     pub y: f32,
     /// Absolute z of the ground the trunk stands on: the first air voxel of its column, so that a
-    /// height in metres above the tree's own ground and a `shade_top` are the same quantity.
+    /// height in metres above the tree's own ground and an absolute voxel z are the same quantity.
     pub ground: f32,
     /// Height of the tree in metres.
     pub height: f32,
@@ -511,10 +531,11 @@ impl Sim {
     ///    crown. That is a mean-field approximation and the only modelling liberty here -- it is
     ///    exact for one neighbour and for neighbours that do not overlap each other, and it errs
     ///    towards too dark when several cover the same side.
-    /// 2. **Buildings.** A crown standing in a roof's shadow gets nothing where the shadow reaches
-    ///    its middle, which is what `set_column_light` does to a voxel below `shade_top`. This term
-    ///    is the share of the footprint's columns lit at that height, and it is exactly 1 in a noise
-    ///    world, which has no buildings.
+    /// 2. **Buildings.** The mean over the footprint's columns of the share of the open sky's
+    ///    light the buildings leave them in the current season slice ([`World::sun_factor`](crate::world::World::sun_factor), shot
+    ///    G9) -- the same factor `set_column_light` applies to a whole column. It is exactly 1 in a
+    ///    noise world, which has no buildings. The budget is taken at the ground, so a crown that
+    ///    stands above a low roof's shadow is still charged for it (DECISIONS.md, shot G9).
     ///
     /// It draws nothing from the RNG and writes no field: it is read at snapshot time and published,
     /// and the ecology is untouched by it (DECISIONS.md, shot S3).
@@ -547,7 +568,7 @@ impl Sim {
         }
         // 2. Buildings, which only a bundle world has. The trunk's own column always counts, so a
         // crown of no radius is still asked whether it stands in a shadow.
-        let (mut cols, mut lit) = (0u32, 0u32);
+        let (mut cols, mut lit) = (0u32, 0.0f32);
         let r = me.radius.max(0.0);
         let span = r.ceil() as i32;
         for cy in ty - span..=ty + span {
@@ -557,11 +578,11 @@ impl Sim {
                     continue;
                 }
                 cols += 1;
-                lit += u32::from(f32::from(self.world.shade_top[d.cidx(cx as usize, cy as usize)]) <= mid);
+                lit += self.world.sun_factor(d.cidx(cx as usize, cy as usize));
             }
         }
         if cols > 0 {
-            light *= lit as f32 / cols as f32;
+            light *= lit / cols as f32;
         }
         light.clamp(0.0, 1.0)
     }
@@ -898,6 +919,63 @@ mod tests {
         assert_eq!(sim.world.surface_light(cidx(30, 30)), 255, "saplings cast no shade");
     }
 
+    // ---- Shot G9: the light field follows the season slice ----
+
+    /// A 32 m bundle world with a 12 m block, two mature trees just north of it, and nothing else.
+    fn sun_sim() -> Sim {
+        use crate::bundle::tests::{build, bundle_params, flat_bundle};
+        let mut b = flat_bundle(32, 2);
+        for x in 12..=15 {
+            build(&mut b, x, 10, 12.0);
+        }
+        let mut p = bundle_params(&b);
+        p.tree.min_spacing = 1;
+        p.hydro.enabled = false;
+        p.npk.enabled = false;
+        let world = crate::world::World::from_bundle(&b, &p).unwrap();
+        let mut sim = Sim::with_bundle(p, rand::SeedableRng::seed_from_u64(9), world, &b).0;
+        let age = sim.params.tree_ages().tall_import;
+        sim.plant_tree(13, 13, age);
+        sim.plant_tree(16, 16, age);
+        sim
+    }
+
+    /// The light field is lit by the slice a tick falls in, and moving to a new slice relights every
+    /// column exactly as a fresh recompute would, canopy and all. Winter's low sun throws the block's
+    /// shadow further north than summer's; a tick inside the current slice changes nothing.
+    #[test]
+    fn the_light_field_follows_the_season() {
+        let mut sim = sun_sim();
+        let year = sim.params.climate.year_len;
+        assert_eq!(sim.world.sun_slice, 0, "tick 0 is the spring equinox");
+        let spring = sim.world.light.clone();
+        sim.update_sun(1);
+        assert_eq!(sim.world.light, spring, "a tick in the same slice relights nothing");
+        let north_of_block = |sim: &Sim| -> u32 {
+            (11..20).map(|y| u32::from(sim.world.surface_light(sim.world.dims.cidx(14, y)))).sum()
+        };
+        sim.update_sun(year / 4);
+        assert_eq!(sim.world.sun_slice, 1);
+        let summer = north_of_block(&sim);
+        sim.update_sun(3 * year / 4);
+        assert_eq!(sim.world.sun_slice, 3);
+        let winter = north_of_block(&sim);
+        assert!(winter < summer, "winter {winter} is darker north of the block than summer {summer}");
+        // The relit field is what a from-scratch recompute gives.
+        let got = sim.world.light.clone();
+        let (d, extinction) = (sim.world.dims, sim.params.canopy_extinction());
+        for y in 0..d.wy {
+            for x in 0..d.wx {
+                let zs = sim.canopy_z(x as i32, y as i32);
+                sim.world.set_column_light(x, y, &zs, extinction);
+            }
+        }
+        assert_eq!(got, sim.world.light, "the seasonal relight equals a full recompute");
+        // A year on, the same slice gives the same light.
+        sim.update_sun(year);
+        assert_eq!(sim.world.light, spring, "the spring equinox again");
+    }
+
     // ---- Shot S3: the crown the allometry gives a tree, and the light it receives ----
 
     /// A sim with no trees in which every tree planted keeps the age it is given: `bare_sim` on
@@ -1150,9 +1228,9 @@ mod tests {
         assert!(light[1] < light[0] && light[2] < light[1], "{light:?}");
     }
 
-    /// A building's shadow reaches a crown: `shade_top` above the crown's middle takes that share
-    /// of the footprint's columns to nothing, and a crown clear of it keeps full sun. In a noise
-    /// world `shade_top` is all zeroes, so the term is exactly 1 and nothing below changes there.
+    /// A building's shadow reaches a crown: the crown takes the mean of its footprint's sun
+    /// factors (shot G9), so a footprint wholly out of the sun's reach gets nothing, half of it
+    /// about half, and in a noise world, with no budget at all, the term is exactly 1.
     #[test]
     fn crown_light_regression_a_roof_shadow_over_a_crown() {
         let mut sim = crown_sim();
@@ -1160,32 +1238,28 @@ mod tests {
         let i = plant(&mut sim, 20, 20, age);
         let crowns = sim.crowns();
         assert_eq!(sim.crown_light(i, &crowns), 1.0, "no buildings in a noise world");
-        let mid = crowns.of[i].mid();
+        let cols = sim.world.dims.cols();
+        let mut budget =
+            crate::sun::SunBudget { slices: 1, cols, bytes: vec![200; cols], open: 200, latitude_deg: 42.7 };
 
-        // Shade every column of the footprint to above the crown's middle.
+        // Every column of the footprint out of the light.
         for y in 12..=28 {
             for x in 12..=28 {
-                sim.world.shade_top[cidx(x, y)] = (mid + 1.0) as u8;
+                budget.bytes[cidx(x, y)] = 0;
             }
         }
+        sim.world.sun = Some(budget.clone());
         assert_eq!(sim.crown_light(i, &sim.crowns()), 0.0, "a crown wholly in shadow gets nothing");
 
         // Half of them, and the light halves with the lit share of the footprint.
         for y in 12..=28 {
             for x in 21..=28 {
-                sim.world.shade_top[cidx(x, y)] = 0;
+                budget.bytes[cidx(x, y)] = 200;
             }
         }
+        sim.world.sun = Some(budget);
         let got = sim.crown_light(i, &sim.crowns());
         assert!((0.3..0.7).contains(&got), "half a footprint in shadow: {got}");
-
-        // A shadow that stops below the crown's middle does not reach it.
-        for y in 12..=28 {
-            for x in 12..=28 {
-                sim.world.shade_top[cidx(x, y)] = (mid - 1.0) as u8;
-            }
-        }
-        assert_eq!(sim.crown_light(i, &sim.crowns()), 1.0, "a shadow under the crown is not on it");
     }
 
     /// A dead tree shades nothing: `kill_tree` clears `trunk_at`, which is what the neighbour

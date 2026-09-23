@@ -370,13 +370,6 @@ waterlog_tolerance = 0.4
 # Ecology layers under the bundle's lowest ground: a column's surface layer is base_z + round(its
 # mean ground height in metres), so base_z sets how much soil sits below the lowest ground.
 base_z = 8
-# Building shade: the sun is fixed at this altitude above the horizon, due south, so a roof of
-# height h metres darkens the h/tan(altitude) columns north of it, to a level falling by tan per
-# column. 45 degrees is the old shade_slope of 1.0 exactly, and is Lansing's noon sun near the
-# equinox (47 degrees); 0, or 90 and up, turns shade off. A shaded voxel is fully dark, which is
-# the fixed sun's own approximation: the diffuse sky light that really falls into a building's
-# shadow arrives with the moving sun, backlog row G9 (shot G4c).
-sun_altitude_deg = 45.0
 # Planting the bundle's trees (shot G3). A scene tree's age is piecewise linear in its height,
 # through (0 m, age 0), (tree_mature_height, tree.mature_age_years) and (tree_tall_height,
 # tree_tall_age_years), and flat above: 3 m is a mature sim canopy, 20 m a full-grown street tree.
@@ -386,6 +379,26 @@ tree_tall_age_years = 0.75
 # A scene tree standing on an unplantable column moves to the nearest plantable column within this
 # many columns (metres); past it, it is dropped.
 tree_move_radius = 2.0
+
+[sun]
+# The sun that moves (shot G9, src/sun.rs). Buildings shade by a light budget per column, computed
+# once at load: on each of season_samples days a year (evenly spaced from the spring equinox, so 4
+# is both equinoxes and both solstices) the sun is stepped through day_samples positions from
+# sunrise to sunset, and a column's light for that part of the year is
+#   diffuse_fraction x sky_view + (1 - diffuse_fraction) x (1 - cloud_cover) x beam_fraction
+# over the same with nothing in the way, times the share of the column no roof covers. beam_fraction
+# is the share of the sun's positions that reach the column, weighted by the sine of the sun's
+# altitude; sky_view is the share of an evenly bright sky the buildings leave open. So a shadow
+# sweeps through the day, is longer in winter, and is never black while any sky shows. A noise
+# world has no buildings and its light does not change. The budget is world/sun.bin in the run.
+# latitude is used only by a world that does not carry its own (a bundle's latitude_deg wins).
+latitude = 42.7
+# Lansing's mean percent of possible sunshine is about 50 (NOAA NCEI Comparative Climatic Data,
+# "Sunshine - Average Percent of Possible"), so half of the direct beam is lost to cloud.
+cloud_cover = 0.5
+day_samples = 9
+season_samples = 4
+diffuse_fraction = 0.4
 
 [animals]
 # The animal tier (shot G0). false leaves grazers and hunters out of the run entirely: none are

@@ -368,7 +368,8 @@ impl Sim {
     }
 
     /// Advance one tick, in the fixed order:
-    /// animals → immigration → producers → trees (every `update_every`) → fire → moisture/fertility
+    /// animals → immigration → producers → sun (when the season slice changes, shot G9) → trees
+    /// (every `update_every`) → fire → moisture/fertility
     /// (every 10) → temperature (every 100). The animal phase is skipped outright when
     /// `animals.enabled` is false, so it draws nothing from the RNG.
     /// Snapshots and stats rows are taken by the caller after this returns.
@@ -390,6 +391,7 @@ impl Sim {
         lap(&mut prof, Phase::Immigration);
         self.update_producers(t);
         lap(&mut prof, Phase::Producers);
+        self.update_sun(t);
         if t.is_multiple_of(self.params.tree.update_every) {
             self.update_trees();
         }

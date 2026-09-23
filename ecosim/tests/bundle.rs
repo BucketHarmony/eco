@@ -719,8 +719,10 @@ fn the_animals_fixture_carries_what_an_animals_off_run_cannot() {
     // Shot S11 re-cut this fixture: (9204, 28) was S1's count, before tree crowding read crowns.
     // Shot G5 re-cut it again for the nutrient tier: (9169, 28) was S11's. Shot G10 re-cut it for
     // leaf-off: (9240, 28) was G5's. Shot G6 re-cut it for the storm drains, which move the soil
-    // water the sward grows on near the inlets: (9236, 28) was G10's.
-    assert_eq!((g, h), (9178, 28), "the committed run's animals at tick 2000");
+    // water the sward grows on near the inlets: (9236, 28) was G10's. Shot G9 re-cut it for the
+    // moving sun, which lights the ground north of every building part of the day: (9178, 28) was
+    // G6's.
+    assert_eq!((g, h), (9197, 28), "the committed run's animals at tick 2000");
     assert_eq!(floats, g + h, "every animal position at tick 2000 is a JSON float");
 
     // (3) The crowding an overlay has to survive. A reader that takes the top of its crowding
@@ -735,10 +737,11 @@ fn the_animals_fixture_carries_what_an_animals_off_run_cannot() {
     // for, which is that no scale built from the crowding threshold can show this run. Shot G10's
     // re-cut moved it the other way, to 130 (4x) on 5 patches at or over the top, from G5's 61 on
     // 7: the herd is packed into fewer patches at tick 2000, which is the same point made harder.
-    // Shot G6's re-cut spread it again, to 92 (about 3x) on 10 patches from G10's 130 on 5.
-    assert_eq!((scale_top, busiest), (32, 92));
+    // Shot G6's re-cut spread it again, to 92 (about 3x) on 10 patches from G10's 130 on 5. Shot
+    // G9's moving sun brought it to 72 (2.25x) on 4 patches, still half again over the top.
+    assert_eq!((scale_top, busiest), (32, 72));
     assert!(2 * busiest > 3 * scale_top, "the busiest patch is far over a scale built from {scale_top}");
-    assert_eq!(per_patch.iter().filter(|&&n| n >= scale_top).count(), 10, "patches at or over the scale top");
+    assert_eq!(per_patch.iter().filter(|&&n| n >= scale_top).count(), 4, "patches at or over the scale top");
 
     // The older fixture is untouched: `capitol-mini` still has no animal in it. This one is an
     // addition and not a flip, because flipping it would move every pixel test that reads it.

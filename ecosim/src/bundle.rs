@@ -634,30 +634,36 @@ pub(crate) mod tests {
         assert!(!w.roofed[c(9, 9)] && w.trunk_site_ok(9, 9), "and the open lawn is untouched");
     }
 
+    /// Shot G9: a block's shadow is the moving sun's. At tick 0 (the spring equinox) the columns
+    /// north of it lose light and recover with distance, the ones south of it lose only a little
+    /// diffuse sky, and none that sees the sky is black. The block's own column is under a roof.
     #[test]
     fn a_tall_block_shades_the_columns_north_of_it() {
         let mut b = flat_bundle(16, 2);
         build(&mut b, 5, 5, 6.0);
         let w = world_of(&b);
         let light = |x: usize, y: usize| w.surface_light(w.dims.cidx(x, y));
-        for dy in 1..=5 {
-            assert_eq!(light(5, 5 + dy), 0, "column 5 m north by {dy} is in shadow");
-        }
-        assert_eq!(light(5, 11), 255, "the shadow ends after 6 columns");
-        assert_eq!(light(5, 4), 255, "nothing south of the block is shaded");
-        assert_eq!(light(4, 6), 255, "nor west of it");
-        assert_eq!(light(6, 6), 255, "nor east of it");
+        let north: Vec<u8> = (6..16).map(|y| light(5, y)).collect();
+        assert!(north[0] < light(5, 4), "north of the block is darker than south: {north:?}");
+        assert!(north.iter().all(|&l| l > 0), "no open column is black: {north:?}");
+        assert!(north.windows(2).all(|p| p[0] <= p[1]), "and the loss falls off with distance: {north:?}");
+        assert!(light(12, 12) >= 245, "far from it is nearly open sky: {}", light(12, 12));
+        assert!(light(5, 3) >= 240 && light(3, 5) >= 200 && light(7, 5) >= 200, "south, west and east lose little");
+        assert!(w.sun.as_ref().is_some_and(|s| s.bytes[w.dims.cidx(5, 5)] == 0), "the roof's own column is covered");
     }
 
+    /// Shot S9's latitude reaches the sun: a bundle that carries one is shaded from there, and one
+    /// that does not uses `[sun] latitude`.
     #[test]
-    fn shade_slope_0_turns_building_shade_off() {
+    fn the_sun_stands_over_the_bundle_s_own_latitude() {
         let mut b = flat_bundle(16, 2);
         build(&mut b, 5, 5, 6.0);
-        let mut p = bundle_params(&b);
-        p.bundle.sun_altitude_deg = 0.0;
-        let w = World::from_bundle(&b, &p).unwrap();
-        assert!(w.shade_top.iter().all(|&s| s == 0));
-        assert_eq!(w.surface_light(w.dims.cidx(5, 6)), 255);
+        assert_eq!(world_of(&b).sun.unwrap().latitude_deg, f64::from(bundle_params(&b).sun.latitude));
+        b.latitude_deg = Some(-33.8688);
+        let w = world_of(&b);
+        assert_eq!(w.sun.as_ref().unwrap().latitude_deg, -33.8688);
+        let light = |x: usize, y: usize| w.surface_light(w.dims.cidx(x, y));
+        assert!(light(5, 4) < light(5, 6), "in the southern hemisphere the shadow falls south");
     }
 
     #[test]

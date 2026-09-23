@@ -1,0 +1,33 @@
+Sun: latitude 42.73365, 4 slices at ticks [0, 1000, 2000, 3000], open byte 179, sapling_light 0.5882, 43831 plantable columns
+
+Fixed sun (pre-G9, tick 0): 2056 plantable columns at surface light 0 = 4.69% of plantable
+
+| slice | tick of year | plantable below sapling_light | share | min | 5th pct | mean | shaded at all (<1) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| spring equinox | 0 | 2116 | 4.83% | 0.061 | 0.598 | 0.8992 | 98.25% |
+| summer solstice | 1000 | 1629 | 3.72% | 0.061 | 0.637 | 0.9116 | 99.24% |
+| autumn equinox | 2000 | 2116 | 4.83% | 0.061 | 0.598 | 0.8992 | 98.25% |
+| winter solstice | 3000 | 2690 | 6.14% | 0.061 | 0.553 | 0.8727 | 98.87% |
+| annual mean | - | 1950 | 4.45% | 0.061 | 0.609 | 0.8957 | 99.90% |
+
+Below sapling_light in at least one slice: 2848 (6.50%); in every slice: 1507 (3.44%)
+The 2056 formerly black columns now: annual mean factor min 0.061, mean 0.475, max 0.888; 1191 below sapling_light all year
+Plantable column-slices at byte 0: 0
+
+| tick | G9 trees | pre-G9 trees | G3a trees | G9 canopy cols | pre-G9 canopy cols | G3a canopy cols | G9 canopy % | pre-G9 canopy % |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 79 | 79 | 79 | 711 | 711 | 711 | 1.6% | 1.6% |
+| 10000 | 1492 | 1195 | 602 | 5426 | 2555 | 2173 | 12.4% | 5.8% |
+| 20000 | 2160 | 3207 | 1982 | 10988 | 15886 | 8821 | 25.1% | 36.2% |
+G9 at 20000: 2160 trees (1397 mature, 55 young, 708 sapling); 18 on columns below sapling_light over the year; 45 on columns the fixed sun kept black
+pre-G9 at 20000: 3207 trees (2010 mature, 51 young, 1146 sapling); 24 on columns below sapling_light over the year; 0 on columns the fixed sun kept black
+
+| event | cause | G9 | pre-G9 |
+| --- | --- | --- | --- |
+| germination | - | 13204 | 17807 |
+| tree_death | burnt | 2932 | 1464 |
+| tree_death | crowded | 4256 | 7189 |
+| tree_death | drought | 3800 | 5638 |
+| tree_death | old_age | 135 | 388 |
+
+wrote sweeps/shotG9\sun-budget.png

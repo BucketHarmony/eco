@@ -513,10 +513,16 @@ fn no_pipes_cut_to_the_pre_g6_manifest() {
 ///
 /// `capitol-mini-manifest-preG6.sha256` hashes that fixture as the commit before G6 left it
 /// (d9661e3), `meta.json` and `timing.json` apart (`meta.json` gains `params.pipes` and
-/// `world.pipes`; `timing.json` is wall time). It is never regenerated.
+/// `world.pipes`; `timing.json` is wall time), and this test held it until shot G9. G9 replaced
+/// the fixed sun with the moving one, which relights every shaded column of the Capitol with or
+/// without pipes, so no build after it can write those bytes: the file stays as the record of what
+/// G6 proved, and the pipes-off run is pinned from G9 on by `capitol-mini-manifest-G9-pipes-off`,
+/// cut once in G9's regeneration commit (DECISIONS.md, shot G9). G9 changed nothing about pipes, so
+/// the claim is the same one -- rate 0 consults no drain, adds no pass and logs no event -- held
+/// against the light G9 gives.
 #[test]
 #[cfg_attr(coverage, ignore = "a 256x256 world; runs in `cargo test` and CI step 3, not under llvm-cov")]
-fn capacity_scale_zero_cuts_the_capitol_to_the_pre_g6_manifest() {
+fn capacity_scale_zero_cuts_the_capitol_to_the_pipes_off_manifest() {
     use ecosim::bundle::Bundle;
     use ecosim::output::{run_with, RunOptions, BUNDLE_FORMAT_VERSION};
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -531,7 +537,7 @@ fn capacity_scale_zero_cuts_the_capitol_to_the_pre_g6_manifest() {
     let got = hash_run(&dir, common::without_pipes);
     let events = fs::read_to_string(dir.join(EVENTS_FILE)).unwrap();
     assert!(!events.contains(",pipe,"), "a pipe event at rate 0");
-    assert_same_manifest(&read_manifest("capitol-mini-manifest-preG6.sha256"), &got);
+    assert_manifest("capitol-mini-manifest-G9-pipes-off.sha256", &got);
     fs::remove_dir_all(&dir).unwrap();
 }
 

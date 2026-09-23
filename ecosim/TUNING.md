@@ -796,3 +796,17 @@ reference run pass every `ecosim check` line, run serially (run in parallel with
 2, 3 and 42 failed only the wall-clock line, at 90.7–100.6 s, which is the machine and not the
 model).
 
+
+## Shot G9 — the sun that moves
+
+| Parameter | Before | After | Kind | Why |
+|---|---|---|---|---|
+| `bundle.sun_altitude_deg` | 45.0 | **removed** | replaced | The fixed sun due south is gone; the prompt says replace, not add. |
+| `sun.latitude` | — | 42.7 | new | Lansing. Used only by a bundle without its own `latitude_deg`; the Capitol carries 42.73365. |
+| `sun.cloud_cover` | — | 0.5 | new, from data | NOAA NCEI Comparative Climatic Data: Lansing sees about 50% of possible sunshine over the year. |
+| `sun.day_samples` | — | 9 | new, the prompt's | Sun positions per day. 1 loads in 767 ms but throws one shadow a day. |
+| `sun.season_samples` | — | 4 | new, the prompt's | Both equinoxes and both solstices. |
+| `sun.diffuse_fraction` | — | 0.4 | new, the prompt's | Share of daylight from the sky rather than the beam. |
+
+Nothing was tuned. The Capitol reference run passes every `ecosim check` line at these values;
+seeds 1, 2 and 3 on the strip are byte-identical to the commit before.

@@ -2,6 +2,7 @@
 
 use crate::bundle::{Bundle, Ground, Medium, Pipe};
 use crate::params::Params;
+use crate::sun::SunBudget;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 
@@ -138,9 +139,11 @@ pub struct World {
     /// Walking distance (8-connected steps over soil) from each column to the nearest soil
     /// column of each patch: `patch_dist[p * cols + c]`, `UNREACHABLE` if there is no path.
     pub patch_dist: Vec<u16>,
-    /// Lowest z per column that a building does **not** shade: voxels below it are dark whatever
-    /// the canopy does. 0 (nothing shaded) in a noise world, which has no buildings.
-    pub shade_top: Vec<u8>,
+    /// The annual light budget buildings leave each column (shot G9, `src/sun.rs`); `None` in a
+    /// noise world, which has no buildings and whose every column is open sky.
+    pub sun: Option<SunBudget>,
+    /// The season slice of `sun` the light field is currently lit by.
+    pub sun_slice: usize,
     /// The ground grid at full resolution: the bundle's, or a 1 m mirror of the ecology grid in a
     /// noise world (all soil, except its water columns).
     pub ground_grid: Ground,
@@ -271,41 +274,6 @@ pub fn generate_heights(params: &Params, rng: &mut ChaCha8Rng) -> Vec<u8> {
 /// reaches a voxel (shot G4c), so it is still the 0-255 byte `light.bin` has always held.
 pub const FULL_SUN: u8 = 255;
 
-/// Shade cast by roofs, as `World::shade_top`.
-///
-/// The sun sits due south at a fixed altitude, so a roof whose top is at absolute z `t` darkens the
-/// columns north of it: `dy` columns away, the grazing ray is at `t − dy / shade_slope`, and every
-/// voxel at or below it is dark, so the shadow ends after `shade_slope × height` columns.
-/// `shade_slope = 1` is a 45° sun. The roof's own column is dark to its full height, so a building
-/// is opaque where it stands. At 0 nothing is shaded and the field stays all zeroes, as it is in a
-/// noise world.
-fn building_shade(d: Dims, heights: &[u8], building: &[f32], shade_slope: f32) -> Vec<u8> {
-    let mut shade = vec![0u8; d.cols()];
-    if shade_slope.is_nan() || shade_slope <= 0.0 {
-        return shade;
-    }
-    let top_z = (d.wz - 1) as f32;
-    for y in 0..d.wy {
-        for x in 0..d.wx {
-            let bh = building[d.cidx(x, y)];
-            if bh <= 0.0 {
-                continue;
-            }
-            let top = heights[d.cidx(x, y)] as f32 + bh;
-            let reach = (bh * shade_slope).floor().min(d.wy as f32) as usize;
-            for dy in 0..=reach {
-                if y + dy >= d.wy {
-                    break;
-                }
-                let blocked = ((top - dy as f32 / shade_slope).floor() + 1.0).clamp(0.0, top_z) as u8;
-                let t = d.cidx(x, y + dy);
-                shade[t] = shade[t].max(blocked);
-            }
-        }
-    }
-    shade
-}
-
 impl World {
     /// Generate terrain from the seeded RNG and build the world.
     pub fn generate(params: &Params, rng: &mut ChaCha8Rng) -> World {
@@ -316,15 +284,14 @@ impl World {
     /// Build materials, column classes and initial (canopy-free) light from terrain heights, in the
     /// noise world's way: a rock cap at `rock_top_height` and flooding up to `water_level`.
     pub fn from_heights(heights: &[u8], params: &Params) -> World {
-        World::build(heights, params, None, vec![0; Dims::of(params).cols()])
+        World::build(heights, params, None)
     }
 
     /// The shared builder. `tops` replaces the noise world's height rules with an explicit top per
-    /// column (a bundle world: media decide, not heights), and `shade_top` is the building shade.
-    fn build(heights: &[u8], params: &Params, tops: Option<&[Top]>, shade_top: Vec<u8>) -> World {
+    /// column (a bundle world: media decide, not heights).
+    fn build(heights: &[u8], params: &Params, tops: Option<&[Top]>) -> World {
         let d = Dims::of(params);
         assert_eq!(heights.len(), d.cols());
-        assert_eq!(shade_top.len(), d.cols());
         let wp = &params.world;
         let mut material = vec![AIR; d.voxels()];
         let mut height = vec![0u8; d.cols()];
@@ -385,7 +352,8 @@ impl World {
             class,
             patch_soil,
             patch_dist,
-            shade_top,
+            sun: None,
+            sun_slice: 0,
             ground_grid: Ground { width: d.wx, depth: d.wy, ratio: 1, medium: Vec::new(), media: Medium::ALL.to_vec() },
             ground_h: Vec::new(),
             building_h: vec![0.0; d.cols()],
@@ -412,7 +380,8 @@ impl World {
     /// cells under it)`, filled below exactly as the noise world fills terrain. The media decide
     /// what tops it: Rock when more than half its ground cells are sealed (`roof`, `asphalt`,
     /// `concrete`), otherwise Water when more than half are `water`, otherwise soil. A tie is
-    /// neither. Roofs then cast shade (`building_shade`), and every column a roof cell touches at
+    /// neither. Buildings then shade by the annual light budget ([`SunBudget`], shot G9), at the
+    /// bundle's latitude or `[sun] latitude` when it has none, and every column a roof cell touches at
     /// all is marked `roofed`, which keeps trunks out of it without changing what it is made of
     /// (shot G12). The bundle's dimensions must already be in `params` (`Bundle::apply_to`).
     pub fn from_bundle(b: &Bundle, params: &Params) -> Result<World, String> {
@@ -429,11 +398,10 @@ impl World {
         let (base, top_z, n) = (params.bundle.base_z as i32, (d.wz - 1) as i32, b.cells_per_column());
         let mut heights = vec![0u8; d.cols()];
         let mut tops = vec![Top::Terrain; d.cols()];
-        let mut building = vec![0f32; d.cols()];
         let mut roofed = vec![false; d.cols()];
         for y in 0..d.wy {
             for x in 0..d.wx {
-                let (mut sum, mut sealed, mut water, mut roof) = (0.0f32, 0usize, 0usize, 0.0f32);
+                let (mut sum, mut sealed, mut water) = (0.0f32, 0usize, 0usize);
                 let mut roofs = 0usize;
                 for i in b.ground.cells_of(x, y) {
                     sum += b.ground_h[i];
@@ -441,7 +409,6 @@ impl World {
                     sealed += (m != Medium::Water && !params.medium.get(m).plantable) as usize;
                     roofs += (m == Medium::Roof) as usize;
                     water += (m == Medium::Water) as usize;
-                    roof = roof.max(b.building_h[i]);
                 }
                 let h = base + (sum / n as f32).round() as i32;
                 if !(0..=top_z).contains(&h) {
@@ -460,16 +427,21 @@ impl World {
                 } else {
                     Top::Terrain
                 };
-                building[c] = roof;
                 roofed[c] = roofs > 0;
             }
         }
-        let shade = building_shade(d, &heights, &building, params.shade_slope());
-        let mut w = World::build(&heights, params, Some(&tops), shade);
+        let mut w = World::build(&heights, params, Some(&tops));
         w.ground_grid = b.ground.clone();
         w.ground_h = b.ground_h.clone();
         w.building_h = b.building_h.clone();
         w.roofed = roofed;
+        let lat = b.latitude_deg.unwrap_or(f64::from(params.sun.latitude));
+        w.sun = Some(SunBudget::compute(&params.sun, lat, d.wx, d.wy, &w.ground_grid, &w.ground_h, &w.building_h));
+        for y in 0..d.wy {
+            for x in 0..d.wx {
+                w.set_column_light(x, y, &[], params.canopy_extinction());
+            }
+        }
         w.bundle_world = true;
         w.pipes = b.pipes.clone();
         Ok(w)
@@ -518,24 +490,32 @@ impl World {
         self.surface_light(c) as f32 / FULL_SUN as f32
     }
 
-    /// Recompute one column's light: solids are 0, and so is anything a building shades
-    /// (`shade_top`, always 0 in a noise world); the rest of the air and water gets
-    /// [`FULL_SUN`] × exp(−`extinction` × canopy voxels strictly above), the Beer–Lambert
+    /// Recompute one column's light: solids are 0; the rest of the air and water gets
+    /// [`FULL_SUN`] × the column's share of the open sky's light in the current season slice
+    /// ([`World::sun_factor`], exactly 1 in a noise world) × exp(−`extinction` × canopy voxels
+    /// strictly above), the Beer–Lambert
     /// transmittance of that many layers of canopy (shot G4c; `extinction` is
     /// [`Params::canopy_extinction`](crate::params::Params::canopy_extinction), the optical depth
     /// of one layer). `canopy_z` lists the distinct canopy voxel z values in this column.
     pub fn set_column_light(&mut self, x: usize, y: usize, canopy_z: &[u8], extinction: f32) {
-        let shade = self.shade_top[self.dims.cidx(x, y)] as usize;
+        let sun = FULL_SUN as f32 * self.sun_factor(self.dims.cidx(x, y));
         for z in 0..self.dims.wz {
             let i = self.dims.vidx(x, y, z);
             let m = self.material[i];
-            self.light[i] = if m == SOIL || m == ROCK || z < shade {
+            self.light[i] = if m == SOIL || m == ROCK {
                 0
             } else {
                 let above = canopy_z.iter().filter(|&&cz| cz as usize > z).count() as f32;
-                (FULL_SUN as f32 * libm::expf(-extinction * above)).round() as u8
+                (sun * libm::expf(-extinction * above)).round() as u8
             };
         }
+    }
+
+    /// Column `c`'s share of the open sky's light in the current season slice (shot G9): 1 in a
+    /// noise world and wherever no building is in the way.
+    #[inline]
+    pub fn sun_factor(&self, c: usize) -> f32 {
+        self.sun.as_ref().map_or(1.0, |s| s.factor(self.sun_slice, c))
     }
 
     /// Walking distance from column `c` to patch `p` (see `patch_dist`).
@@ -797,19 +777,6 @@ pub(crate) mod tests {
         let k = Params::load_square().canopy_extinction();
         column_light_formula(&h, 3, 4, &[12, 13, 13], k).unwrap();
         column_light_formula(&h, 3, 4, &[20, 21, 22], 0.35).unwrap();
-    }
-
-    /// The fixed sun is a parameter in degrees since shot G4c, and 45° is the old `shade_slope`
-    /// of 1.0 to the bit, so no building's shadow moved when the unit changed.
-    #[test]
-    fn sun_altitude_45_is_the_old_shade_slope_of_one() {
-        let mut p = Params::load_square();
-        assert_eq!(p.bundle.sun_altitude_deg, 45.0);
-        assert_eq!(p.shade_slope(), 1.0);
-        for (deg, want) in [(0.0, 0.0), (90.0, 0.0), (180.0, 0.0), (-10.0, 0.0), (60.0, 0.57735026)] {
-            p.bundle.sun_altitude_deg = deg;
-            assert_eq!(p.shade_slope(), want, "{deg} degrees");
-        }
     }
 
     /// Row-major index helpers on a strip: every column and voxel index is hit once, and each

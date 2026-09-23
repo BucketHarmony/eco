@@ -17,6 +17,7 @@ pub mod producers;
 pub mod profile;
 pub mod sim;
 pub mod state;
+pub mod sun;
 pub mod sweep;
 pub mod trees;
 pub mod world;

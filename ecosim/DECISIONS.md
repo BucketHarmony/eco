@@ -2654,3 +2654,23 @@ shades in the light field. The budget is buildings only.
 commit before this shot. The justfile's pinned seed does not reach it, so CI is green. Animals are
 parked, and the case is in the gitignored `proptest-regressions/`, so it is named here rather than
 fixed in a shot about light.
+
+## Shot 26 — MODEL.md
+
+**What it is.** `MODEL.md` has one subsection per rule, giving the equation, the parameters, the update rate and the shot that introduced it. The garden model comes first, in the order ground, light and climate, then water (media, storms, soil water, drains), then nutrients, ground cover and fire, then trees. The parked animal tier is last and short, and says it is not the focus. It describes the code as it is. Where a comment or an older document says otherwise, the subsection follows the code and notes the difference.
+
+**What "documented" means to the test.** `tests/model.rs` requires every key's full dotted name, in backticks, somewhere in `MODEL.md`: for example `` `medium.roof.plantable` ``. Backticks are required so that a word in the prose cannot count by accident, and the full dotted path is required so that `tree.npk` does not count for `tree.npk.need_n`. An array, such as a curve or an N/P/K triple, is one key. The keys come from two places, and both are checked:
+- the text of `params.toml`;
+- the loaded `Params` serialized back out, which is what `meta.json` carries. This catches a field that has a serde default but is missing from the file.
+
+The test has a regression sibling, which shows that removing one key's backticks is caught.
+
+**Discrepancies are listed, not fixed.** Reading the code against its comments found 25 items, collected at the end of `MODEL.md`. Examples:
+- `hydro.waterlog_frac` has a stale comment and a serde default of 0.95.
+- `hydro.leach_k` is unread with the nutrient tier on.
+- `medium.water.plantable`, `tree.light[1]` and `hunter.flee_radius` are never read.
+- A few hard-coded weights remain.
+
+None was changed. This is a documentation shot, and fixing several of them (the serde default, the missing-section fallback for `[tree.npk]`) would change what some params files do. A later row can take the list as it stands.
+
+**The bench (item 2), not re-baselined.** No shot since 15a has said that it changed performance on purpose, so `benches/baseline.json` is unchanged. The last CI bench before this shot, run 35807120999 (G9) job `ecosim-bench`, measured 64x64 at 2695.4 ticks/s (−4.6% against 2826.8) and 256x64 at 897.4 ticks/s (+4.6% against 857.8), both inside the 20% gate. The shot also re-ran the bench locally with `cargo bench --bench tick`. It read 1944.7 and 627.2 ticks/s and flagged both as regressions (−31% and −27%). That comparison means nothing: the baseline holds CI-runner numbers (shot 15a), and during the run five other processes were loading this machine and it was not pinned to P-cores (`PERF.md`). CI's bench job on this shot's commit is the check that counts.

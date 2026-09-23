@@ -2,7 +2,7 @@
 
 This is a deterministic, headless voxel ecology simulator (SAD 1).
 - The spec is in `../docs/`.
-- Design calls are in `DECISIONS.md` and parameter history is in `TUNING.md`.
+- Design calls are in `DECISIONS.md` and parameter history is in `TUNING.md`. Every rule the sim runs, with its equation, parameters, update rate and originating shot, is in `MODEL.md`.
 - The sweep results are in `SWEEP_FINDINGS.md` (shot 4), `sweeps/shot5/FINDINGS.md` (the dynamics fixes), `sweeps/shot05/FINDINGS.md` (extinctions by cause), `sweeps/shot09/FINDINGS.md` (fire), `sweeps/shot10/FINDINGS.md` (crowding mortality and the hunter refractory), `sweeps/shot11/FINDINGS.md` (heritable traits) and `sweeps/fork-demo/FINDINGS.md` (a fork with seasonal rain off). The measured coverage is in `COVERAGE.md`.
 - `series.csv` records each tick's animal deaths by species and cause (`starved`, `eaten`, `old_age`, `crowded` from `[disease]`, `burnt`). `ecosim stats` attributes every extinction to the dominant cause over the 500 ticks before it.
 - Each animal carries three heritable traits (`energy_cost_mult`, `flee_distance`, `repro_threshold`), mutated at birth by `heredity.mutation`. `series.csv` ends with their per-species means and standard deviations, and `entities.json` animals carry them. Every species with individuals (grazers, hunters, trees) can immigrate from the world edge when its live count is below `immigration_floor` (default 0, off).

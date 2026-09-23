@@ -2481,3 +2481,92 @@ longer bounds f32 storage rounding, which was never the model's to bound — and
 tolerance; if the operator reads it as a widening, the fix is one hunk in `src/producers.rs` to revert
 and this shot's block reason is this paragraph.
 
+
+## Shot G6 — storm drains
+
+The prompt is `overnight/shots/G6-drain-pipes.md`. A bundle's `pipes.json` has been parsed since G1.
+With this shot it takes water. `sweeps/shotG6/FINDINGS.md` has the measurements.
+
+**Where a drain sits.** An inlet is the ground cell under its `inlet` point, clamped into the grid.
+An outlet is out of the world if its point is off the grid or on an edge cell. The Capitol's four
+outlets are all at exactly 0 or 256 m, on the crop line itself, and a pipe that ends on the boundary
+drains past it. Anywhere else the outlet is the ground cell under the point. Drains are sorted by
+(inlet cell, pipe index), so two pipes on one cell take their shares in `pipes.json` order.
+
+**Capture happens before infiltration, in G4's storm pass.** When the pass reaches an inlet cell,
+its drains take what arrives there, rain and run-on together, up to what each can still take this
+tick. `capacity_m3h × tick hours × pipes.capacity_scale` is converted to millimetres over the inlet
+cell. The overflow then infiltrates, ponds and moves on exactly as it did before. A grate is on the
+surface, so water that reaches it goes down it before the ground there gets any. Most inlets are on
+asphalt anyway, where nothing soaks in.
+
+**The load goes with the water, share for share.** A drain takes the dissolved nitrogen and the
+runoff phosphorus arriving at its cell in the share of the water it took. The share the cell keeps
+is unchanged (`kept` is what infiltrated and ponded, as in G5). What moves on downhill is the rest.
+So the load always sums to what arrived.
+
+**An interior outlet gets a follow-up pass.** Water a pipe delivers inside the world is put down as
+run-on at the outlet cell and routed in another pass over the same flow order. That pass has no
+rain, and it skips every cell that has neither run-on nor load. It stops when no drain has anything
+to deliver. A cell can be visited in more than one pass, so it keeps a running total of what it
+infiltrated this tick (`Hydro::infiltrated`) and never takes more than one tick's infiltration. That
+vector is allocated only when some outlet is inside the world, which none of the Capitol's is.
+
+**A cycle is an error when the world loads.** Pipe A feeds pipe B if B's inlet is on the flow path
+from A's outlet, found by walking `recv` to the edge or to a sink. A depth-first search over that
+graph finds any cycle and names the pipes in it: "pipes.json: the drain network has a cycle, a -> b
+-> a: ...". `Hydro::new` cannot fail, so it stores the message and `Sim::from_bundle` returns it as
+the load error. An acyclic network needs at most one pass per drain, and a debug assert holds the
+loop to that.
+
+**The water ledger keeps its shape.** Pipe water that leaves over the edge is added to
+`ledger.outflow`, next to the surface water that does. A new ledger field would have changed
+`state.bin`'s water section on every run, noise worlds included, and those have no pipes. The same
+holds for the nutrient ledger: pipe N and P that leave over the edge go into its `outflow`, and so
+into the series' `outflow_p`. The series' `outflow_mm` stays the surface flow alone, and the pipes'
+share of what left is the new `pipe_out_edge_mm` column. Captured water counts in `runoff_mm`,
+because it ran off the cell it fell on.
+
+**The pipe event carries the load as well as the water.** The prompt asks for the captured and
+overflow volumes. The row also gives the grams of N and P that went down the pipe, because
+FINDINGS needs pipe against edge nutrients, and the series gives only a per-column P mean rounded to
+four decimals. Volumes are in m³ to match `capacity_m3h`. A storm writes one row per pipe, including
+a pipe that took nothing, so a reader can count storms per pipe without joining against `storm` rows.
+
+**Rate 0.** With `pipes.capacity_scale = 0`, or on a world with no pipes, `route_storm` makes one
+pass and never reads a drain. The check sits outside the cell loop, and so do all the npk and runoff
+expressions, which are bit-identical to the pre-G6 code. Two frozen identities pin this:
+- seed 42 on the strip reproduces `tests/data/s42-manifest-preG6.sha256`, a byte copy of the
+  manifest at d9661e3, once the two pipe columns are cut (`common::without_pipes`, which asserts
+  both are 0);
+- the command behind `fixtures/capitol-mini`, at scale 0, reproduces
+  `tests/data/capitol-mini-manifest-preG6.sha256`, hashed from that fixture as d9661e3 left it,
+  `meta.json` and `timing.json` apart, and logs no `pipe` event.
+
+Both are compared with `assert_same_manifest` and are never regenerated. `common::without_npk` now
+cuts the pipe columns first, so every older frozen identity still holds.
+
+**Capacity stays at 1.** No default changes, and TUNING.md has no G6 entry. The Capitol's pipes
+never fill at the shipped scale: the largest storm any pipe sees is 5.4 m³ against 110 m³ of
+capacity. Turning the scale down to show overflow would tune a knob to make an illustrative scene
+look busier.
+
+**Regenerated, once, in this commit.** These were regenerated with
+`ECOSIM_REGEN_MANIFEST=1 cargo test --release --no-fail-fast`:
+- `tests/data/s42-manifest.sha256`, where only the `series.csv` line moved;
+- `fixtures/s42-mini-v2`, where `series.csv` gains the two columns and `meta.json` gains `params.pipes`
+  and `world.pipes`;
+- `fixtures/capitol-mini`;
+- `fixtures/capitol-animals-mini`.
+
+The Capitol fixtures change beyond that. Their drains take water, so their water, soil water,
+moisture, npk, patch, fertility and state files move, and so do the animals fixture's entities and
+light. `tests/data/s42-check.txt` was restored after the regeneration pass: the only line it had
+changed was the wall-clock one, which read 90318 ms (FAIL) under the parallel test load.
+Three pinned literals in `tests/bundle.rs` moved with the animals fixture. The regeneration pass
+did not catch them, because it read the fixture before rewriting it; the gate did. The herd at tick
+2000 is 9178 grazers, not 9236. The busiest patch holds 92, not 130. And 10 patches, not 5, are at
+or over the crowding scale's top.
+
+`ecoview-native`'s tests pass against the regenerated fixtures, 109 in `mesh_golden`. That crate was
+not edited.

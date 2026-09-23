@@ -192,6 +192,48 @@ fn a_bundle_run_writes_a_format_4_run_dir_that_check_reads() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Forced extinction with the storm drains running at four times their capacity (shot G6): the
+/// trees are forced out by age (`tree.max_age_years=0.2`, below maturity, so none ever seeds), fire
+/// is off, and the synthetic bundle's one drain -- inlet in the pond, outlet over the east edge --
+/// takes what reaches it for the whole run. The run completes 20000 ticks, `ecosim check` reads it,
+/// everything the drain took left over the edge, and the drain keeps logging its storms
+/// after the last tree is gone.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn forced_tree_extinction_with_the_drains_at_four_times_capacity_runs_to_the_end() {
+    let dir = tmp("pipes_extinction_src");
+    write_bundle(&dir);
+    let b = Bundle::load(&dir).unwrap();
+    let (mut p, set) = params(&[
+        "animals.enabled=false",
+        "climate.rain_gradient=0",
+        "pipes.capacity_scale=4",
+        "tree.max_age_years=0.2",
+        "fire.base_rate=0",
+    ]);
+    b.apply_to(&mut p).unwrap();
+    let out = tmp("pipes_extinction_run");
+    let opts = RunOptions { format_version: BUNDLE_FORMAT_VERSION, bundle: Some(&b), ..Default::default() };
+    run_with(p, 7, 20_000, 5_000, &set, &out, opts).unwrap();
+    let rows = ecosim::check::read_series(&out).unwrap();
+    assert_eq!(rows.len(), 20_001, "one row per tick");
+    let gone = rows.iter().position(|r| r.trees == 0).expect("the trees are gone");
+    assert!(rows[gone..].iter().all(|r| r.trees == 0), "no tree comes back");
+    let captured: f32 = rows.iter().map(|r| r.pipes.in_mm).sum();
+    let edge: f32 = rows.iter().map(|r| r.pipes.out_edge_mm).sum();
+    assert!(captured > 0.0, "the drain took nothing");
+    assert!((captured - edge).abs() <= 1e-3 * captured, "an edge outlet delivers all it takes: {captured} {edge}");
+    let events = ecosim::events::parse_events(&fs::read_to_string(out.join("events.csv")).unwrap()).unwrap();
+    let pipes: Vec<_> = events.iter().filter(|e| e.kind == ecosim::events::EventKind::Pipe).collect();
+    let storms = events.iter().filter(|e| e.kind == ecosim::events::EventKind::Storm).count();
+    assert_eq!(pipes.len(), storms, "one pipe row per storm for the one drain");
+    assert!(pipes.iter().any(|e| e.tick as usize > gone), "the drain stopped logging with the trees");
+    let report = check_run(&out).expect("check reads the run");
+    assert!(report.lines.iter().any(|l| l.key == "grass_band"), "check evaluated the plant invariants");
+    fs::remove_dir_all(&dir).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// Spill the roof block over the south half of the columns along its north edge, so each of them is
 /// two ground cells of roof and two of lawn. Returns those columns. This is a building outline that
 /// does not follow the ecology grid, which is the ordinary case on a suburban lot and the case shot
@@ -676,8 +718,9 @@ fn the_animals_fixture_carries_what_an_animals_off_run_cannot() {
     let (g, h, floats, per_patch) = animals_of(&fixture.join("snap_002000"));
     // Shot S11 re-cut this fixture: (9204, 28) was S1's count, before tree crowding read crowns.
     // Shot G5 re-cut it again for the nutrient tier: (9169, 28) was S11's. Shot G10 re-cut it for
-    // leaf-off: (9240, 28) was G5's.
-    assert_eq!((g, h), (9236, 28), "the committed run's animals at tick 2000");
+    // leaf-off: (9240, 28) was G5's. Shot G6 re-cut it for the storm drains, which move the soil
+    // water the sward grows on near the inlets: (9236, 28) was G10's.
+    assert_eq!((g, h), (9178, 28), "the committed run's animals at tick 2000");
     assert_eq!(floats, g + h, "every animal position at tick 2000 is a JSON float");
 
     // (3) The crowding an overlay has to survive. A reader that takes the top of its crowding
@@ -692,9 +735,10 @@ fn the_animals_fixture_carries_what_an_animals_off_run_cannot() {
     // for, which is that no scale built from the crowding threshold can show this run. Shot G10's
     // re-cut moved it the other way, to 130 (4x) on 5 patches at or over the top, from G5's 61 on
     // 7: the herd is packed into fewer patches at tick 2000, which is the same point made harder.
-    assert_eq!((scale_top, busiest), (32, 130));
+    // Shot G6's re-cut spread it again, to 92 (about 3x) on 10 patches from G10's 130 on 5.
+    assert_eq!((scale_top, busiest), (32, 92));
     assert!(2 * busiest > 3 * scale_top, "the busiest patch is far over a scale built from {scale_top}");
-    assert_eq!(per_patch.iter().filter(|&&n| n >= scale_top).count(), 5, "patches at or over the scale top");
+    assert_eq!(per_patch.iter().filter(|&&n| n >= scale_top).count(), 10, "patches at or over the scale top");
 
     // The older fixture is untouched: `capitol-mini` still has no animal in it. This one is an
     // addition and not a flip, because flipping it would move every pixel test that reads it.

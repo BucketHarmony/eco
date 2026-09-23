@@ -147,6 +147,16 @@ n_runoff_frac = 0.1
 # phosphorus and potassium, lands on the patch as ash.
 fire_n_volatilised = 0.9
 
+[pipes]
+# Storm drains (shot G6). Each pipe in the bundle's pipes.json captures the water arriving at its
+# inlet cell -- rain, run-on and roof water -- up to capacity_m3h x the hours in a tick x
+# capacity_scale, and delivers it at its outlet: out of the world when the outlet is on or past the
+# crop edge, as run-on at the outlet cell otherwise. What it cannot take overflows and runs on
+# downhill as before. 0 turns the network off: no capture, no extra routing pass and no pipe event,
+# and the run is byte-identical to the pre-G6 one apart from two always-zero series.csv columns.
+# A noise world has no pipes, so this changes nothing there at any value.
+capacity_scale = 1.0
+
 # The nine media of the scene contract (docs/SCENE-CONTRACT.md), one table each (shot G4).
 # infiltration_mm_h is how fast water soaks in, field_capacity_mm how much plant-available water a
 # column of this medium holds (the available water capacity of its rooting zone: a store of 0 is the

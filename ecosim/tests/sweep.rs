@@ -487,8 +487,52 @@ fn deciduous_off_cuts_to_the_pre_g10_manifest() {
     let mut p = Params::load_default();
     p.tree.deciduous = 0.0;
     run(p, 42, 20_000, 100, &[], &dir).unwrap();
-    let got = hash_run(&dir, |_, b| b);
+    let got = hash_run(&dir, common::without_pipes);
     assert_same_manifest(&read_manifest("s42-manifest-preG10.sha256"), &got);
+}
+
+/// Storm drains at rate 0 (shot G6): seed 42's strip is a noise world with no `pipes.json`, so the
+/// water tier allocates no drain and routes each storm in the one pass it always did. Once the two
+/// pipe columns are cut (`common::without_pipes`, which asserts both are 0) the run is the one the
+/// pre-G6 ecosim wrote, byte for byte.
+///
+/// `s42-manifest-preG6.sha256` is a byte copy of `s42-manifest.sha256` as the commit before G6 left
+/// it (d9661e3). It is compared with `assert_same_manifest`, never `assert_manifest`, so a
+/// regeneration cannot overwrite it.
+#[test]
+#[cfg_attr(coverage, ignore = "full-length run; runs in `cargo test` and CI step 8, not under llvm-cov")]
+fn no_pipes_cut_to_the_pre_g6_manifest() {
+    let got = hash_run(fresh_s42(), common::without_pipes);
+    assert_same_manifest(&read_manifest("s42-manifest-preG6.sha256"), &got);
+}
+
+/// Storm drains at rate 0 on the Capitol (shot G6), the world that has them: with
+/// `pipes.capacity_scale=0` the command that made `fixtures/capitol-mini` writes what it wrote
+/// before G6, once the two pipe columns are cut. No drain is consulted, no pass is added and no
+/// `pipe` event is logged.
+///
+/// `capitol-mini-manifest-preG6.sha256` hashes that fixture as the commit before G6 left it
+/// (d9661e3), `meta.json` and `timing.json` apart (`meta.json` gains `params.pipes` and
+/// `world.pipes`; `timing.json` is wall time). It is never regenerated.
+#[test]
+#[cfg_attr(coverage, ignore = "a 256x256 world; runs in `cargo test` and CI step 3, not under llvm-cov")]
+fn capacity_scale_zero_cuts_the_capitol_to_the_pre_g6_manifest() {
+    use ecosim::bundle::Bundle;
+    use ecosim::output::{run_with, RunOptions, BUNDLE_FORMAT_VERSION};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let b = Bundle::load(&root.join("worlds/capitol")).unwrap();
+    let set: Vec<String> =
+        ["animals.enabled=false", "climate.rain_gradient=0", "pipes.capacity_scale=0"].map(String::from).to_vec();
+    let mut p = Params::load_with(&params_path(), &set).unwrap();
+    b.apply_to(&mut p).unwrap();
+    let dir = tmp("capitol_mini_pipes_off");
+    let opts = RunOptions { format_version: BUNDLE_FORMAT_VERSION, bundle: Some(&b), ..Default::default() };
+    run_with(p, 42, 100, 100, &set, &dir, opts).unwrap();
+    let got = hash_run(&dir, common::without_pipes);
+    let events = fs::read_to_string(dir.join(EVENTS_FILE)).unwrap();
+    assert!(!events.contains(",pipe,"), "a pipe event at rate 0");
+    assert_same_manifest(&read_manifest("capitol-mini-manifest-preG6.sha256"), &got);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A 2-value × 1-seed × 500-tick sweep writes 2 rows and 2 cell CSVs, and each cell equals a

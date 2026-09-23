@@ -132,7 +132,7 @@ All integers little-endian. `meta.json` carries a `format_version: 1`. The rende
 Later versions only add files (`ecosim/DECISIONS.md` has the details). Version 2 adds `state.bin` to each snapshot and `forked_from` to `meta.json`. Version 3 adds `events.csv` (plain CSV; a seed-42 20000-tick run writes about 1.7 MB, so it is not compressed):
 
 - Header `tick,kind,species,patch_x,patch_y,x,y,cause,detail`, then one row per event in the order they happen within the run. Absent fields are empty.
-- `kind` is one of `death`, `birth`, `ignition`, `spread`, `burnout`, `germination`, `tree_death`, `immigration`, `storm` (version 4), or `seed_drop` (reserved, not written yet).
+- `kind` is one of `death`, `birth`, `ignition`, `spread`, `burnout`, `germination`, `tree_death`, `immigration`, `storm` (version 4), `pipe` (shot G6), or `seed_drop` (reserved, not written yet).
 - `species` is `grazer`, `hunter` or `tree`, and empty for the three fire kinds. `patch_x`, `patch_y` are 0–7. `x`, `y` are the column, and empty for fire kinds.
 - `cause`: for `death`, one of `starved`, `eaten`, `old_age`, `crowded`, `burnt`; for `tree_death`, one of `old_age`, `drought`, `crowded`, `burnt`; empty otherwise.
 - `detail`: the entity's id for entity kinds (the newborn's for `birth`); for `spread`, the source patch index `patch_x + 8·patch_y`; empty for `ignition` and `burnout`.
@@ -220,6 +220,27 @@ tick, in grams), `outflow_p` (phosphorus that left the world in runoff this tick
 × field capacity for at least `hydro.waterlog_ticks` ticks). All six are 0 on every tick with the tier
 off. `events.csv` gains no kind, but `tree_death` gains a cause: `waterlog`, a tree killed by standing
 water at its roots.
+
+#### Storm drains (shot G6)
+
+A bundle's `pipes.json` is live. Each inlet is on a ground cell. During a storm it captures what
+arrives there, up to `capacity_m3h` × the tick's hours × `pipes.capacity_scale`, and the rest
+overflows downhill. Its outlet empties the water over the crop edge, or, if the outlet is inside
+the world, puts it down there as run-on. None of this adds a file or moves `format_version`:
+
+- `series.csv` ends with two more columns after the nutrient six. `pipe_in_mm` is the water the
+  drains captured this tick, and `pipe_out_edge_mm` is what they emptied over the edge, both world
+  means in millimetres. Both are 0 on a world without pipes, which includes every noise world, and
+  at `pipes.capacity_scale = 0`.
+- `outflow_mm` stays the surface flow over the edge. `outflow_p` counts the phosphorus that left
+  either way.
+- `events.csv` gains a `pipe` kind, one row per pipe per storm at the inlet's column. Its `detail`
+  is `"<pipe> <captured> <overflow> <n> <p>"`: the pipe's index in `world.pipes`, the water it took
+  and the water that went on past it in m³, and the nitrogen and phosphorus it carried in grams.
+- `meta.json`'s `world` object gains `pipes`, the bundle's list as `pipes.json` gives it (`[]` for a
+  noise world).
+- A network in which one pipe's outlet drains, over the ground, into its own inlet or into the inlet
+  of a pipe upstream of it is rejected when the world loads.
 
 ### Debug loop and tests
 

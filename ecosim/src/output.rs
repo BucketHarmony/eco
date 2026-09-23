@@ -34,11 +34,18 @@ pub const BUNDLE_FORMAT_VERSION: u32 = 4;
 /// the nutrient columns (shot G5), all zero when the nutrient tier is off: the three pools are
 /// means over plantable columns in g/m², `leached_n` and `outflow_p` are what the latest soil
 /// update and the latest storm took away per plantable column, and `waterlogged_frac` is the share
-/// of plantable columns standing wet.
-pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt,patches_burning,total_burnt,grazer_energy_cost_mult_mean,grazer_energy_cost_mult_sd,grazer_flee_distance_mean,grazer_flee_distance_sd,grazer_repro_threshold_mean,grazer_repro_threshold_sd,hunter_energy_cost_mult_mean,hunter_energy_cost_mult_sd,hunter_flee_distance_mean,hunter_flee_distance_sd,hunter_repro_threshold_mean,hunter_repro_threshold_sd,rain_mm,runoff_mm,ponded_mm,soil_water_mm,drainage_mm,outflow_mm,soil_n,soil_p,soil_k,leached_n,outflow_p,waterlogged_frac";
+/// of plantable columns standing wet. The last 2 are the storm-drain columns (shot G6), world means
+/// in millimetres this tick, zero on a world without pipes or with `pipes.capacity_scale` 0: the
+/// water every inlet captured, and the part of it that left the world through a pipe. Captured water
+/// counts as runoff, since it ran off the cell; `outflow_mm` stays what left over the surface, and
+/// the water ledger's outflow sink is `outflow_mm` and `pipe_out_edge_mm` together.
+pub const SERIES_HEADER: &str = "tick,grazers,hunters,trees,grass_mean,shrub_mean,moisture_mean,fertility_mean,detritus_total,temperature,hunter_immigrants,grazer_starved,grazer_eaten,grazer_old_age,grazer_crowded,grazer_burnt,hunter_starved,hunter_eaten,hunter_old_age,hunter_crowded,hunter_burnt,patches_burning,total_burnt,grazer_energy_cost_mult_mean,grazer_energy_cost_mult_sd,grazer_flee_distance_mean,grazer_flee_distance_sd,grazer_repro_threshold_mean,grazer_repro_threshold_sd,hunter_energy_cost_mult_mean,hunter_energy_cost_mult_sd,hunter_flee_distance_mean,hunter_flee_distance_sd,hunter_repro_threshold_mean,hunter_repro_threshold_sd,rain_mm,runoff_mm,ponded_mm,soil_water_mm,drainage_mm,outflow_mm,soil_n,soil_p,soil_k,leached_n,outflow_p,waterlogged_frac,pipe_in_mm,pipe_out_edge_mm";
 
 /// Number of fields in a `series.csv` line.
-pub const SERIES_FIELDS: usize = 47;
+pub const SERIES_FIELDS: usize = 49;
+
+/// Number of storm-drain columns at the end of a `series.csv` line (shot G6).
+pub const PIPE_FIELDS: usize = 2;
 
 /// Number of water columns at the end of a `series.csv` line.
 pub const WATER_FIELDS: usize = 6;
@@ -77,6 +84,10 @@ struct WorldMeta<'a> {
     /// run that has no latitude from one written before the key, which is the distinction shot S2
     /// restored for `params` and this key keeps.
     latitude_deg: Option<f64>,
+    /// The storm drains, as the bundle's `pipes.json` lists them and in its order (shot G6): the
+    /// first number of a `pipe` event is an index into this list. Empty, not omitted, on a world
+    /// with none.
+    pipes: &'a [crate::bundle::Pipe],
 }
 
 impl<'a> WorldMeta<'a> {
@@ -90,6 +101,7 @@ impl<'a> WorldMeta<'a> {
             ground_depth: g.depth,
             media: g.media.iter().map(|m| m.name()).collect(),
             latitude_deg: bundle.and_then(|b| b.latitude_deg),
+            pipes: &sim.world.pipes,
         }
     }
 }
@@ -362,6 +374,7 @@ pub fn format_row(r: &StatsRow) -> String {
     for v in r.npk.as_array() {
         let _ = write!(line, ",{v:.4}");
     }
+    let _ = write!(line, ",{:.4},{:.4}", r.pipes.in_mm, r.pipes.out_edge_mm);
     line
 }
 
@@ -1170,9 +1183,9 @@ mod tests {
     /// skips it from the expectation too.
     #[test]
     fn meta_json_names_every_params_section() {
-        const SECTIONS: [&str; 20] = [
+        const SECTIONS: [&str; 21] = [
             "animals", "bundle", "climate", "cover", "disease", "fire", "grass", "grazer", "heredity", "hunter",
-            "hydro", "medium", "npk", "rain", "rng", "schedule", "season", "shrub", "tree", "world",
+            "hydro", "medium", "npk", "pipes", "rain", "rng", "schedule", "season", "shrub", "tree", "world",
         ];
         let dir = scratch_dir();
         run(Params::load_square(), 7, 100, 100, &[], &dir).unwrap();

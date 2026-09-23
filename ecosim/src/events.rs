@@ -15,6 +15,7 @@
 //! | `immigration` | grazer, hunter, tree | column | | immigrant id |
 //! | `storm` | | | | `<depth> <runoff> <outflow>`, three millimetre means separated by spaces |
 //! | `seed_drop` | reserved: never written yet | | | |
+//! | `pipe` | | inlet column | | `<pipe> <captured> <overflow> <n> <p>`: the pipe's index in `meta.json`'s `world.pipes`, the water it took and the water that reached its inlet and went on, in m³, and the nitrogen and phosphorus that went down it, in g |
 //!
 //! Recording is off unless `Sim::log_events` is set, and it never draws from the RNG or writes any
 //! other state, so a run is byte-identical with or without it apart from `events.csv`.
@@ -52,11 +53,14 @@ pub enum EventKind {
     Storm,
     /// Reserved for animal seed dispersal; never written yet.
     SeedDrop,
+    /// A storm drain's account of one storm (shot G6): one row per pipe per storm while
+    /// `pipes.capacity_scale` is above 0.
+    Pipe,
 }
 
 impl EventKind {
     /// Every kind, in declaration order.
-    pub const ALL: [EventKind; 10] = [
+    pub const ALL: [EventKind; 11] = [
         EventKind::Death,
         EventKind::Birth,
         EventKind::Ignition,
@@ -67,6 +71,7 @@ impl EventKind {
         EventKind::Immigration,
         EventKind::Storm,
         EventKind::SeedDrop,
+        EventKind::Pipe,
     ];
 
     /// The name written in the `kind` column.
@@ -82,6 +87,7 @@ impl EventKind {
             "immigration",
             "storm",
             "seed_drop",
+            "pipe",
         ][self as usize]
     }
 }
@@ -104,6 +110,9 @@ pub enum Detail {
     Id(u32),
     /// A `storm` row: rain depth, runoff and edge outflow this tick, world means in mm.
     Storm(f32, f32, f32),
+    /// A `pipe` row: the pipe's index, the water it captured and the water that overflowed its
+    /// inlet in m³, then the nitrogen and the phosphorus it carried in g.
+    Pipe(u32, f32, f32, f32, f32),
 }
 
 impl Detail {
@@ -122,6 +131,7 @@ impl std::fmt::Display for Detail {
             Detail::None => Ok(()),
             Detail::Id(v) => write!(f, "{v}"),
             Detail::Storm(d, r, o) => write!(f, "{d:.4} {r:.4} {o:.4}"),
+            Detail::Pipe(k, c, o, n, p) => write!(f, "{k} {c:.4} {o:.4} {n:.4} {p:.4}"),
         }
     }
 }
@@ -199,17 +209,16 @@ impl Event {
     }
 }
 
-/// Parse the `detail` column: empty, one whole number, or a storm's three numbers.
+/// Parse the `detail` column: empty, one whole number, a storm's three numbers or a pipe's five.
 fn parse_detail(s: &str, line: &str) -> Result<Detail, String> {
     let bad = || format!("events.csv: bad detail '{s}' in '{line}'");
-    let mut parts = s.split(' ');
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (None, ..) | (Some(""), ..) => Ok(Detail::None),
-        (Some(v), None, ..) => v.parse::<u32>().map(Detail::Id).map_err(|_| bad()),
-        (Some(d), Some(r), Some(o), None) => {
-            let f = |v: &str| v.parse::<f32>().map_err(|_| bad());
-            Ok(Detail::Storm(f(d)?, f(r)?, f(o)?))
-        }
+    let parts: Vec<&str> = s.split(' ').collect();
+    let f = |v: &str| v.parse::<f32>().map_err(|_| bad());
+    match parts[..] {
+        [""] => Ok(Detail::None),
+        [v] => v.parse::<u32>().map(Detail::Id).map_err(|_| bad()),
+        [d, r, o] => Ok(Detail::Storm(f(d)?, f(r)?, f(o)?)),
+        [k, c, o, n, p] => Ok(Detail::Pipe(k.parse::<u32>().map_err(|_| bad())?, f(c)?, f(o)?, f(n)?, f(p)?)),
         _ => Err(bad()),
     }
 }
@@ -561,6 +570,10 @@ mod tests {
                 r as f32 / 1e4,
                 o as f32 / 1e4
             )),
+            // A pipe row (shot G6): an index and four numbers at four decimals.
+            (any::<u32>(), 0u32..1_000_000, 0u32..1_000_000, 0u32..1_000_000, 0u32..1_000_000).prop_map(
+                |(k, c, o, n, p)| Detail::Pipe(k, c as f32 / 1e4, o as f32 / 1e4, n as f32 / 1e4, p as f32 / 1e4)
+            ),
         ];
         (any::<u32>(), kinds, species, (any::<u8>(), any::<u8>()), col, prop::sample::select(causes), detail).prop_map(
             |(tick, kind, species, patch, col, cause, detail)| Event { tick, kind, species, patch, col, cause, detail },
@@ -594,6 +607,13 @@ mod tests {
         e.write_line(&mut line);
         assert_eq!(line, "7,ignition,,7,7,,,,\n");
         assert_eq!(Event::parse(line.trim_end()), Ok(e));
+        let pipe =
+            Event { kind: EventKind::Pipe, col: Some((15, 136)), detail: Detail::Pipe(2, 1.5, 0.25, 0.0, 3.0), ..e };
+        let mut pl = String::new();
+        pipe.write_line(&mut pl);
+        assert_eq!(pl, "7,pipe,,7,7,15,136,,2 1.5000 0.2500 0.0000 3.0000\n");
+        assert_eq!(Event::parse(pl.trim_end()), Ok(pipe));
+        assert!(Event::parse("7,pipe,,7,7,1,1,,2 1.5 0.25 0.0").is_err(), "a pipe row has five numbers");
         for bad in
             ["7,ignition,,7,7,,,", "7,fire,,7,7,,,,", "7,death,cow,0,0,1,1,eaten,3", "7,death,grazer,256,0,1,1,eaten,3"]
         {

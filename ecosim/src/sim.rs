@@ -4,7 +4,7 @@ use crate::animals::{Animal, Kind, CAUSES};
 use crate::bundle::Bundle;
 use crate::events::Event;
 use crate::heredity::{trait_stats, TraitStats, Traits, TRAIT_CLAMP};
-use crate::hydro::{Hydro, Water};
+use crate::hydro::{Hydro, PipeRow, Water};
 use crate::npk::{Npk, NpkRow};
 use crate::params::Params;
 use crate::plants::PlantImport;
@@ -70,6 +70,8 @@ pub struct StatsRow {
     pub water: Water,
     /// The six nutrient columns (shot G5); all zero when the nutrient tier is off.
     pub npk: NpkRow,
+    /// The two storm-drain columns (shot G6); all zero on a world without pipes.
+    pub pipes: PipeRow,
 }
 
 /// Marks a column with no trunk in `Sim::trunk_at`.
@@ -179,7 +181,12 @@ impl Sim {
         if params.rng.stream != 0 {
             rng.set_stream(params.rng.stream);
         }
-        Ok(Sim::with_bundle(params, rng, world, bundle))
+        let (sim, import) = Sim::with_bundle(params, rng, world, bundle);
+        // A drain network that cannot drain is a load error, not a quiet run without pipes (shot G6).
+        if let Some(e) = sim.hydro.as_ref().and_then(|h| h.pipe_error.as_ref()) {
+            return Err(format!("{}: {e}", bundle.dir.display()));
+        }
+        Ok((sim, import))
     }
 
     /// A tick-0 sim on a given world, with `tree.initial_count` random trees and the initial
@@ -474,6 +481,7 @@ impl Sim {
             traits: [trait_stats(&self.grazers), trait_stats(&self.hunters)],
             water: self.hydro.as_ref().map(|h| h.water).unwrap_or_default(),
             npk: self.npk.as_ref().map(|n| n.row).unwrap_or_default(),
+            pipes: self.hydro.as_ref().map(|h| h.pipe_row).unwrap_or_default(),
         }
     }
 }

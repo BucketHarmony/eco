@@ -4,9 +4,9 @@
 use crate::animals::{Cause, CAUSES};
 use crate::bundle::{Ground, Medium, ECO_CELL_M};
 use crate::events::{deaths_per_tick, parse_events, EVENTS_FILE};
-use crate::hydro::Water;
+use crate::hydro::{PipeRow, Water};
 use crate::npk::{NpkRow, NPK_FIELDS};
-use crate::output::{snapshot_dir_name, SERIES_FIELDS, SERIES_HEADER, TRAIT_FIELDS, WATER_FIELDS};
+use crate::output::{snapshot_dir_name, PIPE_FIELDS, SERIES_FIELDS, SERIES_HEADER, TRAIT_FIELDS, WATER_FIELDS};
 use crate::sim::StatsRow;
 use std::collections::BTreeSet;
 use std::fs;
@@ -100,15 +100,16 @@ pub fn read_series_for_stats(run_dir: &Path) -> Result<Vec<StatsRow>, String> {
 /// Parse `series.csv` text. Sweeps parse their own in-memory CSV through this too, so a sweep cell
 /// is evaluated on exactly the values a run directory would hold.
 ///
-/// Runs written before the nutrient columns (shot G5), before the water columns (shot G4), before
+/// Runs written before the storm-drain columns (shot G6), before the nutrient columns (shot G5), before the water columns (shot G4), before
 /// the trait columns (shot 11) or before fire (shot 9) as well still parse, with the missing
 /// columns read as 0.
 pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
     let mut lines = text.lines();
     let header = lines.next().ok_or("unexpected header")?;
-    let nonutrient = SERIES_FIELDS - NPK_FIELDS;
+    let nopipe = SERIES_FIELDS - PIPE_FIELDS;
+    let nonutrient = nopipe - NPK_FIELDS;
     let dry = nonutrient - WATER_FIELDS;
-    let fields = [SERIES_FIELDS, nonutrient, dry, dry - TRAIT_FIELDS, dry - TRAIT_FIELDS - FIRE_FIELDS]
+    let fields = [SERIES_FIELDS, nopipe, nonutrient, dry, dry - TRAIT_FIELDS, dry - TRAIT_FIELDS - FIRE_FIELDS]
         .into_iter()
         .find(|&n| header_without(SERIES_FIELDS - n) == header)
         .ok_or("unexpected header")?;
@@ -157,7 +158,7 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                 } else {
                     Water::default()
                 },
-                npk: if fields == SERIES_FIELDS {
+                npk: if fields >= nopipe {
                     let mut v = [0.0f32; NPK_FIELDS];
                     for (k, w) in v.iter_mut().enumerate() {
                         *w = x(nonutrient + k)?;
@@ -165,6 +166,11 @@ pub fn parse_series(text: &str) -> Result<Vec<StatsRow>, String> {
                     NpkRow::from_array(v)
                 } else {
                     NpkRow::default()
+                },
+                pipes: if fields == SERIES_FIELDS {
+                    PipeRow { in_mm: x(nopipe)?, out_edge_mm: x(nopipe + 1)? }
+                } else {
+                    PipeRow::default()
                 },
             })
         })
@@ -1295,6 +1301,7 @@ mod tests {
                 total_burnt: 0,
                 traits: Default::default(),
                 water: Default::default(),
+                pipes: Default::default(),
             })
             .collect()
     }
@@ -1602,6 +1609,7 @@ mod tests {
                 total_burnt: 0,
                 traits: Default::default(),
                 water: Default::default(),
+                pipes: Default::default(),
             })
             .collect();
         Series {

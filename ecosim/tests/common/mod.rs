@@ -176,7 +176,10 @@ pub fn without_npk_and_water(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
 /// pre-G5 layout. The run still has to be made with `climate.decay_k` set back to its pre-G5 6.0:
 /// the tier's switch does not cover that, because the wrong decay rate was a fact about litter and
 /// not about nutrients (`ecosim/TUNING.md`, shot G5).
+///
+/// The two pipe columns shot G6 put after the nutrient six are cut first ([`without_pipes`]).
 pub fn without_npk(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    let bytes = without_pipes(name, bytes);
     match name.file_name().and_then(|n| n.to_str()) {
         Some("series.csv") => {
             let text = String::from_utf8(bytes).unwrap();
@@ -213,6 +216,32 @@ pub fn without_water(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
                     assert_eq!(water[0], "rain_mm", "series.csv header");
                 } else {
                     assert!(water.iter().all(|v| *v == "0.0000"), "water with the tier off: {line}");
+                }
+                out.push_str(&keep.join(","));
+                out.push('\n');
+            }
+            out.into_bytes()
+        }
+        _ => bytes,
+    }
+}
+
+/// A run-directory file of a run without storm drains as the pre-G6 ecosim wrote it: the two pipe
+/// columns cut from `series.csv`, each asserted to be 0. Nothing else changes: a world with no
+/// pipes, or `pipes.capacity_scale=0`, allocates nothing, logs no `pipe` event and keeps
+/// `state.bin` as it was.
+pub fn without_pipes(name: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    match name.file_name().and_then(|n| n.to_str()) {
+        Some("series.csv") => {
+            let text = String::from_utf8(bytes).unwrap();
+            let mut out = String::with_capacity(text.len());
+            for (i, line) in text.lines().enumerate() {
+                let f: Vec<&str> = line.split(',').collect();
+                let (keep, pipes) = f.split_at(f.len() - 2);
+                if i == 0 {
+                    assert_eq!(pipes[0], "pipe_in_mm", "series.csv header");
+                } else {
+                    assert!(pipes.iter().all(|v| *v == "0.0000"), "pipes with no drain: {line}");
                 }
                 out.push_str(&keep.join(","));
                 out.push('\n');

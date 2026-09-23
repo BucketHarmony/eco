@@ -32,6 +32,10 @@ pub struct Params {
     /// section).
     #[serde(default)]
     pub npk: NpkParams,
+    /// `[pipes]`. Always written to `meta.json`, even at its defaults (shot S2's rule, shot G6's
+    /// section).
+    #[serde(default)]
+    pub pipes: PipesParams,
     /// `[medium.*]`
     pub medium: MediaParams,
     /// `[season]`
@@ -341,6 +345,22 @@ impl Default for NpkParams {
             n_runoff_frac: 0.1,
             fire_n_volatilised: 0.9,
         }
+    }
+}
+
+/// Storm drains (shot G6): the scene's pipes as a working network.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipesParams {
+    /// Multiplier on every pipe's `capacity_m3h`. The shot's rate switch: 0 captures nothing,
+    /// routes no extra pass and logs no pipe event, and the run is byte-identical to one written
+    /// before the network existed apart from the two always-zero `series.csv` columns.
+    pub capacity_scale: f32,
+}
+
+impl Default for PipesParams {
+    fn default() -> Self {
+        PipesParams { capacity_scale: 1.0 }
     }
 }
 
